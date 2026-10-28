@@ -73,6 +73,9 @@ class SetupConfig:
     entry_mode: str = "next_open"
     retest_max_bars: int = 20
     retest_tolerance_atr: float = 0.0
+    trail_activate_r: float = 0.0
+    trail_atr_mult: float = 0.0
+    max_daily_loss_r: float = 0.0
 
 
 def _htf(df: pd.DataFrame, rule: str, market: str = "cn") -> pd.DataFrame:
@@ -232,7 +235,10 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
                         max_concurrent=cfg.max_concurrent,
                         entry_mode=cfg.entry_mode,
                         retest_max_bars=cfg.retest_max_bars,
-                        retest_tolerance_atr=cfg.retest_tolerance_atr)
+                        retest_tolerance_atr=cfg.retest_tolerance_atr,
+                        trail_activate_r=cfg.trail_activate_r,
+                        trail_atr_mult=cfg.trail_atr_mult,
+                        max_daily_loss_r=cfg.max_daily_loss_r)
     r = simulate_cisd(df, res2, sc, Path(path).stem)
     return r.trades, {"signals": len(sigs), **r.metrics}
 
@@ -263,6 +269,9 @@ def main() -> None:
     ap.add_argument("--entry-mode", choices=["next_open", "retest_key"], default="next_open")
     ap.add_argument("--retest-max-bars", type=int, default=20)
     ap.add_argument("--retest-tolerance-atr", type=float, default=0.0)
+    ap.add_argument("--trail-activate-r", type=float, default=0.0)
+    ap.add_argument("--trail-atr-mult", type=float, default=0.0)
+    ap.add_argument("--max-daily-loss-r", type=float, default=0.0)
     ap.add_argument("--min-disp-body", type=float, default=0.0)
     ap.add_argument("--min-disp-atr", type=float, default=0.0)
     ap.add_argument("--min-disp-multiple", type=float, default=0.0)
@@ -281,6 +290,9 @@ def main() -> None:
                       entry_mode=args.entry_mode,
                       retest_max_bars=args.retest_max_bars,
                       retest_tolerance_atr=args.retest_tolerance_atr,
+                      trail_activate_r=args.trail_activate_r,
+                      trail_atr_mult=args.trail_atr_mult,
+                      max_daily_loss_r=args.max_daily_loss_r,
                       min_disp_body_ratio=args.min_disp_body,
                       min_disp_atr=args.min_disp_atr,
                       min_disp_multiple=args.min_disp_multiple,

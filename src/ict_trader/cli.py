@@ -82,6 +82,9 @@ def _setup_config(args) -> SetupConfig:
         entry_mode=args.entry_mode,
         retest_max_bars=args.retest_max_bars,
         retest_tolerance_atr=args.retest_tolerance_atr,
+        trail_activate_r=args.trail_activate_r,
+        trail_atr_mult=args.trail_atr_mult,
+        max_daily_loss_r=args.max_daily_loss_r,
     )
 
 
@@ -146,6 +149,7 @@ def cmd_plan(args) -> None:
             "entry_reference": latest.level,
             "stop": latest.sl,
             "target": target,
+            "r_multiple": abs(target - latest.level) / max(abs(latest.level - latest.sl), 1e-12),
             "grade": latest.grade,
             "quality": latest.quality,
             "checks": latest.checks,
@@ -233,6 +237,12 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="enter at next open, or wait for a retest of the CISD key level")
     p.add_argument("--retest-max-bars", type=int, default=20)
     p.add_argument("--retest-tolerance-atr", type=float, default=0.0)
+    p.add_argument("--trail-activate-r", type=float, default=0.0,
+                   help="activate ATR trailing after this favourable R (0=off)")
+    p.add_argument("--trail-atr-mult", type=float, default=0.0,
+                   help="trailing distance in entry-bar ATR (0=off)")
+    p.add_argument("--max-daily-loss-r", type=float, default=0.0,
+                   help="stop new entries after this daily closed R loss (0=off)")
 
 
 def main(argv=None) -> None:

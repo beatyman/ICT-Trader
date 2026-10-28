@@ -136,6 +136,8 @@ Every filter is explicit and can be disabled to run an ablation:
 --sweep-reclaim-bars
 --entry-mode next_open|retest_key
 --target-mode fixed|liquidity|hybrid
+--trail-activate-r / --trail-atr-mult
+--max-daily-loss-r
 --min-setup-score
 --min-disp-body / --min-disp-atr / --min-disp-multiple
 --fvg-min-atr / --fvg-min-body
@@ -143,7 +145,8 @@ Every filter is explicit and can be disabled to run an ablation:
 
 The measured A/B results and their limitations are in
 [`docs/OPTIMIZATION.md`](docs/OPTIMIZATION.md). They are diagnostics, not a
-profitability claim.
+profitability claim. The ten reference repositories and the ideas accepted/rejected
+from each are reviewed in [`docs/REFERENCE_REVIEW.md`](docs/REFERENCE_REVIEW.md).
 
 ## Package layout
 

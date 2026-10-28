@@ -73,6 +73,34 @@ def test_retest_entry_not_filled_is_recorded():
     assert r.metrics["signals"] == 1
 
 
+def test_atr_trailing_exit():
+    df = frame([90, 95, 100, 102, 108, 112, 108, 104, 100])
+    c = CISD("bull", level=100, extreme=95, body_extreme=95, start=1, end=2,
+             sl=95, target=130, grade=4, checks={"sweep": True})
+    res = ICTResult(bars=df, cisds=[c], config=ICTConfig())
+    r = simulate_cisd(df, res, StrategyConfig(min_grade=0, min_confluence=0,
+                                              trail_activate_r=0.5,
+                                              trail_atr_mult=1.0,
+                                              max_bars=8), "test")
+    assert len(r.trades) == 1
+    t = r.trades[0]
+    assert t.reason == "trail"
+    assert t.exit > t.entry
+
+
+def test_daily_loss_gate_blocks_next_entry():
+    df = frame([100, 100, 100, 98, 97, 100, 100, 100])
+    c1 = CISD("bull", level=100, extreme=99, body_extreme=99, start=1, end=1,
+              sl=99, target=105, grade=4, checks={"sweep": True})
+    c2 = CISD("bull", level=100, extreme=96, body_extreme=96, start=4, end=4,
+              sl=96, target=110, grade=4, checks={"sweep": True})
+    res = ICTResult(bars=df, cisds=[c1, c2], config=ICTConfig())
+    r = simulate_cisd(df, res, StrategyConfig(min_grade=0, min_confluence=0,
+                                              max_daily_loss_r=1.0,
+                                              max_bars=3), "test")
+    assert len(r.trades) == 1
+    assert r.metrics["skipped_daily_loss"] == 1
+
 
 def test_a_share_t_plus_1_cannot_exit_same_day():
     # two sessions; entry on day 1, same-day stop must wait for day 2

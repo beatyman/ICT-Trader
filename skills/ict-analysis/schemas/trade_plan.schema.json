@@ -7,6 +7,8 @@
     "symbol": {"type": "string"},
     "as_of": {"type": "string"},
     "decision": {"enum": ["TRADE", "NO_TRADE"]},
+    "rejected": {"type": ["string", "null"]},
+    "entry_distance_atr": {"type": ["number", "null"]},
     "reason": {"type": ["string", "null"]},
     "key_levels": {
       "type": "object",
@@ -30,6 +32,7 @@
             "r_multiple": {"type": "number"},
             "grade": {"type": "integer"},
             "quality": {"type": "number"},
+            "entry_distance_atr": {"type": ["number", "null"]},
             "checks": {"type": "object", "additionalProperties": {"type": "boolean"}}
           }
         }

@@ -7,6 +7,9 @@ This change set is driven by the recurring themes in the ICT/SMC material review
 3. a plan must reject a signal whose entry has already run away;
 4. the backtest must report what it skipped, not only the trades it took.
 
+The ten external projects and the ideas accepted/rejected from each are summarised in
+[`REFERENCE_REVIEW.md`](REFERENCE_REVIEW.md).
+
 ## What changed
 
 ### 1. Multi-bar sweep / reclaim
@@ -64,13 +67,37 @@ was mixed elsewhere. It is available for research, not promoted as an improvemen
 
 ```text
 signals, skipped_busy, skipped_direction, skipped_grade, skipped_confluence,
-skipped_htf, skipped_risk, skipped_day_limit, skipped_gap, not_triggered
+skipped_htf, skipped_risk, skipped_day_limit, skipped_daily_loss, skipped_gap,
+not_triggered
 ```
 
 This makes execution failures visible and prevents “no trade” from being confused with
 “no signal”.
 
+### 6. Optional ATR trailing and daily loss gate
+
+Borrowed from the LGR / risk-manager reference implementations, but off by default:
+
+```text
+--trail-activate-r 1.5 --trail-atr-mult 1.0
+--max-daily-loss-r 2.0
+```
+
+- trailing only tightens the stop, never widens it;
+- `trail` exits are labelled separately from `sl`;
+- daily loss is measured on **closed R**, not floating P&L;
+- no default change until a separate A/B justifies it.
+
+### 7. Skill evidence contract
+
+`skills/ict-analysis/` now has `references/evidence_contract.md` and
+`scripts/validate_plan.py`. The skill must record provenance (`source`, `as_of`,
+timezone, verified/synthetic), classify evidence as observed/derived/interpretive/missing,
+and use one final state: `confirmed | developing | invalidated | no-trade`.
+`confirmed` requires closed-bar evidence and **net** RR >= 2.
+
 ## A/B basket (not a profitability claim)
+
 
 Eight datasets: CN 15m, HK 09988, HK 00700, BTC/ETH/SOL/FIL/TUT 12k bars.
 Default setup, long-only; CN uses T+1 and 5 bps sell tax.

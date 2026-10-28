@@ -1,6 +1,6 @@
 ---
 name: ict-analysis
-description: Analyze OHLCV data with the ICT Trader engine for key levels, liquidity sweeps, FVG/IFVG, order blocks, CISD, multi-timeframe alignment and a risk-defined trade card. Use when the user asks for ICT/SMC analysis, a trade plan, setup quality review, or backtest/walk-forward interpretation. Do not use for live order placement.
+description: Analyze OHLCV data with the ICT Trader engine for key levels, liquidity sweeps, FVG/IFVG, order blocks, CISD, multi-timeframe alignment and a risk-defined trade card. Use when the user asks for ICT/SMC analysis, a trade plan, setup quality review, or backtest/walk-forward interpretation. Do not use for live order placement or screenshot-only inference.
 license: MIT
 ---
 
@@ -52,6 +52,15 @@ Do not use for:
 7. **Risk first.** Every trade card must include stop, target, R:R and a
    position-size method.
 8. **Not financial advice.** State the research/education nature when relevant.
+9. **Record provenance.** Report source, `as_of`, timezone, bar count and whether
+   the data is verified or synthetic. A forming bar is not closed.
+10. **Classify evidence.** Tag every material statement as `observed`, `derived`,
+    `interpretive` or `missing`. Do not promote an interpretation to a fact.
+11. **Use one state.** `confirmed`, `developing`, `invalidated` or `no-trade`.
+    `confirmed` requires closed-bar evidence and **net** RR >= 2; a high quality
+    score alone is not confirmation.
+12. **Respect sample size.** Never optimize or claim an edge below 100 trades.
+    Report `sample_class` from the backtest and separate process errors from P&L.
 
 ## Required inputs
 
@@ -68,6 +77,25 @@ Recommended:
 - timestamps in one timezone, monotonic, no duplicate bars.
 
 For crypto, pass `--market crypto` so daily bars use UTC 00:00 close semantics.
+
+## Data and evidence contract
+
+Read [`references/evidence_contract.md`](references/evidence_contract.md) before
+issuing a trade card. Minimum provenance:
+
+```text
+source, as_of (last closed bar), timezone, bars, data_verified, synthetic
+```
+
+Rules:
+
+- If the last bar is still forming, drop it or ask for a closed-bar dataset.
+- If the CSV is a generated demo, set `synthetic: true`; never call it live evidence.
+- A screenshot is not numeric OHLCV. Refuse to infer levels from it.
+- Separate support, conflict and missing evidence. A conflict is not resolved by
+  picking the side you prefer.
+- `confirmed` is reserved for closed-bar evidence + net RR >= 2. Otherwise use
+  `developing`, `invalidated` or `no-trade`.
 
 ## Workflow
 
@@ -99,6 +127,18 @@ ict-trader plan \
 
 Read the JSON. Do not re-derive levels from the chart.
 
+Validate the card before presenting it:
+
+```bash
+python skills/ict-analysis/scripts/validate_plan.py output/trade_plan.json
+```
+
+The validator rejects a `TRADE` that is missing stop/target/R multiple, has
+`rejected != null`, or is already more than `0.5` ATR from entry.
+
+If `decision == "NO_TRADE"` and `rejected` is set, report that reason verbatim
+(for example `price_too_far_from_entry`); do not reinterpret it as a trade.
+
 ### 3. If `decision == "NO_TRADE"`
 
 Run:
@@ -129,14 +169,16 @@ direction
 level
 stop
 target
-R:R >= 1.5
+r_multiple >= 1.5 gross (net >= 2 before calling confirmed)
+entry_distance_atr <= 0.5
 setup.quality
 setup.grade
-sweep within 15 bars
+sweep within 15 bars (and reclaim_bars <= 3 by default)
 1D/4H scores
 ```
 
-Then produce a trade card.
+Then produce a trade card. If the plan is stale, say `no-trade`, not “wait for a
+better price” unless the user asked for a conditional plan.
 
 ### 5. Backtest or walk-forward questions
 
@@ -160,14 +202,26 @@ Return one JSON object followed by a short explanation.
 {
   "symbol": "SZ000858",
   "as_of": "2026-10-28T15:00:00",
+  "source": "Futu OpenD / 15m + 1D",
+  "data_verified": true,
+  "synthetic": false,
+  "state": "no-trade",
   "decision": "NO_TRADE",
   "reason": "1D score 2/3, close below cloud top",
+  "rejected": null,
+  "entry_distance_atr": null,
   "key_levels": {
     "above": [{"name": "BSL", "price": 73.39}],
     "below": [{"name": "SSL", "price": 70.6}]
   },
   "recent_sweeps": [],
-  "setup": null
+  "setup": null,
+  "evidence": {
+    "observed": ["last closed bar 2026-10-28 15:00"],
+    "derived": ["1D score 2/3"],
+    "interpretive": [],
+    "missing": ["no sweep in 15 bars"]
+  }
 }
 ```
 
@@ -175,6 +229,7 @@ For a trade:
 
 ```json
 {
+  "state": "developing",
   "decision": "TRADE",
   "setup": {
     "direction": "bull",
@@ -182,6 +237,7 @@ For a trade:
     "stop": 70.6,
     "target": 76.0,
     "r_multiple": 2.0,
+    "entry_distance_atr": 0.2,
     "grade": 4,
     "quality": 0.71,
     "checks": {"sweep": true, "pda": true, "volume": true}
@@ -189,9 +245,18 @@ For a trade:
   "risk": {
     "risk_pct": 1.0,
     "position_size": "risk_amount / (entry - stop)"
+  },
+  "evidence": {
+    "observed": ["sweep at bar 412", "CISD close at bar 415"],
+    "derived": ["gross RR 2.0", "entry distance 0.2 ATR"],
+    "interpretive": ["sell-side liquidity taken"],
+    "missing": ["net RR after fees unverified"]
   }
 }
 ```
+
+`state` is `confirmed` only when the evidence and net RR gates both pass;
+otherwise use `developing` or `no-trade`.
 
 If a field cannot be computed, use `null` and explain why.
 
@@ -217,7 +282,9 @@ If a field cannot be computed, use `null` and explain why.
 ## Supporting files
 
 - `references/ict_playbook.md` — definitions and setup logic
+- `references/evidence_contract.md` — provenance, evidence classes, state and sample gates
 - `schemas/trade_plan.schema.json` — output schema
 - `prompts/system.md` — role and tone
 - `scripts/analyze.py` — thin CLI wrapper
+- `scripts/validate_plan.py` — strict pre-flight check for a trade card
 - `../../examples/no_trade.json` / `trade_card.example.json` — output examples

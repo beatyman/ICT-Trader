@@ -54,6 +54,9 @@ class StrategyConfig:
     entry_mode: str = "next_open"   # next_open | retest_key
     retest_max_bars: int = 20       # bars allowed for a retest to fill
     retest_tolerance_atr: float = 0.0  # allow a wick this close to the key
+    trail_activate_r: float = 0.0     # activate ATR trail after this favourable R
+    trail_atr_mult: float = 0.0       # trail distance in entry-bar ATR
+    max_daily_loss_r: float = 0.0     # stop new entries after this daily R loss (0=off)
 
 
 @dataclass
@@ -119,6 +122,7 @@ def simulate_cisd(
     equity = 1.0
     eq_points: list[tuple[pd.Timestamp, float]] = [(dates.iloc[0], equity)]
     day_counts: dict[object, int] = {}
+    day_r: dict[object, float] = {}
     busy_until = -1
     atr = pd.Series(
         np.maximum.reduce([
@@ -136,6 +140,7 @@ def simulate_cisd(
         "skipped_htf": 0,
         "skipped_risk": 0,
         "skipped_day_limit": 0,
+        "skipped_daily_loss": 0,
         "skipped_gap": 0,
         "not_triggered": 0,
     }
@@ -207,6 +212,9 @@ def simulate_cisd(
             raw_entry = open_[entry_idx]
 
         day = dates.iloc[entry_idx].date()
+        if cfg.max_daily_loss_r > 0 and day_r.get(day, 0.0) <= -cfg.max_daily_loss_r:
+            stats["skipped_daily_loss"] += 1
+            continue
         if day_counts.get(day, 0) >= cfg.max_trades_per_day:
             stats["skipped_day_limit"] += 1
             continue
@@ -285,6 +293,11 @@ def simulate_cisd(
         mae_idx = entry_idx
         mfe_idx = entry_idx
         be_armed = False
+        trail_active = False
+        best_price = entry
+        atr_entry = float(atr[max(0, entry_idx - 1)]) if len(atr) else 0.0
+        if not np.isfinite(atr_entry) or atr_entry <= 0:
+            atr_entry = risk
         if exit_idx is None:
             end_idx = min(n - 1, entry_idx + cfg.max_bars)
             sl_current = c.sl
@@ -329,10 +342,12 @@ def simulate_cisd(
                     hit_sl = high[k] >= sl_current
                     hit_tp = low[k] <= tp
                 if hit_sl and hit_tp:
-                    exit_price, exit_idx, reason = sl_current, k, "sl"
+                    exit_price, exit_idx = sl_current, k
+                    reason = "trail" if trail_active and sl_current != c.sl else "sl"
                     break
                 if hit_sl:
-                    exit_price, exit_idx, reason = sl_current, k, "sl"
+                    exit_price, exit_idx = sl_current, k
+                    reason = "trail" if trail_active and sl_current != c.sl else "sl"
                     break
                 if hit_tp:
                     exit_price, exit_idx, reason = tp, k, "tp"
@@ -342,6 +357,24 @@ def simulate_cisd(
                     if moved >= cfg.breakeven_at_r * risk:
                         sl_current = entry
                         be_armed = True
+                if cfg.trail_atr_mult > 0 and atr_entry > 0:
+                    if c.direction == "bull":
+                        best_price = max(best_price, float(high[k]))
+                        moved = best_price - entry
+                    else:
+                        best_price = min(best_price, float(low[k]))
+                        moved = entry - best_price
+                    if moved >= max(cfg.trail_activate_r, 0.0) * risk:
+                        if c.direction == "bull":
+                            trail = best_price - cfg.trail_atr_mult * atr_entry
+                            if trail > sl_current:
+                                sl_current = trail
+                                trail_active = True
+                        else:
+                            trail = best_price + cfg.trail_atr_mult * atr_entry
+                            if trail < sl_current:
+                                sl_current = trail
+                                trail_active = True
             if exit_idx is None:
                 if cfg.t_plus_1 and first_exit_idx > end_idx:
                     exit_idx = min(first_exit_idx, n - 1)
@@ -359,6 +392,7 @@ def simulate_cisd(
         net = gross - (entry + exit_price) * (cfg.commission_bps / 10000.0) / 2 - tax
         r = net / risk
         equity *= (1 + cfg.risk_pct * r)
+        day_r[dates.iloc[exit_idx].date()] = day_r.get(dates.iloc[exit_idx].date(), 0.0) + r
         trades.append(Trade(
             symbol=symbol,
             direction=c.direction,
