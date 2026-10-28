@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from .cisd import CISD
-from .concepts import ICTConfig, analyze, load_csv
+from .concepts import ICTConfig, analyze, detect_fvgs, load_csv
 from .context import dealing_range, in_session, ote_from_signal
 from .pd_arrays import count_path_liquidity, near_arrays
 from .sweeps import nearest_key_target
@@ -89,6 +89,8 @@ class SetupConfig:
     ote_max: float = 0.79
     require_pda_array: bool = False
     pda_array_tol_atr: float = 0.75
+    htf_fvg: bool = True
+    htf_fvg_window: int = 15
     max_inducements: int = -1
     quality_profile: str = "standard"  # standard | high_value
     stack: str = "1d_4h_15m"  # 1d_4h_15m | 1d_1h_15m | 1d_15m | 4h_15m | 4h_1h_15m
@@ -155,6 +157,61 @@ def _tf_frame(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str
     return _htf(df, tf, market)
 
 
+def _raw_htf(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str) -> pd.DataFrame | None:
+    if tf == "1D" and market != "crypto":
+        if daily is None:
+            return None
+        h = daily.copy()
+        h["date"] = (pd.to_datetime(h["date"]).dt.normalize()
+                     + pd.Timedelta(hours=16 if market == "hk" else 15))
+        return h.sort_values("date")
+    if tf == "4h" and market == "cn":
+        return resample_cn_4h(df)
+    return resample_htf(df, tf)
+
+
+def _htf_fvg_zones(df: pd.DataFrame, daily: pd.DataFrame | None,
+                   cfg: SetupConfig) -> list[tuple[float, float, int, str, str]]:
+    """HTF FVG zones mapped to the first base bar that knows the zone."""
+    base_dates = pd.to_datetime(df["date"]).to_numpy()
+    fcfg = ICTConfig(show_fvg=True, displacement_filter=True,
+                     fvg_min_atr=cfg.fvg_min_atr, fvg_min_body=cfg.fvg_min_body)
+    zones: list[tuple[float, float, int, str, str]] = []
+    for tf in ("1h", "4h", "1D"):
+        h = _raw_htf(df, daily, tf, cfg.market)
+        if h is None or len(h) < 4:
+            continue
+        h = h.reset_index(drop=True)
+        hdates = pd.to_datetime(h["date"]).to_numpy()
+        for f in detect_fvgs(h, fcfg):
+            known = int(np.searchsorted(base_dates, hdates[f.created], side="left"))
+            if known >= len(df):
+                continue
+            top = float(f.top)
+            bot = float(f.bottom)
+            if top > bot:
+                zones.append((top, bot, known, f.direction, tf))
+    return zones
+
+
+def _htf_fvg_delivery(zones: list[tuple[float, float, int, str, str]],
+                      df: pd.DataFrame, start: int, end: int, direction: str,
+                      window: int) -> tuple[bool, str]:
+    low = df["low"].to_numpy(float)
+    high = df["high"].to_numpy(float)
+    lo = max(start, end - max(window, 1))
+    for top, bot, known, fdir, tf in zones:
+        if fdir != direction or known > end:
+            continue
+        a = max(lo, known)
+        if a > end:
+            continue
+        if np.any((low[a:end + 1] <= top) & (high[a:end + 1] >= bot)):
+            return True, tf
+    return False, ""
+
+
+
 def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 daily: pd.DataFrame | None = None) -> list[CISD]:
     cfg = apply_quality_profile(cfg)
@@ -171,6 +228,7 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     tr = np.maximum.reduce([high - low, np.abs(high - np.r_[np.nan, close[:-1]]),
                             np.abs(low - np.r_[np.nan, close[:-1]])])
     atr14 = pd.Series(tr).rolling(14, min_periods=1).mean().to_numpy()
+    htf_zones = _htf_fvg_zones(df, daily, cfg) if cfg.htf_fvg else []
     out: list[CISD] = []
     for c in result.cisds:
         t = c.end
@@ -279,6 +337,15 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             )
             if cfg.origin_filter != "any" and origin != cfg.origin_filter:
                 continue
+            htf_pda, htf_tf = _htf_fvg_delivery(
+                htf_zones, df, c.start, c.end, c.direction, cfg.htf_fvg_window
+            )
+            pda_source = (
+                "both" if htf_pda and c.checks.get("pda")
+                else "htf" if htf_pda
+                else "current" if c.checks.get("pda")
+                else "none"
+            )
             if cfg.require_sweep and not recent_sweeps:
                 continue
             sweep_strength = max((s.strength for s in recent_sweeps), default=0)
@@ -308,6 +375,9 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 "confirm_tf": spec.confirm_tf,
                 "cisd_swept": bool(c.checks.get("sweep")),
                 "cisd_pda": bool(c.checks.get("pda")),
+                "htf_pda": bool(htf_pda),
+                "htf_fvg_tf": htf_tf,
+                "pda_source": pda_source,
                 "origin": (
                     "both" if c.checks.get("sweep") and c.checks.get("pda")
                     else "sweep" if c.checks.get("sweep")

@@ -61,6 +61,11 @@ The 144 Pine-origin trades split into 84 FVG-only, 58 sweep+FVG and 2 sweep-only
 for later FVG signals, the actual filtered run has 90 trades (not 84). It is a research
 filter, not the default. See `docs/OPTIMIZATION.md` for the A/B and the hold-out caveat.
 
+HTF FVGs are now detected from 1H/4H/1D and recorded as `pda_source`:
+`both`, `current`, `htf` or `none`.  Pine uses HTF FVG as a PDA/grade input, not as an
+origin, so `htf`-only is normally 0.  The split showed no useful separation
+(82 both vs 8 current-only), so HTF FVG is not promoted to a filter.
+
 ## How to backtest a Pine strategy
 
 1. Export OHLCV in the Pine timeframe (or resample from 15m).

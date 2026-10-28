@@ -307,6 +307,26 @@ It is available as:
 This is a research filter, not the default. It also relaxes the sweep requirement by
 design: FVG delivery is the origin. If the goal is strictly "sweep first", do not use it.
 
+### HTF FVG vs current-TF FVG
+
+Each FVG-origin trade now records whether an HTF FVG (1H/4H/1D) was also in delivery:
+
+| PDA source | trades | win rate | weighted avg R | total R |
+|---|---:|---:|---:|---:|
+| current + HTF FVG | 82 | 48.8% | +0.237 | +19.46 |
+| current FVG only | 8 | 50.0% | +0.225 | +1.80 |
+| HTF FVG only | 0 | — | — | — |
+
+The split is **not** a useful separator: 82 of 90 FVG-origin trades already have an HTF
+FVG in delivery, and their expectancy is essentially the same as the 8 current-only
+trades.  There is no HTF-FVG-only origin because Pine's `validOrigin` uses the current
+TF FVG; the HTF FVG is a grade/PDA input, not an origin.  The 1D HTF subset is only 4
+trades (+1.15R average) and is not evidence.
+
+Conclusion: do not add an "HTF FVG only" filter.  If HTF FVG is used, it should be a
+grade input, not another origin layer.
+
+
 
 
 
