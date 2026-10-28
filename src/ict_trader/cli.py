@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from .concepts import ICTConfig, analyze, load_csv, plot, signals_frame
+from .concepts import ICTConfig, analyze, atr as atr_series, load_csv, plot, signals_frame
 from .setup import SetupConfig, build_setup, run_one
 from .walk_forward import purged_walk_forward
 
@@ -27,6 +27,7 @@ def _ict_config(args) -> ICTConfig:
         show_htf_cisd=not args.no_htf,
         show_sessions=not args.no_sessions,
         show_sweeps=not args.no_sweeps,
+        sweep_reclaim_bars=args.sweep_reclaim_bars,
         cisd_all=args.all_cisd,
         cisd_max=args.cisd_max,
         fvg_min_atr=args.fvg_min_atr,
@@ -65,6 +66,8 @@ def _setup_config(args) -> SetupConfig:
         min_4h_score=args.min_4h_score,
         min_15m_score=args.min_15m_score,
         require_sweep=not args.allow_no_sweep,
+        sweep_reclaim_bars=args.sweep_reclaim_bars,
+        target_mode=args.target_mode,
         min_setup_score=args.min_setup_score,
         min_disp_body_ratio=args.min_disp_body,
         min_disp_atr=args.min_disp_atr,
@@ -76,6 +79,9 @@ def _setup_config(args) -> SetupConfig:
         sell_tax_bps=args.sell_tax_bps,
         fvg_min_atr=args.fvg_min_atr,
         fvg_min_body=args.fvg_min_body,
+        entry_mode=args.entry_mode,
+        retest_max_bars=args.retest_max_bars,
+        retest_tolerance_atr=args.retest_tolerance_atr,
     )
 
 
@@ -84,7 +90,8 @@ def cmd_plan(args) -> None:
     daily = load_csv(args.daily_csv) if args.daily_csv else None
     ict = ICTConfig(mode="historical", show_sessions=False, show_htf_cisd=False,
                     cisd_all=True, cisd_min_grade=0,
-                    fvg_min_atr=args.fvg_min_atr, fvg_min_body=args.fvg_min_body)
+                    fvg_min_atr=args.fvg_min_atr, fvg_min_body=args.fvg_min_body,
+                    sweep_reclaim_bars=args.sweep_reclaim_bars)
     res = analyze(df, ict)
     sigs = build_setup(df, res, _setup_config(args), daily=daily)
     # A plan is actionable only if the setup is recent; a years-old signal is
@@ -92,12 +99,40 @@ def cmd_plan(args) -> None:
     max_age = args.max_age_bars
     recent = [s for s in sigs if len(df) - 1 - s.end <= max_age]
     latest = recent[-1] if recent else None
+    price = float(df["close"].iloc[-1])
+    last_atr = float(atr_series(df).iloc[-1])
+    if not (last_atr > 0):
+        last_atr = max(abs(price) * 0.005, 1e-9)
+
+    target = None
+    entry_distance_atr = None
+    rejected = None
+    if latest is not None:
+        risk = abs(latest.level - latest.sl)
+        target = latest.target or (
+            latest.level + (2 * risk if latest.direction == "bull" else -2 * risk)
+        )
+        entry_distance_atr = abs(price - latest.level) / last_atr
+        max_dist = args.max_entry_distance_atr * last_atr
+        if latest.direction == "bull":
+            price_ok = latest.sl < price < target
+        else:
+            price_ok = target < price < latest.sl
+        if not price_ok:
+            rejected = "price_outside_entry_risk"
+        elif abs(price - latest.level) > max_dist:
+            rejected = "price_too_far_from_entry"
+        if rejected:
+            latest = None
+
     card = {
         "symbol": args.symbol,
         "last_time": str(df["date"].iloc[-1]),
-        "last_close": float(df["close"].iloc[-1]),
+        "last_close": price,
         "decision": "TRADE" if latest else "NO_TRADE",
         "setup": None,
+        "rejected": rejected,
+        "entry_distance_atr": entry_distance_atr,
         "recent_sweeps": [
             {"direction": s.direction, "name": s.name, "level": s.level,
              "time": str(df["date"].iloc[s.reclaim_bar])}
@@ -105,19 +140,17 @@ def cmd_plan(args) -> None:
         ],
     }
     if latest is not None:
-        risk = abs(latest.level - latest.sl)
         card["setup"] = {
             "direction": latest.direction,
             "level": latest.level,
             "entry_reference": latest.level,
             "stop": latest.sl,
-            "target": latest.target or (
-                latest.level + (2 * risk if latest.direction == "bull" else -2 * risk)
-            ),
+            "target": target,
             "grade": latest.grade,
             "quality": latest.quality,
             "checks": latest.checks,
             "signal_time": str(df["date"].iloc[latest.end]),
+            "entry_distance_atr": entry_distance_atr,
         }
     _write_json(args.json_out, card)
     print(json.dumps(card, ensure_ascii=False, indent=2))
@@ -164,6 +197,7 @@ def _add_data_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-htf", action="store_true")
     p.add_argument("--no-sessions", action="store_true")
     p.add_argument("--no-sweeps", action="store_true")
+    p.add_argument("--sweep-reclaim-bars", type=int, default=3)
     p.add_argument("--fvg-min-atr", type=float, default=0.0)
     p.add_argument("--fvg-min-body", type=float, default=0.0)
 
@@ -180,6 +214,10 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
     p.add_argument("--min-4h-score", type=int, default=2)
     p.add_argument("--min-15m-score", type=int, default=0)
     p.add_argument("--allow-no-sweep", action="store_true")
+    p.add_argument("--sweep-reclaim-bars", type=int, default=3,
+                   help="bars allowed for price to close back through a swept level")
+    p.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid"], default="fixed",
+                   help="fixed R, nearest opposing liquidity pool, or liquidity with fixed fallback")
     p.add_argument("--min-setup-score", type=float, default=0.0)
     p.add_argument("--min-disp-body", type=float, default=0.0)
     p.add_argument("--min-disp-atr", type=float, default=0.0)
@@ -191,6 +229,10 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
     p.add_argument("--sell-tax-bps", type=float, default=5.0)
     p.add_argument("--fvg-min-atr", type=float, default=0.25)
     p.add_argument("--fvg-min-body", type=float, default=0.5)
+    p.add_argument("--entry-mode", choices=["next_open", "retest_key"], default="next_open",
+                   help="enter at next open, or wait for a retest of the CISD key level")
+    p.add_argument("--retest-max-bars", type=int, default=20)
+    p.add_argument("--retest-tolerance-atr", type=float, default=0.0)
 
 
 def main(argv=None) -> None:
@@ -205,6 +247,8 @@ def main(argv=None) -> None:
     _add_setup_args(p)
     p.add_argument("--max-age-bars", type=int, default=50,
                    help="only treat a setup this recent as actionable")
+    p.add_argument("--max-entry-distance-atr", type=float, default=0.5,
+                   help="reject a plan if price has already moved this far from entry")
     p.add_argument("--json-out", default="output/trade_plan.json")
     p.set_defaults(func=cmd_plan)
 

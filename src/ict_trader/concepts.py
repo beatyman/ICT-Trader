@@ -91,6 +91,7 @@ class ICTConfig:
     max_sessions: int = 2
     show_sweeps: bool = True
     sweep_window: int = 15
+    sweep_reclaim_bars: int = 3
     sweep_min_penetration_atr: float = 0.0
     max_key_levels: int = 10
     show_smt: bool = False
@@ -600,7 +601,9 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
     smts = detect_smt(df, smt_df, max_out=cfg.max_smt) if (cfg.show_smt and smt_df is not None) else []
     smt_bars = [(s.end, s.direction) for s in smts]
     key_levels = detect_key_levels(df, swings, sessions, liq)
-    sweeps = detect_sweeps(df, key_levels, min_penetration_atr=cfg.sweep_min_penetration_atr) if cfg.show_sweeps else []
+    sweeps = detect_sweeps(df, key_levels,
+                           min_penetration_atr=cfg.sweep_min_penetration_atr,
+                           reclaim_window=cfg.sweep_reclaim_bars) if cfg.show_sweeps else []
     sweep_bars = [(s.reclaim_bar, s.direction) for s in sweeps]
 
     cisds: list[CISD] = []
@@ -613,6 +616,7 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
             require_origin=cfg.cisd_require_origin,
             min_displacement_atr=cfg.cisd_min_displacement_atr,
             sweep_window=cfg.sweep_window,
+            sweep_reclaim_bars=cfg.sweep_reclaim_bars,
             lookback=500,
             hide_invalid=not cfg.cisd_all,
         )
@@ -693,6 +697,8 @@ def signals_frame(result: ICTResult) -> pd.DataFrame:
             "direction": s.direction,
             "price": s.level,
             "index": s.reclaim_bar,
+            "sweep_index": s.sweep_bar,
+            "reclaim_bars": s.reclaim_bars,
         })
     for k in result.key_levels:
         if k.swept or k.broken:

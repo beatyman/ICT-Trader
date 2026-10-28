@@ -45,6 +45,35 @@ def test_no_overlapping_trade():
     assert len(r.trades) == 1
 
 
+def test_retest_entry_fills_at_key():
+    df = frame([90, 95, 100, 102, 99, 105, 110, 112, 111, 110])
+    c = CISD("bull", level=100, extreme=95, body_extreme=95, start=1, end=2,
+             sl=95, target=110, grade=4, checks={"sweep": True})
+    res = ICTResult(bars=df, cisds=[c], config=ICTConfig())
+    r = simulate_cisd(df, res, StrategyConfig(min_grade=0, min_confluence=0,
+                                              entry_mode="retest_key",
+                                              retest_max_bars=5, max_bars=5), "test")
+    assert len(r.trades) == 1
+    t = r.trades[0]
+    assert t.entry_time == df.date.iloc[4]
+    assert 99.0 <= t.entry <= 100.01
+    assert r.metrics["not_triggered"] == 0
+
+
+def test_retest_entry_not_filled_is_recorded():
+    df = frame([90, 95, 100, 102, 108, 111, 112, 110, 109, 108])
+    c = CISD("bull", level=100, extreme=95, body_extreme=95, start=1, end=2,
+             sl=95, target=110, grade=4, checks={"sweep": True})
+    res = ICTResult(bars=df, cisds=[c], config=ICTConfig())
+    r = simulate_cisd(df, res, StrategyConfig(min_grade=0, min_confluence=0,
+                                              entry_mode="retest_key",
+                                              retest_max_bars=3, max_bars=5), "test")
+    assert len(r.trades) == 0
+    assert r.metrics["not_triggered"] == 1
+    assert r.metrics["signals"] == 1
+
+
+
 def test_a_share_t_plus_1_cannot_exit_same_day():
     # two sessions; entry on day 1, same-day stop must wait for day 2
     dates = pd.to_datetime([

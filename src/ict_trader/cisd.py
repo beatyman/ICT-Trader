@@ -35,6 +35,7 @@ class CISDConfig:
     proximity_atr: float = 0.75
     min_displacement_atr: float = 0.0
     sweep_window: int = 15
+    sweep_reclaim_bars: int = 3
     sl_mode: Literal["wick", "body"] = "wick"
     volume_mult: float = 1.2
     min_rr: float = 1.5
@@ -119,23 +120,37 @@ def _legs(df: pd.DataFrame) -> list[CISDLeg]:
 
 
 def _swept(levels: Iterable[tuple], start: int, end: int,
-           df: pd.DataFrame, bull: bool) -> bool:
+           df: pd.DataFrame, bull: bool, reclaim_window: int = 3) -> bool:
     """True if a sell-side (bull) / buy-side (bear) level was swept and reclaimed.
 
     A level tuple may be (price, kind) or (price, kind, known_at).  The latter
-    prevents using a swing/session level before it was confirmed.
+    prevents using a swing/session level before it was confirmed.  Reclaim may
+    occur on the penetration bar or within ``reclaim_window`` bars after it.
     """
     high = df["high"].to_numpy(float)
     low = df["low"].to_numpy(float)
     close = df["close"].to_numpy(float)
+    window = max(int(reclaim_window), 0)
     for item in levels:
         price, kind = float(item[0]), item[1]
         known = int(item[2]) if len(item) > 2 else 0
         for t in range(max(start, known), min(end + 1, len(df))):
-            if bull and kind == "L" and low[t] < price and close[t] > price:
-                return True
-            if not bull and kind == "H" and high[t] > price and close[t] < price:
-                return True
+            if bull and kind == "L" and low[t] < price:
+                if close[t] > price:
+                    return True
+                for k in range(t + 1, min(len(df), t + window + 1)):
+                    if k > end:
+                        break
+                    if close[k] > price:
+                        return True
+            if not bull and kind == "H" and high[t] > price:
+                if close[t] < price:
+                    return True
+                for k in range(t + 1, min(len(df), t + window + 1)):
+                    if k > end:
+                        break
+                    if close[k] < price:
+                        return True
     return False
 
 
@@ -355,10 +370,10 @@ def detect_cisd(
                 for b, d in sweep_list
             )
         else:
-            swept = _swept(levels, start, t, df, is_bull)
+            swept = _swept(levels, start, t, df, is_bull, cfg.sweep_reclaim_bars)
         pda = _fvg_delivery(zones, start, t, df, is_bull)
         vol_ok = bool(vol_sma[t] > 0 and volume[t] > vol_sma[t] * cfg.volume_mult)
-        sess_sweep = _swept(sess, start, t, df, is_bull)
+        sess_sweep = _swept(sess, start, t, df, is_bull, cfg.sweep_reclaim_bars)
         smt = any(
             (d == ("bull" if is_bull else "bear")) and abs(t - b) <= max(cfg.lookback, 12)
             for b, d in smt_list

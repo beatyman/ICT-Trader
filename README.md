@@ -70,7 +70,7 @@ Latest trade card:
 ict-trader plan \
   --csv examples/15m.csv \
   --daily-csv examples/daily.csv \
-  --market crypto \
+  --market cn \
   --json-out output/trade_plan.json
 ```
 
@@ -120,19 +120,30 @@ The package ships one setup, not a parameter buffet:
      + weighted score
 ```
 
-Entry: next 15m open.  
-Stop: CISD invalidation wick.  
-Target: fixed 2R by default.  
+Entry: next 15m open by default; `--entry-mode retest_key` waits for a retest of the CISD level.
+Stop: CISD invalidation wick.
+Target: fixed 2R by default; `--target-mode liquidity|hybrid` uses the nearest unswept opposing pool.
 Risk: fixed fractional, one position per symbol, optional max concurrency.
+
+Sweep/reclaim is multi-bar by default (`--sweep-reclaim-bars 3`): a level is not
+marked broken until the reclaim window expires. The plan card also rejects a setup
+whose entry is already more than `--max-entry-distance-atr` (default 0.5) away.
 
 Every filter is explicit and can be disabled to run an ablation:
 
 ```text
 --allow-no-sweep
+--sweep-reclaim-bars
+--entry-mode next_open|retest_key
+--target-mode fixed|liquidity|hybrid
 --min-setup-score
 --min-disp-body / --min-disp-atr / --min-disp-multiple
 --fvg-min-atr / --fvg-min-body
 ```
+
+The measured A/B results and their limitations are in
+[`docs/OPTIMIZATION.md`](docs/OPTIMIZATION.md). They are diagnostics, not a
+profitability claim.
 
 ## Package layout
 

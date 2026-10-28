@@ -2,10 +2,13 @@
 
 A sweep is a wick through a known level followed by a close back through it:
 
-  BSL/PDH/... : high > level and close < level  -> bearish sweep
-  SSL/PDL/... : low  < level and close > level  -> bullish sweep
+  BSL/PDH/... : high > level and a close back below it  -> bearish sweep
+  SSL/PDL/... : low  < level and a close back above it  -> bullish sweep
 
-A close through the level without reclaim is a *break*, not a sweep.
+The reclaim may occur on the penetration candle or within ``reclaim_window``
+bars.  A close through the level without a reclaim in that window is a
+*break*, not a sweep.  Events are known at the reclaim bar; no future data is
+used.
 
 Levels are only eligible after their confirmation time.  This avoids using a
 swing/session level before it was actually known.
@@ -48,6 +51,7 @@ class LiquiditySweep:
     penetration_atr: float = 0.0
     volume_ratio: float = 0.0
     strength: int = 1
+    reclaim_bars: int = 0
 
 
 def detect_key_levels(
@@ -112,55 +116,111 @@ def detect_sweeps(
     levels: Iterable[KeyLevel],
     min_penetration_atr: float = 0.0,
     volume_mult: float = 1.2,
+    reclaim_window: int = 3,
 ) -> list[LiquiditySweep]:
+    """Detect wick-through-and-reclaim events.
+
+    A sweep does not have to reclaim on the same candle.  The level is tested,
+    price closes beyond it, and if a close back through the level arrives
+    within ``reclaim_window`` bars, the whole event is a sweep.  If no reclaim
+    arrives in that window, the level is marked broken and is not reused.
+
+    All measurements use only bars up to the reclaim bar.  The event is
+    therefore known at ``reclaim_bar`` and cannot leak future prices into a
+    backtest.
+    """
     atr = _atr(df)
     volume = df["volume"].to_numpy(float) if "volume" in df else np.zeros(len(df))
     vol_sma = pd.Series(volume).rolling(20, min_periods=1).mean().to_numpy()
     high = df["high"].to_numpy(float)
     low = df["low"].to_numpy(float)
     close = df["close"].to_numpy(float)
+    n = len(df)
+    window = max(int(reclaim_window), 0)
     out: list[LiquiditySweep] = []
+
     for lv in levels:
-        for t in range(max(lv.known_at, 1), len(df)):
-            if lv.swept or lv.broken:
-                break
+        t = max(lv.known_at, 1)
+        while t < n and not lv.swept and not lv.broken:
             a = atr[t] if not np.isnan(atr[t]) and atr[t] > 0 else 1e-9
-            if lv.kind == "H":
-                if high[t] > lv.price:
-                    if close[t] < lv.price:
-                        pen = (high[t] - lv.price) / a
-                        if pen >= min_penetration_atr:
-                            vr = volume[t] / vol_sma[t] if vol_sma[t] > 0 else 0.0
-                            lv.swept = True
-                            lv.sweep_bar = t
-                            out.append(LiquiditySweep(
-                                direction="bear", name=lv.name, level=lv.price, kind="H",
-                                sweep_bar=t, reclaim_bar=t,
-                                sweep_price=float(high[t]), reclaim_close=float(close[t]),
-                                penetration_atr=float(pen), volume_ratio=float(vr),
-                                strength=1 + int(vr >= volume_mult) + int(pen >= 0.5),
-                            ))
-                    else:
-                        lv.broken = True
+            if lv.kind == "H" and high[t] > lv.price:
+                if close[t] < lv.price:
+                    reclaim = t
+                else:
+                    reclaim = None
+                    for k in range(t + 1, min(n, t + window + 1)):
+                        if close[k] < lv.price:
+                            reclaim = k
+                            break
+
+                if reclaim is None:
+                    lv.broken = True
                     break
-            else:
-                if low[t] < lv.price:
-                    if close[t] > lv.price:
-                        pen = (lv.price - low[t]) / a
-                        if pen >= min_penetration_atr:
-                            vr = volume[t] / vol_sma[t] if vol_sma[t] > 0 else 0.0
-                            lv.swept = True
-                            lv.sweep_bar = t
-                            out.append(LiquiditySweep(
-                                direction="bull", name=lv.name, level=lv.price, kind="L",
-                                sweep_bar=t, reclaim_bar=t,
-                                sweep_price=float(low[t]), reclaim_close=float(close[t]),
-                                penetration_atr=float(pen), volume_ratio=float(vr),
-                                strength=1 + int(vr >= volume_mult) + int(pen >= 0.5),
-                            ))
-                    else:
-                        lv.broken = True
+
+                extreme = float(np.max(high[t:reclaim + 1]))
+                pen = (extreme - lv.price) / a
+                if pen < min_penetration_atr:
+                    # The wick was too shallow to qualify; keep watching the
+                    # level rather than treating it as a sweep or a break.
+                    t += 1
+                    continue
+
+                vr = max(
+                    (volume[k] / vol_sma[k] if vol_sma[k] > 0 else 0.0)
+                    for k in range(t, reclaim + 1)
+                )
+                rb = max(0, reclaim - t)
+                lv.swept = True
+                lv.sweep_bar = t
+                out.append(LiquiditySweep(
+                    direction="bear", name=lv.name, level=lv.price, kind="H",
+                    sweep_bar=t, reclaim_bar=reclaim,
+                    sweep_price=extreme, reclaim_close=float(close[reclaim]),
+                    penetration_atr=float(pen), volume_ratio=float(vr),
+                    strength=1 + int(vr >= volume_mult) + int(pen >= 0.5) + int(rb <= 1),
+                    reclaim_bars=rb,
+                ))
+                break
+
+            if lv.kind == "L" and low[t] < lv.price:
+                if close[t] > lv.price:
+                    reclaim = t
+                else:
+                    reclaim = None
+                    for k in range(t + 1, min(n, t + window + 1)):
+                        if close[k] > lv.price:
+                            reclaim = k
+                            break
+
+                if reclaim is None:
+                    lv.broken = True
                     break
+
+                extreme = float(np.min(low[t:reclaim + 1]))
+                pen = (lv.price - extreme) / a
+                if pen < min_penetration_atr:
+                    t += 1
+                    continue
+
+                vr = max(
+                    (volume[k] / vol_sma[k] if vol_sma[k] > 0 else 0.0)
+                    for k in range(t, reclaim + 1)
+                )
+                rb = max(0, reclaim - t)
+                lv.swept = True
+                lv.sweep_bar = t
+                out.append(LiquiditySweep(
+                    direction="bull", name=lv.name, level=lv.price, kind="L",
+                    sweep_bar=t, reclaim_bar=reclaim,
+                    sweep_price=extreme, reclaim_close=float(close[reclaim]),
+                    penetration_atr=float(pen), volume_ratio=float(vr),
+                    strength=1 + int(vr >= volume_mult) + int(pen >= 0.5) + int(rb <= 1),
+                    reclaim_bars=rb,
+                ))
+                break
+
+            t += 1
+
     out.sort(key=lambda s: s.reclaim_bar)
     # collapse duplicate levels hit by the same bar
     uniq: dict[tuple[int, str, str], LiquiditySweep] = {}

@@ -30,6 +30,27 @@ def test_break_is_not_sweep():
     assert levels[0].broken
 
 
+def test_multibar_reclaim_is_sweep():
+    # First close above 100 is not a break if price closes back below within
+    # the allowed reclaim window.  The sweep is known only at the reclaim bar.
+    df = bars([99, 101, 100.8, 100.2], [98, 99.5, 99.2, 98.8], [98.5, 100.8, 99.4, 98.9])
+    levels = [KeyLevel("BSL", 100.0, "H", known_at=0)]
+    sweeps = detect_sweeps(df, levels, reclaim_window=2)
+    assert len(sweeps) == 1
+    s = sweeps[0]
+    assert s.sweep_bar == 1 and s.reclaim_bar == 2
+    assert s.reclaim_bars == 1
+    assert levels[0].swept and not levels[0].broken
+
+
+def test_break_after_reclaim_window():
+    df = bars([99, 101, 102, 103, 104], [98, 100, 101, 102, 103], [98.5, 101, 102, 103, 104])
+    levels = [KeyLevel("BSL", 100.0, "H", known_at=0)]
+    sweeps = detect_sweeps(df, levels, reclaim_window=2)
+    assert sweeps == []
+    assert levels[0].broken
+
+
 def test_ssl_sweep_and_nearest_target():
     df = bars([101, 100, 101], [100, 98, 100.5], [100.5, 99.5, 101.0])
     levels = [KeyLevel("SSL", 99.0, "L", known_at=0)]

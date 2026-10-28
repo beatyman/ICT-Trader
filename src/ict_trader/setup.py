@@ -6,8 +6,10 @@
         + recent liquidity sweep
         + PDA and displacement quality
 
-Entry is the next 15m open; stop is the CISD invalidation wick; target is
-fixed R (measured targets were too unstable in the earlier tests).
+Entry is the next 15m open by default; `entry_mode="retest_key"` waits for a
+retest of the CISD key level.  Stop is the CISD invalidation wick; target is
+fixed R by default, with optional liquidity-pool targeting.  A sweep may reclaim
+within a small window instead of only on its penetration candle.
 
 The goal is one setup that can be repeated and reviewed, not a parameter
 search contest.
@@ -50,7 +52,9 @@ class SetupConfig:
     use_score: bool = True
     require_sweep: bool = True
     sweep_window: int = 15
+    sweep_reclaim_bars: int = 3
     use_key_targets: bool = False
+    target_mode: str = "fixed"  # fixed | liquidity | hybrid
     min_target_rr: float = 2.0
     min_disp_body_ratio: float = 0.0
     min_disp_atr: float = 0.0
@@ -66,6 +70,9 @@ class SetupConfig:
     sell_tax_bps: float = 5.0
     risk_pct: float = 0.01
     max_concurrent: int = 5
+    entry_mode: str = "next_open"
+    retest_max_bars: int = 20
+    retest_tolerance_atr: float = 0.0
 
 
 def _htf(df: pd.DataFrame, rule: str, market: str = "cn") -> pd.DataFrame:
@@ -191,7 +198,10 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             if quality < cfg.min_setup_score:
                 continue
             target = None
-            if cfg.use_key_targets:
+            mode = cfg.target_mode
+            if cfg.use_key_targets and mode == "fixed":
+                mode = "hybrid"
+            if mode in {"liquidity", "hybrid"}:
                 levels = [k for k in result.key_levels
                           if k.known_at <= t and not k.swept and not k.broken]
                 tgt = nearest_key_target(levels, c.level, c.direction == "bull")
@@ -199,6 +209,8 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 if tgt is not None and risk > 0:
                     if abs(tgt - c.level) / risk >= cfg.min_target_rr:
                         target = tgt
+                if target is None and mode == "liquidity":
+                    continue
             out.append(replace(c, target=target, quality=quality, quality_parts=quality_parts))
     return out
 
@@ -208,7 +220,8 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
     daily = load_csv(daily_path) if daily_path else None
     ict_cfg = ICTConfig(mode="historical", show_sessions=False, show_htf_cisd=False,
                         cisd_all=True, cisd_min_grade=0,
-                        fvg_min_atr=cfg.fvg_min_atr, fvg_min_body=cfg.fvg_min_body)
+                        fvg_min_atr=cfg.fvg_min_atr, fvg_min_body=cfg.fvg_min_body,
+                        sweep_reclaim_bars=cfg.sweep_reclaim_bars)
     res = analyze(df, ict_cfg)
     sigs = build_setup(df, res, cfg, daily=daily)
     res2 = replace(res, cisds=sigs)
@@ -216,7 +229,10 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
                         allow_short=cfg.allow_short, risk_pct=cfg.risk_pct,
                         breakeven_at_r=cfg.breakeven_at_r,
                         t_plus_1=cfg.t_plus_1, sell_tax_bps=cfg.sell_tax_bps,
-                        max_concurrent=cfg.max_concurrent)
+                        max_concurrent=cfg.max_concurrent,
+                        entry_mode=cfg.entry_mode,
+                        retest_max_bars=cfg.retest_max_bars,
+                        retest_tolerance_atr=cfg.retest_tolerance_atr)
     r = simulate_cisd(df, res2, sc, Path(path).stem)
     return r.trades, {"signals": len(sigs), **r.metrics}
 
@@ -241,7 +257,12 @@ def main() -> None:
     ap.add_argument("--min-15m-score", type=int, default=1)
     ap.add_argument("--strict", action="store_true", help="require every enabled check (AND)")
     ap.add_argument("--allow-no-sweep", action="store_true")
+    ap.add_argument("--sweep-reclaim-bars", type=int, default=3)
     ap.add_argument("--use-key-targets", action="store_true")
+    ap.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid"], default="fixed")
+    ap.add_argument("--entry-mode", choices=["next_open", "retest_key"], default="next_open")
+    ap.add_argument("--retest-max-bars", type=int, default=20)
+    ap.add_argument("--retest-tolerance-atr", type=float, default=0.0)
     ap.add_argument("--min-disp-body", type=float, default=0.0)
     ap.add_argument("--min-disp-atr", type=float, default=0.0)
     ap.add_argument("--min-disp-multiple", type=float, default=0.0)
@@ -254,7 +275,12 @@ def main() -> None:
                       min_1d_score=args.min_1d_score, min_4h_score=args.min_4h_score,
                       min_15m_score=args.min_15m_score, use_score=not args.strict,
                       require_sweep=not args.allow_no_sweep,
+                      sweep_reclaim_bars=args.sweep_reclaim_bars,
                       use_key_targets=args.use_key_targets,
+                      target_mode=args.target_mode,
+                      entry_mode=args.entry_mode,
+                      retest_max_bars=args.retest_max_bars,
+                      retest_tolerance_atr=args.retest_tolerance_atr,
                       min_disp_body_ratio=args.min_disp_body,
                       min_disp_atr=args.min_disp_atr,
                       min_disp_multiple=args.min_disp_multiple,

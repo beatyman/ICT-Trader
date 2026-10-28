@@ -27,7 +27,8 @@ def test_analyze_and_signals():
     assert result.config is cfg
 
     sig = signals_frame(result)
-    assert list(sig.columns) == ["date", "type", "direction", "price", "index"]
+    assert list(sig.columns) == ["date", "type", "direction", "price", "index",
+                                 "sweep_index", "reclaim_bars"]
     assert len(sig) > 0
     assert set(sig["direction"]).issubset({"bull", "bear"})
 
