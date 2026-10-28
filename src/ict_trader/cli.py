@@ -173,7 +173,7 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
         p.add_argument("--csv", required=True)
         p.add_argument("--daily-csv", default=None)
         p.add_argument("--symbol", default="UNKNOWN")
-    p.add_argument("--market", choices=["cn", "crypto", "other"], default="cn")
+    p.add_argument("--market", choices=["cn", "hk", "crypto", "other"], default="cn")
     p.add_argument("--min-grade", type=int, default=3)
     p.add_argument("--min-confluence", type=int, default=2)
     p.add_argument("--min-1d-score", type=int, default=3)
@@ -227,3 +227,4 @@ def main(argv=None) -> None:
 
 if __name__ == "__main__":
     main()
+

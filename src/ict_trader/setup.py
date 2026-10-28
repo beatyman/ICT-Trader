@@ -26,7 +26,7 @@ from .cisd import CISD
 from .concepts import ICTConfig, analyze, load_csv
 from .sweeps import nearest_key_target
 from .strategy import StrategyConfig, simulate_cisd
-from .indicators import align_htf, ichimoku, macd, resample_cn_4h, resample_htf
+from .indicators import add_indicators, align_htf, ichimoku, macd, resample_cn_4h, resample_htf
 from .quality import measure_displacement, score_setup
 
 
@@ -74,8 +74,10 @@ def _htf(df: pd.DataFrame, rule: str, market: str = "cn") -> pd.DataFrame:
                              "macd", "macd_signal", "macd_hist"])
 
 
-def _daily_htf(base: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
-    h = resample_htf(daily, "1D")
+def _daily_htf(base: pd.DataFrame, daily: pd.DataFrame, close_hour: int = 15) -> pd.DataFrame:
+    d = daily.copy()
+    d["date"] = pd.to_datetime(d["date"]).dt.normalize() + pd.Timedelta(hours=close_hour)
+    h = add_indicators(d)
     return align_htf(base, h, ["close", "tenkan", "kijun", "span_a", "span_b", "cloud_top", "cloud_bottom",
                                "macd", "macd_signal", "macd_hist"])
 
@@ -87,7 +89,8 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
         # the current, still-open daily candle.
         d1 = _htf(df, "1D", cfg.market)
     else:
-        d1 = _daily_htf(df, daily) if daily is not None else _htf(df, "1D", cfg.market)
+        close_hour = 16 if cfg.market == "hk" else 15
+        d1 = _daily_htf(df, daily, close_hour) if daily is not None else _htf(df, "1D", cfg.market)
     h4 = _htf(df, "4h", cfg.market)
     i15 = ichimoku(df)
     m15 = macd(df)
@@ -222,7 +225,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", required=True)
     ap.add_argument("--daily-csv", default=None)
-    ap.add_argument("--market", choices=["cn", "crypto", "other"], default="cn")
+    ap.add_argument("--market", choices=["cn", "hk", "crypto", "other"], default="cn")
     ap.add_argument("--out", default="output/ict/setup_trades.csv")
     ap.add_argument("--metrics", default="output/ict/setup_metrics.json")
     ap.add_argument("--rr", type=float, default=2.0)
@@ -266,4 +269,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

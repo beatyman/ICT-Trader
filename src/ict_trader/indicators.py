@@ -40,7 +40,8 @@ def macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> p
     return pd.DataFrame({"macd": line, "signal": sig, "hist": hist}, index=df.index)
 
 
-def _add_indicators(out: pd.DataFrame) -> pd.DataFrame:
+def add_indicators(out: pd.DataFrame) -> pd.DataFrame:
+    """Add Ichimoku/MACD columns to an OHLCV frame."""
     i = ichimoku(out)
     out = out.copy()
     out["tenkan"] = i["tenkan"].to_numpy()
@@ -55,6 +56,10 @@ def _add_indicators(out: pd.DataFrame) -> pd.DataFrame:
     out["macd_signal"] = m["signal"].to_numpy()
     out["macd_hist"] = m["hist"].to_numpy()
     return out
+
+
+# Backward-compatible internal name.
+_add_indicators = add_indicators
 
 
 def resample_htf(df: pd.DataFrame, rule: str) -> pd.DataFrame:
