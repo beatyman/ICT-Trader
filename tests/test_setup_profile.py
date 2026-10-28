@@ -1,4 +1,4 @@
-from ict_trader.setup import SetupConfig, apply_quality_profile
+from ict_trader.setup import SetupConfig, apply_quality_profile, run_one
 
 
 def test_high_value_profile_is_stricter():
@@ -12,3 +12,14 @@ def test_high_value_profile_is_stricter():
 def test_standard_profile_does_not_override_explicit_values():
     cfg = apply_quality_profile(SetupConfig(quality_profile="standard", min_grade=2))
     assert cfg.min_grade == 2
+
+
+def test_alternate_timeframe_stacks_run():
+    for stack in ("1d_15m", "4h_15m"):
+        trades, metrics = run_one(
+            "examples/15m.csv",
+            SetupConfig(market="cn", stack=stack, t_plus_1=True),
+            daily_path="examples/daily.csv",
+        )
+        assert "trades" in metrics
+        assert metrics["trades"] == len(trades)

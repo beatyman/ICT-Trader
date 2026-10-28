@@ -90,6 +90,7 @@ class SetupConfig:
     pda_array_tol_atr: float = 0.75
     max_inducements: int = -1
     quality_profile: str = "standard"  # standard | high_value
+    stack: str = "1d_4h_15m"  # 1d_4h_15m | 1d_1h_15m | 1d_15m | 4h_15m | 4h_1h_15m
 
 
 def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
@@ -124,17 +125,41 @@ def _daily_htf(base: pd.DataFrame, daily: pd.DataFrame, close_hour: int = 15) ->
                                "macd", "macd_signal", "macd_hist"])
 
 
+@dataclass(frozen=True)
+class StackSpec:
+    bias_tf: str
+    confirm_tf: str | None
+    min_bias: int
+    min_confirm: int
+
+
+def _stack_spec(cfg: SetupConfig) -> StackSpec:
+    """Resolve the named multi-timeframe stack without hard-coding 1D/4H."""
+    stacks = {
+        "1d_4h_15m": StackSpec("1D", "4h", cfg.min_1d_score, cfg.min_4h_score),
+        "1d_1h_15m": StackSpec("1D", "1h", cfg.min_1d_score, cfg.min_4h_score),
+        "1d_15m": StackSpec("1D", None, cfg.min_1d_score, 0),
+        "4h_15m": StackSpec("4h", None, cfg.min_4h_score, 0),
+        "4h_1h_15m": StackSpec("4h", "1h", cfg.min_4h_score, cfg.min_4h_score),
+    }
+    return stacks.get(cfg.stack, stacks["1d_4h_15m"])
+
+
+def _tf_frame(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str) -> pd.DataFrame:
+    if tf == "1D":
+        if market == "crypto":
+            return _htf(df, "1D", market)
+        close_hour = 16 if market == "hk" else 15
+        return _daily_htf(df, daily, close_hour) if daily is not None else _htf(df, "1D", market)
+    return _htf(df, tf, market)
+
+
 def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 daily: pd.DataFrame | None = None) -> list[CISD]:
     cfg = apply_quality_profile(cfg)
-    if cfg.market == "crypto":
-        # Crypto daily closes at 00:00 UTC; a 15m-resampled 1D avoids using
-        # the current, still-open daily candle.
-        d1 = _htf(df, "1D", cfg.market)
-    else:
-        close_hour = 16 if cfg.market == "hk" else 15
-        d1 = _daily_htf(df, daily, close_hour) if daily is not None else _htf(df, "1D", cfg.market)
-    h4 = _htf(df, "4h", cfg.market)
+    spec = _stack_spec(cfg)
+    d1 = _tf_frame(df, daily, spec.bias_tf, cfg.market)
+    h4 = _tf_frame(df, daily, spec.confirm_tf, cfg.market) if spec.confirm_tf else None
     i15 = ichimoku(df)
     m15 = macd(df)
     close = df["close"].to_numpy(float)
@@ -176,10 +201,10 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             continue
 
         row1 = d1.iloc[t]
-        row4 = h4.iloc[t]
+        row4 = h4.iloc[t] if h4 is not None else None
         if row1[["tenkan", "kijun", "span_a", "span_b", "macd", "macd_signal"]].isna().any():
             continue
-        if row4[["close", "tenkan", "kijun", "span_a", "span_b", "macd", "macd_signal"]].isna().any():
+        if row4 is not None and row4[["close", "tenkan", "kijun", "span_a", "span_b", "macd", "macd_signal"]].isna().any():
             continue
         if i15.iloc[t][["tenkan", "kijun", "span_a", "span_b"]].isna().any():
             continue
@@ -193,12 +218,13 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             if cfg.require_1d_macd:
                 d1_checks.append(row1["macd"] > row1["macd_signal"])
             h4_checks = []
-            if cfg.require_4h_cloud:
-                h4_checks.append(row4["close"] > max(row4["span_a"], row4["span_b"]))
-            if cfg.require_4h_tk:
-                h4_checks.append(row4["tenkan"] > row4["kijun"])
-            if cfg.require_4h_macd:
-                h4_checks.append(row4["macd"] > row4["macd_signal"])
+            if row4 is not None:
+                if cfg.require_4h_cloud:
+                    h4_checks.append(row4["close"] > max(row4["span_a"], row4["span_b"]))
+                if cfg.require_4h_tk:
+                    h4_checks.append(row4["tenkan"] > row4["kijun"])
+                if cfg.require_4h_macd:
+                    h4_checks.append(row4["macd"] > row4["macd_signal"])
             m15_checks = []
             if cfg.require_15m_cloud:
                 m15_checks.append(close[t] > max(i15["span_a"].iloc[t], i15["span_b"].iloc[t]))
@@ -215,12 +241,13 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             if cfg.require_1d_macd:
                 d1_checks.append(row1["macd"] < row1["macd_signal"])
             h4_checks = []
-            if cfg.require_4h_cloud:
-                h4_checks.append(row4["close"] < min(row4["span_a"], row4["span_b"]))
-            if cfg.require_4h_tk:
-                h4_checks.append(row4["tenkan"] < row4["kijun"])
-            if cfg.require_4h_macd:
-                h4_checks.append(row4["macd"] < row4["macd_signal"])
+            if row4 is not None:
+                if cfg.require_4h_cloud:
+                    h4_checks.append(row4["close"] < min(row4["span_a"], row4["span_b"]))
+                if cfg.require_4h_tk:
+                    h4_checks.append(row4["tenkan"] < row4["kijun"])
+                if cfg.require_4h_macd:
+                    h4_checks.append(row4["macd"] < row4["macd_signal"])
             m15_checks = []
             if cfg.require_15m_cloud:
                 m15_checks.append(close[t] < min(i15["span_a"].iloc[t], i15["span_b"].iloc[t]))
@@ -236,7 +263,7 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 return sum(bool(x) for x in checks) >= min(min_score, len(checks))
             return all(checks)
 
-        if passed(d1_checks, cfg.min_1d_score) and passed(h4_checks, cfg.min_4h_score) and passed(m15_checks, cfg.min_15m_score):
+        if passed(d1_checks, spec.min_bias) and passed(h4_checks, spec.min_confirm) and passed(m15_checks, cfg.min_15m_score):
             recent_sweeps = [
                 s for s in result.sweeps
                 if s.direction == c.direction and 0 <= t - s.reclaim_bar <= cfg.sweep_window
@@ -265,6 +292,9 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 continue
             best_sweep = max(recent_sweeps, key=lambda s: s.strength) if recent_sweeps else None
             quality_parts.update({
+                "stack": cfg.stack,
+                "bias_tf": spec.bias_tf,
+                "confirm_tf": spec.confirm_tf,
                 "d1_score": sum(bool(x) for x in d1_checks),
                 "h4_score": sum(bool(x) for x in h4_checks),
                 "m15_score": sum(bool(x) for x in m15_checks),
@@ -370,6 +400,8 @@ def main() -> None:
     ap.add_argument("--require-pda-array", action="store_true")
     ap.add_argument("--max-inducements", type=int, default=-1)
     ap.add_argument("--quality-profile", choices=["standard", "high_value"], default="standard")
+    ap.add_argument("--stack", choices=["1d_4h_15m", "1d_1h_15m", "1d_15m", "4h_15m", "4h_1h_15m"],
+                    default="1d_4h_15m")
     ap.add_argument("--min-disp-body", type=float, default=0.0)
     ap.add_argument("--min-disp-atr", type=float, default=0.0)
     ap.add_argument("--min-disp-multiple", type=float, default=0.0)
@@ -398,6 +430,7 @@ def main() -> None:
                       require_pda_array=args.require_pda_array,
                       max_inducements=args.max_inducements,
                       quality_profile=args.quality_profile,
+                      stack=args.stack,
                       min_disp_body_ratio=args.min_disp_body,
                       min_disp_atr=args.min_disp_atr,
                       min_disp_multiple=args.min_disp_multiple,

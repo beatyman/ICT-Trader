@@ -225,6 +225,35 @@ In-sample profile result (8 datasets):
 The 30-trade profile is below the 100-trade gate. The chronological 0.65 hold-out was
 negative, so the higher win rate is not evidence of a durable edge.
 
+## Timeframe-stack A/B
+
+The setup can now be run as `1d_4h_15m` (old default), `1d_1h_15m`, `1d_15m`,
+`4h_15m` or `4h_1h_15m`.  8 datasets, long-only, 2R from actual fill:
+
+| stack | trades | win rate | weighted avg R | total R |
+|---|---:|---:|---:|---:|
+| `1d_1h_15m` | 65 | 36.9% | **-0.068** | -4.45 |
+| `1d_15m` | 183 | 38.8% | -0.078 | -14.36 |
+| `1d_4h_15m` | 91 | 35.2% | -0.120 | -10.90 |
+| `4h_15m` | 221 | 32.6% | -0.230 | -50.86 |
+| `4h_1h_15m` | 96 | 32.3% | -0.244 | -23.45 |
+
+The 4H confirmation layer was the worst of the tested stacks on this basket. 1D+1H
+had the best weighted average R, while 1D+15m had far more samples and a similar
+expectancy.
+
+Chronological 60/40 hold-out:
+
+```text
+1d_1h_15m:  train -0.06 / test -0.09
+1d_15m:     train -0.06 / test -0.11
+1d_4h_15m:  train +0.01 / test -0.31
+```
+
+None is profitable out of sample. The stack option is therefore retained for research;
+the default remains `1d_4h_15m` until a 100+ trade, walk-forward result supports a change.
+
+
 ## Next candidates (not implemented)
 
 

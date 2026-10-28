@@ -94,6 +94,7 @@ def _setup_config(args) -> SetupConfig:
         require_pda_array=args.require_pda_array,
         max_inducements=args.max_inducements,
         quality_profile=args.quality_profile,
+        stack=args.stack,
     )
 
 
@@ -283,6 +284,8 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="reject if more minor swings lie between entry and target (-1=off)")
     p.add_argument("--quality-profile", choices=["standard", "high_value"], default="standard",
                    help="opt-in stricter displacement/grade/confluence profile")
+    p.add_argument("--stack", choices=["1d_4h_15m", "1d_1h_15m", "1d_15m", "4h_15m", "4h_1h_15m"],
+                   default="1d_4h_15m", help="multi-timeframe stack to test")
 
 
 def main(argv=None) -> None:
