@@ -384,6 +384,7 @@ def main() -> None:
     ap.add_argument("--min-15m-score", type=int, default=1)
     ap.add_argument("--strict", action="store_true", help="require every enabled check (AND)")
     ap.add_argument("--allow-no-sweep", action="store_true")
+    ap.add_argument("--origin-mode", choices=["strict_sweep", "pine"], default="strict_sweep")
     ap.add_argument("--sweep-reclaim-bars", type=int, default=3)
     ap.add_argument("--use-key-targets", action="store_true")
     ap.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid"], default="fixed")
@@ -414,7 +415,7 @@ def main() -> None:
                       t_plus_1=args.t_plus_1, sell_tax_bps=args.sell_tax_bps,
                       min_1d_score=args.min_1d_score, min_4h_score=args.min_4h_score,
                       min_15m_score=args.min_15m_score, use_score=not args.strict,
-                      require_sweep=not args.allow_no_sweep,
+                      require_sweep=not args.allow_no_sweep and args.origin_mode != "pine",
                       sweep_reclaim_bars=args.sweep_reclaim_bars,
                       use_key_targets=args.use_key_targets,
                       target_mode=args.target_mode,

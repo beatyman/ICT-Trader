@@ -395,7 +395,7 @@ def detect_cisd(
             "targets": target_ok,
             "smt": smt,
         }
-        origin_ok = swept or pda or smt
+        origin_ok = swept or pda  # Pine: valid origin is sweep or FVG delivery; SMT only grades
         g = _grade(enabled, hits)
         disp_ok = bool(np.isnan(atr[t]) or atr[t] <= 0 or abs(close[t] - level) >= atr[t] * cfg.min_displacement_atr)
 

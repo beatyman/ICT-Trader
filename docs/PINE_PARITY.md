@@ -30,6 +30,32 @@ model. It therefore cannot produce an RR by itself.
 - Pine's MSS/BOS is a close-through-pivot event; it does not require a sweep. Our
   `SetupConfig` can require a sweep independently.
 
+## Origin semantics
+
+Pine's `validLongOrigin()` is:
+
+```text
+(sweep OR current-TF FVG delivery) AND grade filter
+```
+
+It does **not** allow an SMT alone as an origin; SMT is one of the grade checks.
+Our `cisd.py` now uses the same origin rule:
+
+```python
+origin_ok = swept or pda
+```
+
+The default strategy is stricter than Pine because `SetupConfig.require_sweep=True`
+also requires a recent sweep in `build_setup`. To test the Pine origin:
+
+```bash
+ict-trader backtest ... --origin-mode pine --stack 1d_1h_15m
+```
+
+`--origin-mode pine` is equivalent to `--allow-no-sweep` but states the intent.
+It still requires either a sweep or an FVG delivery inside the CISD; it is not a
+"sweep is optional for every setup" switch.
+
 ## How to backtest a Pine strategy
 
 1. Export OHLCV in the Pine timeframe (or resample from 15m).

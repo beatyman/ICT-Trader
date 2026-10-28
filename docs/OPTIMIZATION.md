@@ -253,6 +253,31 @@ Chronological 60/40 hold-out:
 None is profitable out of sample. The stack option is therefore retained for research;
 the default remains `1d_4h_15m` until a 100+ trade, walk-forward result supports a change.
 
+## Pine origin mode: sweep_only vs sweep_or_fvg
+
+The 1D+1H+15m stack, 8 datasets, 2R from actual fill:
+
+| origin | trades | win rate | weighted avg R | total R |
+|---|---:|---:|---:|---:|
+| strict sweep (`--origin-mode strict_sweep`) | 65 | 36.9% | -0.068 | -4.45 |
+| Pine `sweep or FVG` (`--origin-mode pine`) | 144 | 44.4% | **+0.110** | +15.88 |
+
+Pine's `validLongOrigin()` allows a current-TF FVG delivery to substitute for a sweep.
+That is the most plausible source of the higher-RR behaviour: it roughly doubles the
+sample and improves the in-sample expectancy.
+
+Chronological 60/40 hold-out:
+
+```text
+strict sweep:  test -0.09
+Pine origin:   test -0.05
+```
+
+The Pine origin mode is therefore a **research option**, not the default. It is not a
+proven edge, and in the hold-out it is still negative. The default keeps the stricter
+"liquidity sweep first" rule because that is the stated core of the strategy.
+
+
 
 ## Next candidates (not implemented)
 
