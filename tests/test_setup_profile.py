@@ -23,3 +23,13 @@ def test_alternate_timeframe_stacks_run():
         )
         assert "trades" in metrics
         assert metrics["trades"] == len(trades)
+
+
+def test_fvg_origin_filter_only_keeps_fvg_origin():
+    trades, _ = run_one(
+        "examples/15m.csv",
+        SetupConfig(market="cn", stack="1d_1h_15m", t_plus_1=True,
+                    origin_filter="fvg", require_sweep=True),
+        daily_path="examples/daily.csv",
+    )
+    assert all(t.features.get("origin") == "fvg" for t in trades)

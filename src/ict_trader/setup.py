@@ -53,6 +53,7 @@ class SetupConfig:
     min_15m_score: int = 1
     use_score: bool = True
     require_sweep: bool = True
+    origin_filter: str = "any"  # any | both | sweep | fvg
     sweep_window: int = 15
     sweep_reclaim_bars: int = 3
     use_key_targets: bool = False
@@ -157,6 +158,8 @@ def _tf_frame(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str
 def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 daily: pd.DataFrame | None = None) -> list[CISD]:
     cfg = apply_quality_profile(cfg)
+    if cfg.origin_filter == "fvg" and cfg.require_sweep:
+        cfg = replace(cfg, require_sweep=False)
     spec = _stack_spec(cfg)
     d1 = _tf_frame(df, daily, spec.bias_tf, cfg.market)
     h4 = _tf_frame(df, daily, spec.confirm_tf, cfg.market) if spec.confirm_tf else None
@@ -268,6 +271,14 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 s for s in result.sweeps
                 if s.direction == c.direction and 0 <= t - s.reclaim_bar <= cfg.sweep_window
             ]
+            origin = (
+                "both" if c.checks.get("sweep") and c.checks.get("pda")
+                else "sweep" if c.checks.get("sweep")
+                else "fvg" if c.checks.get("pda")
+                else "none"
+            )
+            if cfg.origin_filter != "any" and origin != cfg.origin_filter:
+                continue
             if cfg.require_sweep and not recent_sweeps:
                 continue
             sweep_strength = max((s.strength for s in recent_sweeps), default=0)
@@ -295,6 +306,14 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 "stack": cfg.stack,
                 "bias_tf": spec.bias_tf,
                 "confirm_tf": spec.confirm_tf,
+                "cisd_swept": bool(c.checks.get("sweep")),
+                "cisd_pda": bool(c.checks.get("pda")),
+                "origin": (
+                    "both" if c.checks.get("sweep") and c.checks.get("pda")
+                    else "sweep" if c.checks.get("sweep")
+                    else "fvg" if c.checks.get("pda")
+                    else "none"
+                ),
                 "d1_score": sum(bool(x) for x in d1_checks),
                 "h4_score": sum(bool(x) for x in h4_checks),
                 "m15_score": sum(bool(x) for x in m15_checks),
@@ -385,6 +404,7 @@ def main() -> None:
     ap.add_argument("--strict", action="store_true", help="require every enabled check (AND)")
     ap.add_argument("--allow-no-sweep", action="store_true")
     ap.add_argument("--origin-mode", choices=["strict_sweep", "pine"], default="strict_sweep")
+    ap.add_argument("--origin-filter", choices=["any", "both", "sweep", "fvg"], default="any")
     ap.add_argument("--sweep-reclaim-bars", type=int, default=3)
     ap.add_argument("--use-key-targets", action="store_true")
     ap.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid"], default="fixed")
@@ -415,7 +435,8 @@ def main() -> None:
                       t_plus_1=args.t_plus_1, sell_tax_bps=args.sell_tax_bps,
                       min_1d_score=args.min_1d_score, min_4h_score=args.min_4h_score,
                       min_15m_score=args.min_15m_score, use_score=not args.strict,
-                      require_sweep=not args.allow_no_sweep and args.origin_mode != "pine",
+                      require_sweep=not args.allow_no_sweep and args.origin_mode != "pine" and args.origin_filter != "fvg",
+                      origin_filter=args.origin_filter,
                       sweep_reclaim_bars=args.sweep_reclaim_bars,
                       use_key_targets=args.use_key_targets,
                       target_mode=args.target_mode,

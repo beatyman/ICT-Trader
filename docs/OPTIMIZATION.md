@@ -277,6 +277,37 @@ The Pine origin mode is therefore a **research option**, not the default. It is 
 proven edge, and in the hold-out it is still negative. The default keeps the stricter
 "liquidity sweep first" rule because that is the stated core of the strategy.
 
+### Where the Pine-origin return actually comes from
+
+Splitting the unfiltered Pine-origin trades by the CISD checklist gives 84 FVG-only,
+58 sweep+FVG and 2 sweep-only.  Running the actual `--origin-filter fvg` portfolio
+(which frees capacity for later FVG signals) gives 90 trades:
+
+| origin filter | trades | win rate | weighted avg R | total R |
+|---|---:|---:|---:|---:|
+| none (sweep or FVG) | 144 | 44.4% | +0.110 | +15.88 |
+| `fvg` | 90 | 48.9% | **+0.236** | +21.26 |
+
+So the positive in-sample result is almost entirely **FVG delivery**, not the
+sweep+FVG combination. Chronological 60/40 hold-out of the FVG-only portfolio:
+
+```text
+train: 54 trades, 55.6%, +0.423R
+test:  36 trades, 38.9%, -0.044R
+```
+
+The earlier 84-trade subset happened to be +0.02R in hold-out; the capacity-adjusted
+90-trade portfolio is negative. Do not treat either 34–36 trade hold-out as proof.
+It is available as:
+
+```bash
+--origin-filter fvg
+```
+
+This is a research filter, not the default. It also relaxes the sweep requirement by
+design: FVG delivery is the origin. If the goal is strictly "sweep first", do not use it.
+
+
 
 
 ## Next candidates (not implemented)

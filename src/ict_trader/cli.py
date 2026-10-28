@@ -67,7 +67,8 @@ def _setup_config(args) -> SetupConfig:
         min_1d_score=args.min_1d_score,
         min_4h_score=args.min_4h_score,
         min_15m_score=args.min_15m_score,
-        require_sweep=not args.allow_no_sweep and args.origin_mode != "pine",
+        require_sweep=not args.allow_no_sweep and args.origin_mode != "pine" and args.origin_filter != "fvg",
+        origin_filter=args.origin_filter,
         sweep_reclaim_bars=args.sweep_reclaim_bars,
         target_mode=args.target_mode,
         min_setup_score=args.min_setup_score,
@@ -247,6 +248,8 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
     p.add_argument("--allow-no-sweep", action="store_true")
     p.add_argument("--origin-mode", choices=["strict_sweep", "pine"], default="strict_sweep",
                    help="pine allows a CISD origin from sweep or FVG delivery (Pine validOrigin)")
+    p.add_argument("--origin-filter", choices=["any", "both", "sweep", "fvg"], default="any",
+                   help="research filter on the CISD origin mixture")
     p.add_argument("--sweep-reclaim-bars", type=int, default=3,
                    help="bars allowed for price to close back through a swept level")
     p.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid"], default="fixed",

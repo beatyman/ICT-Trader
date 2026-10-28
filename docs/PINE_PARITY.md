@@ -56,6 +56,11 @@ ict-trader backtest ... --origin-mode pine --stack 1d_1h_15m
 It still requires either a sweep or an FVG delivery inside the CISD; it is not a
 "sweep is optional for every setup" switch.
 
+The 144 Pine-origin trades split into 84 FVG-only, 58 sweep+FVG and 2 sweep-only.
+`--origin-filter fvg` keeps the FVG-only origin; because it frees portfolio capacity
+for later FVG signals, the actual filtered run has 90 trades (not 84). It is a research
+filter, not the default. See `docs/OPTIMIZATION.md` for the A/B and the hold-out caveat.
+
 ## How to backtest a Pine strategy
 
 1. Export OHLCV in the Pine timeframe (or resample from 15m).
