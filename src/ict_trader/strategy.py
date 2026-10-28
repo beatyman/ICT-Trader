@@ -31,6 +31,20 @@ import pandas as pd
 from .concepts import ICTConfig, ICTResult, analyze, fetch_futu, load_csv
 
 
+def net_rr(entry: float, stop: float, target: float, direction: str,
+           commission_bps: float = 5.0, slippage_bps: float = 2.0,
+           sell_tax_bps: float = 0.0) -> tuple[float, float]:
+    """Return (gross_RR, net_RR) after both-side commission/slippage and sell tax."""
+    risk = abs(float(entry) - float(stop))
+    if risk <= 0:
+        return 0.0, 0.0
+    reward = abs(float(target) - float(entry))
+    entry_cost = abs(float(entry)) * (float(commission_bps) + float(slippage_bps)) / 10_000
+    exit_cost = abs(float(target)) * (float(commission_bps) + float(slippage_bps)
+                                      + float(sell_tax_bps)) / 10_000
+    return reward / risk, (reward - entry_cost - exit_cost) / risk
+
+
 @dataclass
 class StrategyConfig:
     risk_pct: float = 0.01          # fraction of equity risked per trade

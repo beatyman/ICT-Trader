@@ -15,8 +15,10 @@
     "direction": "bull",
     "entry_reference": 71.21,
     "stop": 70.6,
-    "target": 76.0,
-    "r_multiple": 2.0,
+    "target": 76.5,
+    "r_multiple": 8.67,
+    "gross_rr": 8.67,
+    "net_rr": 8.62,
     "grade": 4,
     "quality": 0.71,
     "checks": {"sweep": true, "pda": true, "volume": true}

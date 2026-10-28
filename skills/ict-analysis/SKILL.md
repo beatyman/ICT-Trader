@@ -134,7 +134,24 @@ python skills/ict-analysis/scripts/validate_plan.py output/trade_plan.json
 ```
 
 The validator rejects a `TRADE` that is missing stop/target/R multiple, has
-`rejected != null`, or is already more than `0.5` ATR from entry.
+`rejected != null`, is already more than `0.5` ATR from entry, or has
+`net_rr < 2.0`.
+
+For a production-style review, use the strict gate:
+
+```bash
+ict-trader plan \
+  --csv data/15m.csv \
+  --daily-csv data/daily.csv \
+  --market hk \
+  --stack 1d_1h_15m \
+  --target-mode dol \
+  --session-gate hk \
+  --strict-audit \
+  --json-out output/trade_plan.json
+```
+
+`--strict-audit` requires a Kill Zone, DOL target, sweep origin and net RR.
 
 If `decision == "NO_TRADE"` and `rejected` is set, report that reason verbatim
 (for example `price_too_far_from_entry`); do not reinterpret it as a trade.
@@ -290,6 +307,9 @@ For a trade:
 
 `state` is `confirmed` only when the evidence and net RR gates both pass;
 otherwise use `developing` or `no-trade`.
+
+Every `TRADE` card must expose `gross_rr`, `net_rr` and `cost_model`; a missing
+`net_rr` is treated as unverified, not as a pass.
 
 If a field cannot be computed, use `null` and explain why.
 

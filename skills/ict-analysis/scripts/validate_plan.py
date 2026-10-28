@@ -49,10 +49,13 @@ def validate(card: dict, max_entry_distance_atr: float = 0.5) -> list[str]:
     for key in ("direction", "entry_reference", "stop", "target", "r_multiple"):
         if key not in setup:
             errors.append(f"setup.{key} is required")
+    for key in ("gross_rr", "net_rr"):
+        if key not in setup:
+            errors.append(f"setup.{key} is required for a TRADE")
     direction = setup.get("direction")
     if direction not in {"bull", "bear"}:
         errors.append("setup.direction must be bull or bear")
-    for key in ("entry_reference", "stop", "target", "r_multiple"):
+    for key in ("entry_reference", "stop", "target", "r_multiple", "gross_rr", "net_rr"):
         if key in setup and not _finite(setup[key]):
             errors.append(f"setup.{key} must be finite")
     if errors:
@@ -62,12 +65,15 @@ def validate(card: dict, max_entry_distance_atr: float = 0.5) -> list[str]:
     stop = float(setup["stop"])
     target = float(setup["target"])
     rr = float(setup["r_multiple"])
+    net = float(setup["net_rr"])
     if direction == "bull" and not (stop < entry < target):
         errors.append("bull setup must satisfy stop < entry < target")
     if direction == "bear" and not (target < entry < stop):
         errors.append("bear setup must satisfy target < entry < stop")
     if rr < 1.5:
         errors.append(f"gross R multiple {rr:.2f} is below 1.5")
+    if net < 2.0:
+        errors.append(f"net RR {net:.2f} is below 2.0")
     dist = card.get("entry_distance_atr")
     if dist is not None and _finite(dist) and float(dist) > max_entry_distance_atr:
         errors.append(

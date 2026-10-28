@@ -10,6 +10,18 @@
     "rejected": {"type": ["string", "null"]},
     "entry_distance_atr": {"type": ["number", "null"]},
     "reason": {"type": ["string", "null"]},
+    "session_gate": {"type": "string"},
+    "strict_audit": {"type": "boolean"},
+    "gross_rr": {"type": ["number", "null"]},
+    "net_rr": {"type": ["number", "null"]},
+    "cost_model": {
+      "type": "object",
+      "properties": {
+        "commission_bps": {"type": "number"},
+        "slippage_bps": {"type": "number"},
+        "sell_tax_bps": {"type": "number"}
+      }
+    },
     "key_levels": {
       "type": "object",
       "properties": {
@@ -23,13 +35,23 @@
         {"type": "null"},
         {
           "type": "object",
-          "required": ["direction", "entry_reference", "stop", "target", "r_multiple"],
+          "required": ["direction", "entry_reference", "stop", "target", "r_multiple", "gross_rr", "net_rr"],
           "properties": {
             "direction": {"enum": ["bull", "bear"]},
             "entry_reference": {"type": "number"},
             "stop": {"type": "number"},
             "target": {"type": "number"},
             "r_multiple": {"type": "number"},
+            "gross_rr": {"type": "number"},
+            "net_rr": {"type": "number"},
+            "cost_model": {
+              "type": "object",
+              "properties": {
+                "commission_bps": {"type": "number"},
+                "slippage_bps": {"type": "number"},
+                "sell_tax_bps": {"type": "number"}
+              }
+            },
             "grade": {"type": "integer"},
             "quality": {"type": "number"},
             "entry_distance_atr": {"type": ["number", "null"]},

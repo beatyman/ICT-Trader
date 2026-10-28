@@ -44,9 +44,31 @@ def test_trade_card_rejects_stale_entry():
             "stop": 95,
             "target": 110,
             "r_multiple": 2.0,
+            "gross_rr": 2.0,
+            "net_rr": 1.9,
             "entry_distance_atr": 1.2,
         },
         "recent_sweeps": [{"direction": "bull", "name": "SSL", "level": 100}],
     }
     errors = validate_plan.validate(card)
     assert any("stale" in e for e in errors)
+
+
+def test_trade_card_rejects_net_rr_below_two():
+    card = {
+        "symbol": "TEST",
+        "last_time": "2026-10-28 15:00:00",
+        "decision": "TRADE",
+        "setup": {
+            "direction": "bull",
+            "entry_reference": 100,
+            "stop": 95,
+            "target": 110.5,
+            "r_multiple": 2.1,
+            "gross_rr": 2.1,
+            "net_rr": 1.9,
+        },
+        "recent_sweeps": [{"direction": "bull", "name": "SSL", "level": 100}],
+    }
+    errors = validate_plan.validate(card)
+    assert any("net RR" in e for e in errors)

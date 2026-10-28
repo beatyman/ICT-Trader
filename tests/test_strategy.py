@@ -3,7 +3,7 @@ import pandas as pd
 
 from ict_trader.cisd import CISD
 from ict_trader.concepts import ICTConfig, ICTResult
-from ict_trader.strategy import StrategyConfig, simulate_cisd
+from ict_trader.strategy import StrategyConfig, net_rr, simulate_cisd
 
 
 def frame(prices):
@@ -72,6 +72,14 @@ def test_retest_entry_not_filled_is_recorded():
     assert len(r.trades) == 0
     assert r.metrics["not_triggered"] == 1
     assert r.metrics["signals"] == 1
+
+
+def test_net_rr_deducts_costs():
+    gross, net = net_rr(100, 95, 110, "bull", commission_bps=5, slippage_bps=2,
+                        sell_tax_bps=10)
+    assert abs(gross - 2.0) < 1e-9
+    assert net < gross
+    assert net > 1.0
 
 
 def test_low_measured_target_falls_back_to_two_r():

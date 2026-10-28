@@ -12,6 +12,7 @@ import pandas as pd
 from .concepts import ICTConfig, analyze, atr as atr_series, load_csv, plot, signals_frame
 from .journal import COLUMNS, process_summary
 from .setup import SetupConfig, build_setup, run_one
+from .strategy import net_rr
 from .walk_forward import purged_walk_forward
 
 
@@ -126,26 +127,52 @@ def cmd_plan(args) -> None:
     target = None
     entry_distance_atr = None
     rejected = None
+    gross_rr = None
+    net_rr_value = None
     if latest is not None:
         risk = abs(latest.level - latest.sl)
-        measured_ok = (latest.target is not None
-                       and risk > 0
-                       and abs(latest.target - latest.level) / risk >= args.min_target_rr)
-        target = latest.target if measured_ok else (
-            latest.level + (2 * risk if latest.direction == "bull" else -2 * risk)
-        )
+        if args.target_mode == "dol":
+            target = latest.target
+            if target is None:
+                rejected = "no_dol_target"
+        else:
+            measured_ok = (latest.target is not None
+                           and risk > 0
+                           and abs(latest.target - latest.level) / risk >= args.min_target_rr)
+            target = latest.target if measured_ok else (
+                latest.level + (2 * risk if latest.direction == "bull" else -2 * risk)
+            )
         entry_distance_atr = abs(price - latest.level) / last_atr
         max_dist = args.max_entry_distance_atr * last_atr
-        if latest.direction == "bull":
-            price_ok = latest.sl < price < target
-        else:
-            price_ok = target < price < latest.sl
-        if not price_ok:
-            rejected = "price_outside_entry_risk"
-        elif abs(price - latest.level) > max_dist:
-            rejected = "price_too_far_from_entry"
+        if rejected is None:
+            if latest.direction == "bull":
+                price_ok = latest.sl < price < target
+            else:
+                price_ok = target < price < latest.sl
+            if not price_ok:
+                rejected = "price_outside_entry_risk"
+            elif abs(price - latest.level) > max_dist:
+                rejected = "price_too_far_from_entry"
+        if rejected is None and target is not None:
+            gross_rr, net_rr_value = net_rr(
+                latest.level, latest.sl, target, latest.direction,
+                commission_bps=args.commission_bps,
+                slippage_bps=args.slippage_bps,
+                sell_tax_bps=args.sell_tax_bps,
+            )
+            if net_rr_value < args.min_net_rr:
+                rejected = "net_rr_below_min"
+        if args.strict_audit and rejected is None:
+            if args.session_gate == "none":
+                rejected = "strict_no_killzone"
+            elif args.target_mode != "dol":
+                rejected = "strict_no_dol"
+            elif args.origin_filter == "fvg" or args.allow_no_sweep:
+                rejected = "strict_no_sweep"
         if rejected:
             latest = None
+    if rejected is None and latest is None:
+        rejected = "no_qualified_setup"
 
     card = {
         "symbol": args.symbol,
@@ -154,7 +181,17 @@ def cmd_plan(args) -> None:
         "decision": "TRADE" if latest else "NO_TRADE",
         "setup": None,
         "rejected": rejected,
+        "reason": rejected if latest is None else None,
         "entry_distance_atr": entry_distance_atr,
+        "session_gate": args.session_gate,
+        "strict_audit": bool(args.strict_audit),
+        "gross_rr": gross_rr,
+        "net_rr": net_rr_value,
+        "cost_model": {
+            "commission_bps": args.commission_bps,
+            "slippage_bps": args.slippage_bps,
+            "sell_tax_bps": args.sell_tax_bps,
+        },
         "recent_sweeps": [
             {"direction": s.direction, "name": s.name, "level": s.level,
              "time": str(df["date"].iloc[s.reclaim_bar])}
@@ -169,6 +206,13 @@ def cmd_plan(args) -> None:
             "stop": latest.sl,
             "target": target,
             "r_multiple": abs(target - latest.level) / max(abs(latest.level - latest.sl), 1e-12),
+            "gross_rr": gross_rr,
+            "net_rr": net_rr_value,
+            "cost_model": {
+                "commission_bps": args.commission_bps,
+                "slippage_bps": args.slippage_bps,
+                "sell_tax_bps": args.sell_tax_bps,
+            },
             "grade": latest.grade,
             "quality": latest.quality,
             "checks": latest.checks,
@@ -271,6 +315,11 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
     p.add_argument("--breakeven-at-r", type=float, default=0.0)
     p.add_argument("--t-plus-1", action="store_true")
     p.add_argument("--sell-tax-bps", type=float, default=5.0)
+    p.add_argument("--commission-bps", type=float, default=5.0)
+    p.add_argument("--slippage-bps", type=float, default=2.0)
+    p.add_argument("--min-net-rr", type=float, default=2.0)
+    p.add_argument("--strict-audit", action="store_true",
+                   help="require killzone + DOL + sweep + net RR for a TRADE")
     p.add_argument("--fvg-min-atr", type=float, default=0.25)
     p.add_argument("--fvg-min-body", type=float, default=0.5)
     p.add_argument("--entry-mode", choices=["next_open", "retest_key"], default="next_open",
