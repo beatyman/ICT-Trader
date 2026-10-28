@@ -169,6 +169,10 @@ confluence ≥3, body/range ≥0.65 and a 2R target from the actual fill. It imp
 in-sample basket to 50% win rate / +0.03R over 30 trades, but failed the chronological
 hold-out and is below the 100-trade gate. It is not the default.
 
+The LuxAlgo Pine indicator is a detector, not a strategy. The concept mapping and the
+limits of a Pine-to-Python backtest are documented in
+[`docs/PINE_PARITY.md`](docs/PINE_PARITY.md).
+
 ## Package layout
 
 ```text
