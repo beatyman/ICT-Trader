@@ -488,6 +488,8 @@ def main() -> None:
                     default="none")
     ap.add_argument("--pd-gate", action="store_true")
     ap.add_argument("--ote-gate", action="store_true")
+    ap.add_argument("--ote-min", type=float, default=0.62)
+    ap.add_argument("--ote-max", type=float, default=0.79)
     ap.add_argument("--require-pda-array", action="store_true")
     ap.add_argument("--max-inducements", type=int, default=-1)
     ap.add_argument("--quality-profile", choices=["standard", "high_value"], default="standard")
@@ -519,6 +521,8 @@ def main() -> None:
                       session_gate=args.session_gate,
                       pd_gate=args.pd_gate,
                       ote_gate=args.ote_gate,
+                      ote_min=args.ote_min,
+                      ote_max=args.ote_max,
                       require_pda_array=args.require_pda_array,
                       max_inducements=args.max_inducements,
                       quality_profile=args.quality_profile,

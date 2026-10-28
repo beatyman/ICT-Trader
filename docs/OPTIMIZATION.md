@@ -326,6 +326,35 @@ trades (+1.15R average) and is not evidence.
 Conclusion: do not add an "HTF FVG only" filter.  If HTF FVG is used, it should be a
 grade input, not another origin layer.
 
+### Shallow OTE is the strongest separator so far
+
+The classic OTE band 0.62–0.79 was tested first and produced **zero** FVG-only trades,
+because FVG-delivery CISDs sit at shallow retracements.  Testing the opposite end:
+
+```text
+--ote-gate --ote-min 0 --ote-max 0.30
+```
+
+on top of `--origin-filter fvg`:
+
+| config | trades | win rate | weighted avg R | total R |
+|---|---:|---:|---:|---:|
+| FVG-only | 90 | 48.9% | +0.236 | +21.26 |
+| FVG-only + OTE ≤ 0.30 | 45 | **60.0%** | **+0.384** | +17.29 |
+
+Chronological 60/40:
+
+```text
+train: 27 trades, 59.3%, +0.352R
+test:  18 trades, 61.1%, +0.432R
+```
+
+This is the first configuration in the study that is positive in **both** train and
+test, but 18 hold-out trades is still far below 100.  It is not a default.  It also
+shows that "OTE" is not one universal band: for FVG-delivery entries, shallow
+retracement performs better than the classic deep OTE.
+
+
 
 
 

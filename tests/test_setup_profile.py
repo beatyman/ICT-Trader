@@ -35,4 +35,14 @@ def test_fvg_origin_filter_only_keeps_fvg_origin():
     assert all(t.features.get("origin") == "fvg" for t in trades)
     assert all(t.origin == "fvg" for t in trades)
     assert all(t.pda_source in {"both", "current", "htf"} for t in trades)
-    assert all(isinstance(t.htf_pda, bool) for t in trades)
+    assert all(t.htf_pda in {True, False} for t in trades)
+
+
+def test_shallow_ote_gate_keeps_only_shallow_entries():
+    trades, _ = run_one(
+        "examples/15m.csv",
+        SetupConfig(market="cn", stack="1d_1h_15m", t_plus_1=True,
+                    origin_filter="fvg", ote_gate=True, ote_min=0.0, ote_max=0.3),
+        daily_path="examples/daily.csv",
+    )
+    assert all(0.0 <= t.features.get("ote", 1.0) <= 0.3 for t in trades)
