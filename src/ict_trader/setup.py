@@ -89,6 +89,25 @@ class SetupConfig:
     require_pda_array: bool = False
     pda_array_tol_atr: float = 0.75
     max_inducements: int = -1
+    quality_profile: str = "standard"  # standard | high_value
+
+
+def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
+    """Apply an explicit, opt-in stricter profile.
+
+    The high-value profile is deliberately a *starting point*, not a proven
+    edge: the 0.65 displacement threshold improved the in-sample basket but did
+    not survive a chronological hold-out in the bundled study.
+    """
+    if cfg.quality_profile != "high_value":
+        return cfg
+    return replace(
+        cfg,
+        min_grade=max(cfg.min_grade, 4),
+        min_confluence=max(cfg.min_confluence, 3),
+        min_disp_body_ratio=max(cfg.min_disp_body_ratio, 0.65),
+        min_target_rr=max(cfg.min_target_rr, 2.0),
+    )
 
 
 def _htf(df: pd.DataFrame, rule: str, market: str = "cn") -> pd.DataFrame:
@@ -107,6 +126,7 @@ def _daily_htf(base: pd.DataFrame, daily: pd.DataFrame, close_hour: int = 15) ->
 
 def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 daily: pd.DataFrame | None = None) -> list[CISD]:
+    cfg = apply_quality_profile(cfg)
     if cfg.market == "crypto":
         # Crypto daily closes at 00:00 UTC; a 15m-resampled 1D avoids using
         # the current, still-open daily candle.
@@ -134,19 +154,19 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             continue
 
         pd_pos = None
+        dr = dealing_range(result.swings, t, cfg.pd_lookback)
+        if dr is not None:
+            pd_pos = dr.position(c.level)
         if cfg.pd_gate:
-            dr = dealing_range(result.swings, t, cfg.pd_lookback)
             if dr is None:
                 continue
-            pd_pos = dr.position(c.level)
             if c.direction == "bull" and pd_pos > cfg.pd_buy_max:
                 continue
             if c.direction == "bear" and pd_pos < cfg.pd_sell_min:
                 continue
 
-        ote_pos = None
+        ote_pos = ote_from_signal(df, c.start, c.end, c.level, c.direction)
         if cfg.ote_gate:
-            ote_pos = ote_from_signal(df, c.start, c.end, c.level, c.direction)
             if ote_pos is None or not (cfg.ote_min <= ote_pos <= cfg.ote_max):
                 continue
 
@@ -243,6 +263,19 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             )
             if quality < cfg.min_setup_score:
                 continue
+            best_sweep = max(recent_sweeps, key=lambda s: s.strength) if recent_sweeps else None
+            quality_parts.update({
+                "d1_score": sum(bool(x) for x in d1_checks),
+                "h4_score": sum(bool(x) for x in h4_checks),
+                "m15_score": sum(bool(x) for x in m15_checks),
+                "sweep_strength": sweep_strength,
+                "sweep_reclaim_bars": int(best_sweep.reclaim_bars) if best_sweep else -1,
+                "sweep_penetration_atr": float(best_sweep.penetration_atr) if best_sweep else 0.0,
+                "disp_body_ratio": float(disp.body_ratio),
+                "disp_body_atr": float(disp.body_atr),
+                "disp_body_multiple": float(disp.body_multiple),
+                "disp_volume_ratio": float(disp.volume_ratio),
+            })
             if pd_pos is not None:
                 quality_parts["pd"] = float(pd_pos)
             if ote_pos is not None:
@@ -290,6 +323,7 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
                         breakeven_at_r=cfg.breakeven_at_r,
                         t_plus_1=cfg.t_plus_1, sell_tax_bps=cfg.sell_tax_bps,
                         max_concurrent=cfg.max_concurrent,
+                        min_rr=cfg.min_target_rr,
                         entry_mode=cfg.entry_mode,
                         retest_max_bars=cfg.retest_max_bars,
                         retest_tolerance_atr=cfg.retest_tolerance_atr,
@@ -335,10 +369,12 @@ def main() -> None:
     ap.add_argument("--ote-gate", action="store_true")
     ap.add_argument("--require-pda-array", action="store_true")
     ap.add_argument("--max-inducements", type=int, default=-1)
+    ap.add_argument("--quality-profile", choices=["standard", "high_value"], default="standard")
     ap.add_argument("--min-disp-body", type=float, default=0.0)
     ap.add_argument("--min-disp-atr", type=float, default=0.0)
     ap.add_argument("--min-disp-multiple", type=float, default=0.0)
     ap.add_argument("--min-setup-score", type=float, default=0.0)
+    ap.add_argument("--min-target-rr", type=float, default=2.0)
     args = ap.parse_args()
     cfg = SetupConfig(rr=args.rr, max_bars=args.max_bars, min_grade=args.min_grade,
                       min_confluence=args.min_confluence, allow_short=args.allow_short,
@@ -361,10 +397,12 @@ def main() -> None:
                       ote_gate=args.ote_gate,
                       require_pda_array=args.require_pda_array,
                       max_inducements=args.max_inducements,
+                      quality_profile=args.quality_profile,
                       min_disp_body_ratio=args.min_disp_body,
                       min_disp_atr=args.min_disp_atr,
                       min_disp_multiple=args.min_disp_multiple,
-                      min_setup_score=args.min_setup_score)
+                      min_setup_score=args.min_setup_score,
+                      min_target_rr=args.min_target_rr)
     trades, m = run_one(args.csv, cfg, daily_path=args.daily_csv)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([t.__dict__ for t in trades]).to_csv(args.out, index=False, encoding="utf-8-sig")

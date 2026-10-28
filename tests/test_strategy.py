@@ -24,7 +24,8 @@ def test_entry_next_bar_and_tp():
              sl=95, target=110, grade=4, checks={"sweep": True})
     res = ICTResult(bars=df, cisds=[c], config=ICTConfig())
     r = simulate_cisd(df, res, StrategyConfig(min_grade=0, min_confluence=0,
-                                              entry_delay=1, max_bars=5), "test")
+                                              entry_delay=1, max_bars=5,
+                                              min_rr=1.0), "test")
     assert len(r.trades) == 1
     t = r.trades[0]
     assert t.entry_time == df.date.iloc[3]
@@ -71,6 +72,20 @@ def test_retest_entry_not_filled_is_recorded():
     assert len(r.trades) == 0
     assert r.metrics["not_triggered"] == 1
     assert r.metrics["signals"] == 1
+
+
+def test_low_measured_target_falls_back_to_two_r():
+    df = frame([90, 95, 100, 102, 108, 111, 112, 110, 109, 108])
+    c = CISD("bull", level=100, extreme=95, body_extreme=95, start=1, end=2,
+             sl=95, target=103, grade=4, checks={"sweep": True})
+    res = ICTResult(bars=df, cisds=[c], config=ICTConfig())
+    r = simulate_cisd(df, res, StrategyConfig(min_grade=0, min_confluence=0,
+                                              entry_delay=1, max_bars=5,
+                                              min_rr=2.0), "test")
+    assert len(r.trades) == 1
+    t = r.trades[0]
+    assert t.features["entry_rr"] >= 2.0
+    assert t.tp > 110
 
 
 def test_atr_trailing_exit():

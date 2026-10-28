@@ -71,6 +71,7 @@ def _setup_config(args) -> SetupConfig:
         sweep_reclaim_bars=args.sweep_reclaim_bars,
         target_mode=args.target_mode,
         min_setup_score=args.min_setup_score,
+        min_target_rr=args.min_target_rr,
         min_disp_body_ratio=args.min_disp_body,
         min_disp_atr=args.min_disp_atr,
         min_disp_multiple=args.min_disp_multiple,
@@ -92,6 +93,7 @@ def _setup_config(args) -> SetupConfig:
         ote_gate=args.ote_gate,
         require_pda_array=args.require_pda_array,
         max_inducements=args.max_inducements,
+        quality_profile=args.quality_profile,
     )
 
 
@@ -119,7 +121,10 @@ def cmd_plan(args) -> None:
     rejected = None
     if latest is not None:
         risk = abs(latest.level - latest.sl)
-        target = latest.target or (
+        measured_ok = (latest.target is not None
+                       and risk > 0
+                       and abs(latest.target - latest.level) / risk >= args.min_target_rr)
+        target = latest.target if measured_ok else (
             latest.level + (2 * risk if latest.direction == "bull" else -2 * risk)
         )
         entry_distance_atr = abs(price - latest.level) / last_atr
@@ -244,6 +249,8 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
     p.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid"], default="fixed",
                    help="fixed R, nearest opposing liquidity pool, or liquidity with fixed fallback")
     p.add_argument("--min-setup-score", type=float, default=0.0)
+    p.add_argument("--min-target-rr", type=float, default=2.0,
+                   help="reject a measured target below this RR and use the fixed R target")
     p.add_argument("--min-disp-body", type=float, default=0.0)
     p.add_argument("--min-disp-atr", type=float, default=0.0)
     p.add_argument("--min-disp-multiple", type=float, default=0.0)
@@ -274,6 +281,8 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="require a nearby breaker/mitigation/rejection array")
     p.add_argument("--max-inducements", type=int, default=-1,
                    help="reject if more minor swings lie between entry and target (-1=off)")
+    p.add_argument("--quality-profile", choices=["standard", "high_value"], default="standard",
+                   help="opt-in stricter displacement/grade/confluence profile")
 
 
 def main(argv=None) -> None:

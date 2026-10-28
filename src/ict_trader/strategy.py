@@ -90,6 +90,7 @@ class Trade:
     stop_deviation_r: float = 0.0
     quality: float = 0.0
     rule_version: str = "frozen-v1"
+    features: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -240,19 +241,11 @@ def simulate_cisd(
                 continue
 
         # A target supplied by the signal may be valid at the signal price but
-        # not after a deeper retest.  For a next-open fill we keep the signal's
-        # measured target if it was valid at the signal level (the gap is part
-        # of the trade), while a retest is judged from the actual fill.
+        # not after the actual fill.  Judge every target from the fill so a
+        # high-R configuration cannot silently keep a 1.1R measured target.
         tp = c.target
-        if mode == "retest_key":
-            target_ok = tp is not None and abs(tp - c.level) / signal_risk >= cfg.min_rr
-            if not target_ok:
-                tp = entry + cfg.rr * risk if c.direction == "bull" else entry - cfg.rr * risk
-            elif abs(tp - entry) / risk < cfg.min_rr:
-                tp = entry + cfg.rr * risk if c.direction == "bull" else entry - cfg.rr * risk
-        else:
-            if tp is None or abs(tp - c.level) / signal_risk < cfg.min_rr:
-                tp = c.level + cfg.rr * signal_risk if c.direction == "bull" else c.level - cfg.rr * signal_risk
+        if tp is None or abs(tp - entry) / risk < cfg.min_rr:
+            tp = entry + cfg.rr * risk if c.direction == "bull" else entry - cfg.rr * risk
 
         # A-share T+1: the first bar on a later trading day is the earliest exit
         entry_day = dates.iloc[entry_idx].date()
@@ -401,6 +394,13 @@ def simulate_cisd(
         equity *= (1 + cfg.risk_pct * r)
         day_r[dates.iloc[exit_idx].date()] = day_r.get(dates.iloc[exit_idx].date(), 0.0) + r
         entry_dev_r = ((entry - c.level) if c.direction == "bull" else (c.level - entry)) / risk
+        features = dict(getattr(c, "quality_parts", {}) or {})
+        features.update({
+            "grade": int(c.grade),
+            "confluence": int(conf),
+            "entry_rr": float(abs(tp - entry) / risk),
+            "risk_atr": float(risk / atr_entry) if atr_entry > 0 else 0.0,
+        })
         trades.append(Trade(
             symbol=symbol,
             direction=c.direction,
@@ -431,6 +431,7 @@ def simulate_cisd(
             stop_deviation_r=0.0,
             quality=float(getattr(c, "quality", 0.0)),
             rule_version="frozen-v1",
+            features=features,
         ))
         eq_points.append((dates.iloc[exit_idx], equity))
 

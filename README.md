@@ -152,6 +152,7 @@ Every filter is explicit and can be disabled to run an ablation:
 --ote-gate
 --require-pda-array
 --max-inducements
+--quality-profile standard|high_value
 --min-setup-score
 --min-disp-body / --min-disp-atr / --min-disp-multiple
 --fvg-min-atr / --fvg-min-body
@@ -161,6 +162,11 @@ The measured A/B results and their limitations are in
 [`docs/OPTIMIZATION.md`](docs/OPTIMIZATION.md). They are diagnostics, not a
 profitability claim. The ten reference repositories and the ideas accepted/rejected
 from each are reviewed in [`docs/REFERENCE_REVIEW.md`](docs/REFERENCE_REVIEW.md).
+
+`--quality-profile high_value` is an **experimental** preset: it requires grade ≥4,
+confluence ≥3, body/range ≥0.65 and a 2R target from the actual fill. It improved the
+in-sample basket to 50% win rate / +0.03R over 30 trades, but failed the chronological
+hold-out and is below the 100-trade gate. It is not the default.
 
 ## Package layout
 

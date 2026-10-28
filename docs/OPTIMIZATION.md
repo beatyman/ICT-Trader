@@ -177,7 +177,56 @@ The backtest always fills at the plan plus modelled slippage, so it cannot detec
 discretionary rule break. The schema exists to make a live log comparable; the
 `process_errors` count is only a price-deviation audit, not a complete process score.
 
+## Quality / win-rate study (anti-overfit)
+
+`min_target_rr` is now enforced against the **actual fill**, not the signal level.
+This raises the realised R of winners because sub-2R measured targets fall back to
+2R. It also lowers win rate. On the 8-dataset basket:
+
+| Setting | trades | win rate | weighted avg R | total R |
+|---|---:|---:|---:|---:|
+| measured target from signal (old) | 93 | 43.0% | -0.143 | -13.30 |
+| 2R from actual fill (new default) | 91 | 35.2% | -0.120 | -10.90 |
+
+The displacement feature was the strongest in-sample separator:
+
+| min body/range | trades | win rate | weighted avg R |
+|---:|---:|---:|---:|
+| 0.00 | 91 | 35.2% | -0.120 |
+| 0.65 | 59 | 42.4% | +0.030 |
+| 0.75 | 42 | 45.2% | +0.088 |
+
+That looks attractive, but it is **not robust**:
+
+- on a chronological 60/40 split, the 0.75 filter made train avg R +0.26 and
+  hold-out avg R -0.24;
+- leave-one-market-out results were mixed; HK 00700 stayed negative while a few
+  small samples became positive;
+- 30–42 trades after filtering is far below the 100-trade gate.
+
+Therefore:
+
+```text
+--quality-profile high_value
+    min_grade=4, min_confluence=3,
+    min_disp_body_ratio=0.65, min_target_rr=2
+```
+
+is available as an **experimental preset only**. It is not the default, and it is not
+presented as a win-rate guarantee. The default remains `standard` + 2R target.
+
+In-sample profile result (8 datasets):
+
+| profile | trades | win rate | weighted avg R | total R |
+|---|---:|---:|---:|---:|
+| standard | 91 | 35.2% | -0.120 | -10.90 |
+| high_value (.65) | 30 | 50.0% | +0.033 | +0.99 |
+
+The 30-trade profile is below the 100-trade gate. The chronological 0.65 hold-out was
+negative, so the higher win rate is not evidence of a durable edge.
+
 ## Next candidates (not implemented)
+
 
 
 
