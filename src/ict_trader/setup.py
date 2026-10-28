@@ -58,8 +58,9 @@ class SetupConfig:
     sweep_window: int = 15
     sweep_reclaim_bars: int = 3
     use_key_targets: bool = False
-    target_mode: str = "fixed"  # fixed | liquidity | hybrid
+    target_mode: str = "fixed"  # fixed | liquidity | hybrid | dol
     min_target_rr: float = 2.0
+    max_target_rr: float = 6.0
     min_disp_body_ratio: float = 0.0
     min_disp_atr: float = 0.0
     min_disp_multiple: float = 0.0
@@ -409,16 +410,31 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             mode = cfg.target_mode
             if cfg.use_key_targets and mode == "fixed":
                 mode = "hybrid"
-            if mode in {"liquidity", "hybrid"}:
+            if mode in {"liquidity", "hybrid", "dol"}:
                 levels = [k for k in result.key_levels
-                          if k.known_at <= t and not k.swept and not k.broken]
-                tgt = nearest_key_target(levels, c.level, c.direction == "bull")
+                          if k.known_at <= t
+                          and (k.sweep_bar is None or k.sweep_bar > t)
+                          and (k.broken_at is None or k.broken_at > t)]
                 risk = abs(c.level - c.sl)
-                if tgt is not None and risk > 0:
-                    if abs(tgt - c.level) / risk >= cfg.min_target_rr:
-                        target = tgt
-                if target is None and mode == "liquidity":
-                    continue
+                prices = sorted(
+                    [k.price for k in levels
+                     if (k.price > c.level if c.direction == "bull" else k.price < c.level)],
+                    key=lambda p: abs(p - c.level),
+                )
+                if mode == "dol":
+                    valid = [p for p in prices if risk > 0
+                             and cfg.min_target_rr <= abs(p - c.level) / risk <= cfg.max_target_rr]
+                    target = valid[0] if valid else None
+                    if target is None:
+                        continue
+                else:
+                    tgt = nearest_key_target(levels, c.level, c.direction == "bull", at=t)
+                    if tgt is not None and risk > 0:
+                        rr = abs(tgt - c.level) / risk
+                        if cfg.min_target_rr <= rr <= cfg.max_target_rr:
+                            target = tgt
+                    if target is None and mode == "liquidity":
+                        continue
             path_target = target
             if path_target is None:
                 risk = abs(c.level - c.sl)
@@ -523,6 +539,7 @@ def main() -> None:
     ap.add_argument("--min-disp-multiple", type=float, default=0.0)
     ap.add_argument("--min-setup-score", type=float, default=0.0)
     ap.add_argument("--min-target-rr", type=float, default=2.0)
+    ap.add_argument("--max-target-rr", type=float, default=6.0)
     args = ap.parse_args()
     cfg = SetupConfig(rr=args.rr, max_bars=args.max_bars, min_grade=args.min_grade,
                       min_confluence=args.min_confluence, allow_short=args.allow_short,
@@ -556,7 +573,8 @@ def main() -> None:
                       min_disp_atr=args.min_disp_atr,
                       min_disp_multiple=args.min_disp_multiple,
                       min_setup_score=args.min_setup_score,
-                      min_target_rr=args.min_target_rr)
+                      min_target_rr=args.min_target_rr,
+                      max_target_rr=args.max_target_rr)
     trades, m = run_one(args.csv, cfg, daily_path=args.daily_csv)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([t.__dict__ for t in trades]).to_csv(args.out, index=False, encoding="utf-8-sig")

@@ -35,6 +35,7 @@ class KeyLevel:
     swept: bool = False
     broken: bool = False
     sweep_bar: int | None = None
+    broken_at: int | None = None
     touches: int = 1
 
 
@@ -158,6 +159,7 @@ def detect_sweeps(
 
                 if reclaim is None:
                     lv.broken = True
+                    lv.broken_at = t
                     break
 
                 extreme = float(np.max(high[t:reclaim + 1]))
@@ -197,6 +199,7 @@ def detect_sweeps(
 
                 if reclaim is None:
                     lv.broken = True
+                    lv.broken_at = t
                     break
 
                 extreme = float(np.min(low[t:reclaim + 1]))
@@ -234,9 +237,19 @@ def detect_sweeps(
     return sorted(uniq.values(), key=lambda s: s.reclaim_bar)
 
 
-def nearest_key_target(levels: Iterable[KeyLevel], price: float, bull: bool) -> float | None:
-    vals = [lv.price for lv in levels if not lv.swept and not lv.broken
-            and (lv.price > price if bull else lv.price < price)]
+def nearest_key_target(levels: Iterable[KeyLevel], price: float, bull: bool,
+                       at: int | None = None) -> float | None:
+    if at is None:
+        active = [lv for lv in levels if not lv.swept and not lv.broken]
+    else:
+        active = [
+            lv for lv in levels
+            if lv.known_at <= at
+            and (lv.sweep_bar is None or lv.sweep_bar > at)
+            and (lv.broken_at is None or lv.broken_at > at)
+        ]
+    vals = [lv.price for lv in active
+            if (lv.price > price if bull else lv.price < price)]
     if not vals:
         return None
     return min(vals) if bull else max(vals)

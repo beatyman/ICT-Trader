@@ -1,4 +1,5 @@
 from ict_trader.setup import SetupConfig, apply_quality_profile, run_one
+from ict_trader.sweeps import KeyLevel, nearest_key_target
 
 
 def test_high_value_profile_is_stricter():
@@ -56,3 +57,11 @@ def test_regime_gate_only_keeps_up_trend_long():
         daily_path="examples/daily.csv",
     )
     assert all(t.features.get("regime_trend") == "up" for t in trades)
+
+
+def test_target_levels_are_not_retroactively_removed():
+    future_sweep = KeyLevel("EQH", 110.0, "H", known_at=1, sweep_bar=10)
+    future_break = KeyLevel("BSL", 120.0, "H", known_at=1, broken_at=12)
+    assert nearest_key_target([future_sweep, future_break], 100.0, True, at=5) == 110.0
+    assert nearest_key_target([future_sweep, future_break], 100.0, True, at=11) == 120.0
+    assert nearest_key_target([future_sweep, future_break], 100.0, True, at=13) is None

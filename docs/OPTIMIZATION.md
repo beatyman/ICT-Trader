@@ -414,6 +414,23 @@ the 8-case basket.  The best combination was:
 Full details and the full-BTC failure are in [`BEST_SETUP.md`](BEST_SETUP.md).  It is a
 research candidate, not a default.
 
+### Draw-on-liquidity target
+
+`--target-mode dol` now selects the nearest unswept liquidity level known at the signal
+bar, not a level that gets swept later in the file.  The earlier target filter used the
+final `swept` state and was retroactively deleting valid targets; `sweep_bar` and
+`broken_at` fix that.
+
+| instrument | fixed 2R | DOL |
+|---|---:|---:|
+| Xiaomi HK.01810 | 30 trades, +0.132R | 15 trades, +0.255R |
+| Zijin HK.02899 | 26 trades, -0.009R | 10 trades, +0.137R |
+| 8-case basket | 45 trades, +0.384R | 29 trades, +0.037R |
+
+DOL improves the two HK names but is much worse across the crypto-heavy basket.  It is
+optional; the default target remains fixed 2R.  See [`ICT_CHECKLIST.md`](ICT_CHECKLIST.md).
+
+
 
 
 

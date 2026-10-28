@@ -73,6 +73,7 @@ def _setup_config(args) -> SetupConfig:
         target_mode=args.target_mode,
         min_setup_score=args.min_setup_score,
         min_target_rr=args.min_target_rr,
+        max_target_rr=args.max_target_rr,
         min_disp_body_ratio=args.min_disp_body,
         min_disp_atr=args.min_disp_atr,
         min_disp_multiple=args.min_disp_multiple,
@@ -256,11 +257,12 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="research filter on the CISD origin mixture")
     p.add_argument("--sweep-reclaim-bars", type=int, default=3,
                    help="bars allowed for price to close back through a swept level")
-    p.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid"], default="fixed",
-                   help="fixed R, nearest opposing liquidity pool, or liquidity with fixed fallback")
+    p.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid", "dol"], default="fixed",
+                   help="fixed R, nearest liquidity, liquidity fallback, or true draw-on-liquidity")
     p.add_argument("--min-setup-score", type=float, default=0.0)
     p.add_argument("--min-target-rr", type=float, default=2.0,
                    help="reject a measured target below this RR and use the fixed R target")
+    p.add_argument("--max-target-rr", type=float, default=6.0)
     p.add_argument("--min-disp-body", type=float, default=0.0)
     p.add_argument("--min-disp-atr", type=float, default=0.0)
     p.add_argument("--min-disp-multiple", type=float, default=0.0)

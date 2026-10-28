@@ -184,6 +184,9 @@ Dataset duplication and full-vs-slice caveats are recorded in
 The best current research candidate (not a validated live edge) is documented in
 [`docs/BEST_SETUP.md`](docs/BEST_SETUP.md).
 
+The enforceable ICT sequence and the DOL/kill-zone caveats are in
+[`docs/ICT_CHECKLIST.md`](docs/ICT_CHECKLIST.md).
+
 ## Package layout
 
 ```text
