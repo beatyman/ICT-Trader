@@ -91,6 +91,10 @@ class Trade:
     quality: float = 0.0
     rule_version: str = "frozen-v1"
     features: dict = field(default_factory=dict)
+    origin: str = ""
+    pda_source: str = ""
+    htf_pda: bool = False
+    htf_fvg_tf: str = ""
 
 
 @dataclass
@@ -432,6 +436,10 @@ def simulate_cisd(
             quality=float(getattr(c, "quality", 0.0)),
             rule_version="frozen-v1",
             features=features,
+            origin=str(features.get("origin", "")),
+            pda_source=str(features.get("pda_source", "")),
+            htf_pda=bool(features.get("htf_pda", False)),
+            htf_fvg_tf=str(features.get("htf_fvg_tf", "")),
         ))
         eq_points.append((dates.iloc[exit_idx], equity))
 

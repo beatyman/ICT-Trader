@@ -18,6 +18,7 @@ COLUMNS = [
     "planned_stop", "actual_stop", "stop_deviation_r",
     "planned_target", "actual_target",
     "r_multiple", "reason", "grade", "quality", "sample_class", "rule_version",
+    "origin", "pda_source", "htf_fvg_tf",
 ]
 
 
@@ -44,6 +45,9 @@ def journal_frame(trades: Iterable[Trade], sample_class: str = "observation") ->
             "quality": t.quality,
             "sample_class": sample_class,
             "rule_version": t.rule_version,
+            "origin": t.origin,
+            "pda_source": t.pda_source,
+            "htf_fvg_tf": t.htf_fvg_tf,
         })
     return pd.DataFrame(rows, columns=COLUMNS)
 

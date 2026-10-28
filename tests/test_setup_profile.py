@@ -33,5 +33,6 @@ def test_fvg_origin_filter_only_keeps_fvg_origin():
         daily_path="examples/daily.csv",
     )
     assert all(t.features.get("origin") == "fvg" for t in trades)
-    assert all(t.features.get("pda_source") in {"both", "current", "htf"} for t in trades)
-    assert all(isinstance(t.features.get("htf_pda"), bool) for t in trades)
+    assert all(t.origin == "fvg" for t in trades)
+    assert all(t.pda_source in {"both", "current", "htf"} for t in trades)
+    assert all(isinstance(t.htf_pda, bool) for t in trades)
