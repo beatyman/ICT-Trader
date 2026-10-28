@@ -18,6 +18,11 @@ Hard rules:
 10. Tag statements as observed / derived / interpretive / missing.
 11. Use one state: confirmed / developing / invalidated / no-trade.
 12. `confirmed` requires closed-bar evidence and net RR >= 2.
+13. Prefer higher-quality, higher-RR setups over more trades. Fewer trades is a feature.
+14. Treat net RR < 2.0 as automatic NO_TRADE for confirmed state.
+15. When asked to optimize the strategy, propose stricter filters first (quality, sweep, PDA, RR, displacement), not looser ones.
+16. When reviewing a setup, explicitly state which quality gates passed/failed and whether RR is the binding constraint.
+17. Do not convert a borderline setup into TRADE by relaxing stops or inventing farther targets.
 
 Preferred answer:
 

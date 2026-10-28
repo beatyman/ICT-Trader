@@ -21,7 +21,7 @@ liquidity levels, sweeps, or signals.
 
 Use for:
 
-- "Dose this chart have a valid ICT setup?"
+- "Does this chart have a valid ICT setup?"
 - "Where are the key levels / liquidity pools?"
 - "Did price sweep liquidity?"
 - "Give me a trade plan with entry, stop, target and size."
@@ -169,14 +169,20 @@ direction
 level
 stop
 target
-r_multiple >= 1.5 gross (net >= 2 before calling confirmed)
+gross RR >= 1.5 (plan.r_multiple is gross)
+net RR >= 2.0 after spread, commission, tax and slippage before calling confirmed
 entry_distance_atr <= 0.5
 setup.quality
 setup.grade
 sweep within 15 bars (and reclaim_bars <= 3 by default)
 1D/4H scores
+clear Draw on Liquidity (nearest unswept opposite pool, not an invented target)
 optional quality_parts: pd / ote / pda_arrays / inducement_candidates
 ```
+
+If the plan does not expose a verified `net_rr`, compute it from the planned entry,
+stop, target and the user's cost model. If any input is missing, leave the state
+`developing` and say what is missing; do not call it `confirmed`.
 
 Then produce a trade card. If the plan is stale, say `no-trade`, not “wait for a
 better price” unless the user asked for a conditional plan.
@@ -198,6 +204,28 @@ ict-trader journal --trades output/trades.csv --out output/journal.csv \
 Report sample size, win rate, average R, PF, max drawdown and fold stability.
 Also report `process_errors` from the journal when discussing execution, not just P&L.
 Never present a 4-trade sample as proof.
+
+### 6. Strategy optimization requests
+
+When the user asks to improve setup quality or RR:
+
+1. Diagnose which gates currently let low-quality or low-RR trades through.
+2. Propose 1–3 stricter filters, not looser ones:
+   - higher quality/grade/confluence;
+   - require sweep + reclaim;
+   - require PDA (FVG/OB) or point-in-time DOL;
+   - higher min net RR;
+   - displacement and entry-distance gates.
+3. Prefer ablation-style changes that can be tested with the engine.
+4. Never claim an improved edge below 100 trades.
+5. Default recommendation: raise quality/RR thresholds first; do not loosen
+   structure or sweep requirements.
+6. State whether the binding constraint is bias, DOL, structure, sweep, PDA,
+   displacement, entry distance or net RR. "More trades" is not a quality goal.
+
+Do not respond to an optimization request by adding parameters without a
+diagnosis. A stricter checklist that produces more `NO_TRADE` is a valid result.
+
 
 ## Output contract
 
@@ -273,9 +301,13 @@ If a field cannot be computed, use `null` and explain why.
 | 4H < 2/3 | NO_TRADE |
 | no sweep in 15 bars | NO_TRADE by default |
 | no PDA | NO_TRADE by default |
+| no clear Draw on Liquidity | NO_TRADE |
 | quality < 0.55 | NO_TRADE by default |
+| grade below `min_grade` or confluence below `min_confluence` | NO_TRADE |
+| net RR < 2.0 | NO_TRADE；不得标为 `confirmed` |
 | price inside 1D cloud | NO_TRADE for trend setup |
 | data ends before a closed bar | NO_TRADE / ask for data |
+| user asks to "optimize strategy" | tighten gates first; do not add trade count |
 
 ## Style
 
