@@ -78,8 +78,11 @@ def detect_key_levels(
             known_at=int(s.end), source="session",
         ))
     for l in liquidity:
+        equal = bool(getattr(l, "equal", False))
+        base = "EQH" if l.direction == "buyside" else "EQL"
+        name = base if equal else ("BSL" if l.direction == "buyside" else "SSL")
         levels.append(KeyLevel(
-            name="BSL" if l.direction == "buyside" else "SSL",
+            name=name,
             price=float(l.top if l.direction == "buyside" else l.bottom),
             kind="H" if l.direction == "buyside" else "L",
             known_at=int(getattr(l, "right", l.created)), source="pool",

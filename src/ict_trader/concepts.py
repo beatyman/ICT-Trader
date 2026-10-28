@@ -152,10 +152,15 @@ class Liquidity:
     left: int
     right: int
     broken: bool = False
+    touches: int = 1
 
     @property
     def created(self) -> int:
         return self.left
+
+    @property
+    def equal(self) -> bool:
+        return self.touches >= 2
 
 
 @dataclass
@@ -484,7 +489,8 @@ def detect_liquidity(df: pd.DataFrame, pivots: list[Swing], cfg: ICTConfig) -> l
                 else:
                     top = max(x.price for x in cluster) + tol
                     bottom = min(x.price for x in cluster) - tol
-                out.append(Liquidity(direction, top, bottom, left, min(right + 10, n - 1)))
+                out.append(Liquidity(direction, top, bottom, left,
+                                     min(right + 10, n - 1), touches=len(cluster)))
     # break state
     closes = df["close"].to_numpy()
     for liq in out:

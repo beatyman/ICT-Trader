@@ -138,6 +138,9 @@ Every filter is explicit and can be disabled to run an ablation:
 --target-mode fixed|liquidity|hybrid
 --trail-activate-r / --trail-atr-mult
 --max-daily-loss-r
+--session-gate none|auto|london|ny_am|ny_pm|cn|hk
+--pd-gate
+--ote-gate
 --min-setup-score
 --min-disp-body / --min-disp-atr / --min-disp-multiple
 --fvg-min-atr / --fvg-min-body
@@ -155,6 +158,7 @@ src/ict_trader/
   concepts.py     key levels, FVG, IFVG, OB, structure, chart
   cisd.py         Pine-style CISD state machine
   sweeps.py       key levels + sweep/reclaim events
+  context.py      optional session / premium-discount / OTE gates
   enhancements.py HTF CISD, SMT, session levels
   indicators.py   Ichimoku, MACD, HTF resampling
   quality.py      displacement + weighted score

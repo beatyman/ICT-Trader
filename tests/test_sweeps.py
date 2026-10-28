@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+from ict_trader.concepts import Liquidity
 from ict_trader.sweeps import KeyLevel, detect_key_levels, detect_sweeps, nearest_key_target
 
 
@@ -57,4 +58,11 @@ def test_ssl_sweep_and_nearest_target():
     sweeps = detect_sweeps(df, levels)
     assert len(sweeps) == 1 and sweeps[0].direction == "bull"
     assert nearest_key_target([KeyLevel("BSL", 105, "H", 0)], 101, True) == 105
+
+
+def test_equal_high_pool_is_tagged_eqh():
+    df = bars([100, 101, 102], [99, 99, 100], [99.5, 100.5, 101.5])
+    pool = Liquidity("buyside", 102.1, 101.9, 0, 2, touches=3)
+    levels = detect_key_levels(df, [], liquidity=[pool])
+    assert levels and levels[0].name == "EQH"
 

@@ -85,6 +85,9 @@ def _setup_config(args) -> SetupConfig:
         trail_activate_r=args.trail_activate_r,
         trail_atr_mult=args.trail_atr_mult,
         max_daily_loss_r=args.max_daily_loss_r,
+        session_gate=args.session_gate,
+        pd_gate=args.pd_gate,
+        ote_gate=args.ote_gate,
     )
 
 
@@ -243,6 +246,12 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="trailing distance in entry-bar ATR (0=off)")
     p.add_argument("--max-daily-loss-r", type=float, default=0.0,
                    help="stop new entries after this daily closed R loss (0=off)")
+    p.add_argument("--session-gate", choices=["none", "auto", "london", "ny_am", "ny_pm", "cn", "hk"],
+                   default="none", help="optional trading-session gate")
+    p.add_argument("--pd-gate", action="store_true",
+                   help="only buy discount / sell premium of the last confirmed range")
+    p.add_argument("--ote-gate", action="store_true",
+                   help="require 0.62-0.79 retracement of the last completed leg")
 
 
 def main(argv=None) -> None:

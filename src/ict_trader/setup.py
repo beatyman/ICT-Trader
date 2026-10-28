@@ -26,6 +26,7 @@ import pandas as pd
 
 from .cisd import CISD
 from .concepts import ICTConfig, analyze, load_csv
+from .context import dealing_range, in_session, ote_from_signal
 from .sweeps import nearest_key_target
 from .strategy import StrategyConfig, simulate_cisd
 from .indicators import add_indicators, align_htf, ichimoku, macd, resample_cn_4h, resample_htf
@@ -76,6 +77,14 @@ class SetupConfig:
     trail_activate_r: float = 0.0
     trail_atr_mult: float = 0.0
     max_daily_loss_r: float = 0.0
+    session_gate: str = "none"  # none | auto | london | ny_am | ny_pm | cn | hk
+    pd_gate: bool = False
+    pd_buy_max: float = 0.5
+    pd_sell_min: float = 0.5
+    pd_lookback: int = 120
+    ote_gate: bool = False
+    ote_min: float = 0.62
+    ote_max: float = 0.79
 
 
 def _htf(df: pd.DataFrame, rule: str, market: str = "cn") -> pd.DataFrame:
@@ -112,6 +121,26 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             continue
         if c.grade < cfg.min_grade or sum(bool(v) for v in c.checks.values()) < cfg.min_confluence:
             continue
+        if cfg.session_gate != "none" and not in_session(df, t, cfg.market, cfg.session_gate):
+            continue
+
+        pd_pos = None
+        if cfg.pd_gate:
+            dr = dealing_range(result.swings, t, cfg.pd_lookback)
+            if dr is None:
+                continue
+            pd_pos = dr.position(c.level)
+            if c.direction == "bull" and pd_pos > cfg.pd_buy_max:
+                continue
+            if c.direction == "bear" and pd_pos < cfg.pd_sell_min:
+                continue
+
+        ote_pos = None
+        if cfg.ote_gate:
+            ote_pos = ote_from_signal(df, c.start, c.end, c.level, c.direction)
+            if ote_pos is None or not (cfg.ote_min <= ote_pos <= cfg.ote_max):
+                continue
+
         row1 = d1.iloc[t]
         row4 = h4.iloc[t]
         if row1[["tenkan", "kijun", "span_a", "span_b", "macd", "macd_signal"]].isna().any():
@@ -200,6 +229,10 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             )
             if quality < cfg.min_setup_score:
                 continue
+            if pd_pos is not None:
+                quality_parts["pd"] = float(pd_pos)
+            if ote_pos is not None:
+                quality_parts["ote"] = float(ote_pos)
             target = None
             mode = cfg.target_mode
             if cfg.use_key_targets and mode == "fixed":
@@ -272,6 +305,10 @@ def main() -> None:
     ap.add_argument("--trail-activate-r", type=float, default=0.0)
     ap.add_argument("--trail-atr-mult", type=float, default=0.0)
     ap.add_argument("--max-daily-loss-r", type=float, default=0.0)
+    ap.add_argument("--session-gate", choices=["none", "auto", "london", "ny_am", "ny_pm", "cn", "hk"],
+                    default="none")
+    ap.add_argument("--pd-gate", action="store_true")
+    ap.add_argument("--ote-gate", action="store_true")
     ap.add_argument("--min-disp-body", type=float, default=0.0)
     ap.add_argument("--min-disp-atr", type=float, default=0.0)
     ap.add_argument("--min-disp-multiple", type=float, default=0.0)
@@ -293,6 +330,9 @@ def main() -> None:
                       trail_activate_r=args.trail_activate_r,
                       trail_atr_mult=args.trail_atr_mult,
                       max_daily_loss_r=args.max_daily_loss_r,
+                      session_gate=args.session_gate,
+                      pd_gate=args.pd_gate,
+                      ote_gate=args.ote_gate,
                       min_disp_body_ratio=args.min_disp_body,
                       min_disp_atr=args.min_disp_atr,
                       min_disp_multiple=args.min_disp_multiple,

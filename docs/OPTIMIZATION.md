@@ -125,7 +125,29 @@ Interpretation:
 - results are diagnostic only: 8 datasets, small samples, one parameter change, no
   multiple-testing correction.
 
+## Context-gate A/B (optional, default off)
+
+Three optional gates were added in `context.py`:
+
+```text
+--session-gate auto     regular cash session for CN/HK; none for crypto
+--pd-gate               buy only discount / sell only premium of the last confirmed range
+--ote-gate               require 0.62-0.79 retracement of the signal's own range
+```
+
+Results on the same 8 datasets:
+
+| Gate | Effect | Verdict |
+|---|---|---|
+| `--pd-gate` | trades fall in every case; FIL improves (17→9, avg R .194→.412), BTC becomes flat, HK 00700 less negative, but CN/SOL/TUT get worse | **not default** |
+| `--ote-gate` | 0 trades on all 8 datasets; current CISD levels sit mostly at 0.30–0.62 retracement, not 0.62–0.79 | **not default**; needs a different entry model |
+| `--session-gate auto` | no change on these datasets (CN/HK bars are already in cash session; crypto has no gate) | **no evidence yet**; needs off-session data |
+
+The zero OTE result is useful: it shows the current CISD entry is not the same as a deep
+OTE entry. Forcing OTE onto this setup would change the model, not improve it.
+
 ## Next candidates (not implemented)
+
 
 These need separate A/B tests before becoming defaults:
 
