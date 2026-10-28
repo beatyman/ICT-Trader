@@ -181,6 +181,9 @@ limits of a Pine-to-Python backtest are documented in
 Dataset duplication and full-vs-slice caveats are recorded in
 [`docs/DATA_NOTES.md`](docs/DATA_NOTES.md).
 
+The best current research candidate (not a validated live edge) is documented in
+[`docs/BEST_SETUP.md`](docs/BEST_SETUP.md).
+
 ## Package layout
 
 ```text

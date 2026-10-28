@@ -401,6 +401,20 @@ This is a regime artifact, not a stable gate.  The optional gates exist for rese
 
 They are **off by default**.  Do not promote `up + high volatility` from 21 BTC trades.
 
+### Grid result: the best sample combo
+
+A 16-config grid over two stacks, two origins, two OTE modes and 2.0/2.5R was run on
+the 8-case basket.  The best combination was:
+
+```text
+1D+1H+15m / FVG-only / OTE 0.00-0.30 / 2R
+45 trades, 60.0% win, +0.376R average, +16.91R total
+```
+
+Full details and the full-BTC failure are in [`BEST_SETUP.md`](BEST_SETUP.md).  It is a
+research candidate, not a default.
+
+
 
 
 
