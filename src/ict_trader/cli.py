@@ -94,6 +94,8 @@ def _setup_config(args) -> SetupConfig:
         ote_gate=args.ote_gate,
         ote_min=args.ote_min,
         ote_max=args.ote_max,
+        regime_trend_gate=args.regime_trend_gate,
+        regime_vol_gate=args.regime_vol_gate,
         require_pda_array=args.require_pda_array,
         max_inducements=args.max_inducements,
         quality_profile=args.quality_profile,
@@ -287,6 +289,8 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="require the configured OTE band")
     p.add_argument("--ote-min", type=float, default=0.62)
     p.add_argument("--ote-max", type=float, default=0.79)
+    p.add_argument("--regime-trend-gate", choices=["none", "up", "down", "aligned"], default="none")
+    p.add_argument("--regime-vol-gate", choices=["none", "low", "normal", "high"], default="none")
     p.add_argument("--require-pda-array", action="store_true",
                    help="require a nearby breaker/mitigation/rejection array")
     p.add_argument("--max-inducements", type=int, default=-1,

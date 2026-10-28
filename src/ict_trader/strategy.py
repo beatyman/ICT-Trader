@@ -95,6 +95,8 @@ class Trade:
     pda_source: str = ""
     htf_pda: bool = False
     htf_fvg_tf: str = ""
+    regime_trend: str = ""
+    regime_vol: str = ""
 
 
 @dataclass
@@ -440,6 +442,8 @@ def simulate_cisd(
             pda_source=str(features.get("pda_source", "")),
             htf_pda=bool(features.get("htf_pda", False)),
             htf_fvg_tf=str(features.get("htf_fvg_tf", "")),
+            regime_trend=str(features.get("regime_trend", "")),
+            regime_vol=str(features.get("regime_vol", "")),
         ))
         eq_points.append((dates.iloc[exit_idx], equity))
 

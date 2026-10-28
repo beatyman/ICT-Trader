@@ -32,6 +32,7 @@ from .sweeps import nearest_key_target
 from .strategy import StrategyConfig, simulate_cisd
 from .indicators import add_indicators, align_htf, ichimoku, macd, resample_cn_4h, resample_htf
 from .quality import measure_displacement, score_setup
+from .regime import market_regime
 
 
 @dataclass
@@ -91,6 +92,9 @@ class SetupConfig:
     pda_array_tol_atr: float = 0.75
     htf_fvg: bool = True
     htf_fvg_window: int = 15
+    regime_features: bool = True
+    regime_trend_gate: str = "none"  # none | up | down | aligned
+    regime_vol_gate: str = "none"    # none | low | normal | high
     max_inducements: int = -1
     quality_profile: str = "standard"  # standard | high_value
     stack: str = "1d_4h_15m"  # 1d_4h_15m | 1d_1h_15m | 1d_15m | 4h_15m | 4h_1h_15m
@@ -423,6 +427,23 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             if cfg.max_inducements >= 0 and inducements > cfg.max_inducements:
                 continue
             quality_parts["inducement_candidates"] = inducements
+            if cfg.regime_features or cfg.regime_trend_gate != "none" or cfg.regime_vol_gate != "none":
+                reg = market_regime(df, t)
+                expected = "up" if c.direction == "bull" else "down"
+                if cfg.regime_trend_gate == "aligned" and reg.trend != expected:
+                    continue
+                if cfg.regime_trend_gate in {"up", "down"} and reg.trend != cfg.regime_trend_gate:
+                    continue
+                if cfg.regime_vol_gate != "none" and reg.volatility != cfg.regime_vol_gate:
+                    continue
+                if cfg.regime_features:
+                    quality_parts.update({
+                        "regime_trend": reg.trend,
+                        "regime_vol": reg.volatility,
+                        "trend_strength": float(reg.trend_strength),
+                        "atr_pct": float(reg.atr_pct),
+                        "vol_rank": float(reg.vol_rank),
+                    })
             out.append(replace(c, target=target, quality=quality, quality_parts=quality_parts))
     return out
 
@@ -490,6 +511,8 @@ def main() -> None:
     ap.add_argument("--ote-gate", action="store_true")
     ap.add_argument("--ote-min", type=float, default=0.62)
     ap.add_argument("--ote-max", type=float, default=0.79)
+    ap.add_argument("--regime-trend-gate", choices=["none", "up", "down", "aligned"], default="none")
+    ap.add_argument("--regime-vol-gate", choices=["none", "low", "normal", "high"], default="none")
     ap.add_argument("--require-pda-array", action="store_true")
     ap.add_argument("--max-inducements", type=int, default=-1)
     ap.add_argument("--quality-profile", choices=["standard", "high_value"], default="standard")
@@ -523,6 +546,8 @@ def main() -> None:
                       ote_gate=args.ote_gate,
                       ote_min=args.ote_min,
                       ote_max=args.ote_max,
+                      regime_trend_gate=args.regime_trend_gate,
+                      regime_vol_gate=args.regime_vol_gate,
                       require_pda_array=args.require_pda_array,
                       max_inducements=args.max_inducements,
                       quality_profile=args.quality_profile,

@@ -46,3 +46,13 @@ def test_shallow_ote_gate_keeps_only_shallow_entries():
         daily_path="examples/daily.csv",
     )
     assert all(0.0 <= t.features.get("ote", 1.0) <= 0.3 for t in trades)
+
+
+def test_regime_gate_only_keeps_up_trend_long():
+    trades, _ = run_one(
+        "examples/15m.csv",
+        SetupConfig(market="cn", stack="1d_1h_15m", t_plus_1=True,
+                    origin_filter="fvg", regime_trend_gate="up"),
+        daily_path="examples/daily.csv",
+    )
+    assert all(t.features.get("regime_trend") == "up" for t in trades)

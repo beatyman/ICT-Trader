@@ -157,6 +157,8 @@ Every filter is explicit and can be disabled to run an ablation:
 --origin-mode strict_sweep|pine
 --origin-filter any|both|sweep|fvg
 --ote-gate --ote-min --ote-max
+--regime-trend-gate none|up|down|aligned
+--regime-vol-gate none|low|normal|high
 --min-setup-score
 --min-disp-body / --min-disp-atr / --min-disp-multiple
 --fvg-min-atr / --fvg-min-body
@@ -175,6 +177,9 @@ hold-out and is below the 100-trade gate. It is not the default.
 The LuxAlgo Pine indicator is a detector, not a strategy. The concept mapping and the
 limits of a Pine-to-Python backtest are documented in
 [`docs/PINE_PARITY.md`](docs/PINE_PARITY.md).
+
+Dataset duplication and full-vs-slice caveats are recorded in
+[`docs/DATA_NOTES.md`](docs/DATA_NOTES.md).
 
 ## Package layout
 

@@ -374,6 +374,34 @@ earlier +0.43R hold-out was a regime/sample artifact, not a stable edge.
 **Conclusion: do not promote shallow OTE to default.**  Keep it as a research
 condition and require a larger, walk-forward sample before drawing a conclusion.
 
+### Regime split: trend/volatility is not stable either
+
+`regime.py` now records trend (`up/down/flat`) and volatility (`low/normal/high`)
+from the base timeframe.  Full BTC FVG-only:
+
+| regime | trades | win rate | avg R |
+|---|---:|---:|---:|
+| up + high vol | 21 | 57.1% | **+0.432** |
+| up, all vol | 76 | 40.8% | -0.056 |
+
+The `up + high` subset looks strong, but the 12k basket gives the opposite result:
+
+| basket | up + high trades | avg R |
+|---|---:|---:|
+| full BTC, FVG | 21 | +0.432 |
+| 12k basket, FVG | 18 | -0.077 |
+| 12k basket, FVG + OTE ≤0.30 | 8 | -0.041 |
+
+This is a regime artifact, not a stable gate.  The optional gates exist for research:
+
+```text
+--regime-trend-gate none|up|down|aligned
+--regime-vol-gate none|low|normal|high
+```
+
+They are **off by default**.  Do not promote `up + high volatility` from 21 BTC trades.
+
+
 
 
 
