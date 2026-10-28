@@ -1,0 +1,25 @@
+{
+  "example_only": true,
+  "symbol": "SH600519",
+  "as_of": "2026-10-28T15:00:00",
+  "decision": "TRADE",
+  "reason": "1D 3/3, 4H 2/3, recent sweep, CISD bull, quality 0.71",
+  "key_levels": {
+    "above": [{"name": "BSL", "price": 77.35}],
+    "below": [{"name": "SSL", "price": 70.6}]
+  },
+  "recent_sweeps": [
+    {"direction": "bull", "name": "SSL", "level": 70.6, "time": "2026-10-28T13:30:00"}
+  ],
+  "setup": {
+    "direction": "bull",
+    "entry_reference": 71.21,
+    "stop": 70.6,
+    "target": 76.0,
+    "r_multiple": 2.0,
+    "grade": 4,
+    "quality": 0.71,
+    "checks": {"sweep": true, "pda": true, "volume": true}
+  },
+  "risk": {"risk_pct": 1.0, "position_size": "risk_amount / (entry - stop)"}
+}

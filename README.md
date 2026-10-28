@@ -1,2 +1,225 @@
-# ICT-Trader
-ICT Trader
+# ICT Trader
+
+A reproducible ICT/SMC research engine and one frozen multi-timeframe setup.
+
+The project is deliberately **not** a "buy/sell signal" package. It is a small,
+auditable pipeline:
+
+```text
+OHLCV
+  → key levels / liquidity pools
+  → sweep + reclaim
+  → FVG / IFVG / order block
+  → CISD
+  → displacement + quality score
+  → 1D / 4H alignment
+  → event-driven execution
+  → MAE/MFE journal
+  → purged walk-forward
+```
+
+## Why this exists
+
+Most ICT scripts draw boxes and arrows. This one is built around four rules:
+
+1. **Closed-candle decisions** — a signal exists only after the confirmation bar closes.
+2. **No future levels** — a swing/session/key level cannot be used before `known_at`.
+3. **Executable test** — next-bar entry, stop/target, costs, A-share T+1, stamp duty.
+4. **Auditable output** — every trade keeps its checks, quality score, MAE and MFE.
+
+## Install
+
+```bash
+git clone https://github.com/beatyman/ICT-Trader.git
+cd ICT-Trader
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+Optional Futu OpenD:
+
+```bash
+pip install -e ".[futu]"
+```
+
+## Quick start
+
+CSV columns:
+
+```text
+date,open,high,low,close,volume
+```
+
+Analyze:
+
+```bash
+ict-trader analyze \
+  --csv examples/ohlcv.csv \
+  --symbol BTCUSDT \
+  --bars 260 \
+  --out output/chart.png \
+  --signals output/signals.csv \
+  --json-out output/analysis.json
+```
+
+Latest trade card:
+
+```bash
+ict-trader plan \
+  --csv examples/15m.csv \
+  --daily-csv examples/daily.csv \
+  --market crypto \
+  --json-out output/trade_plan.json
+```
+
+Backtest:
+
+```bash
+ict-trader backtest \
+  --csv examples/15m.csv \
+  --daily-csv examples/daily.csv \
+  --market cn \
+  --t-plus-1 \
+  --breakeven-at-r 1.5 \
+  --out output/trades.csv \
+  --metrics output/metrics.json
+```
+
+Purged walk-forward:
+
+```bash
+ict-trader walk-forward \
+  --trades output/trades.csv \
+  --folds 5 \
+  --embargo-days 5
+```
+
+Python:
+
+```python
+from ict_trader import ICTConfig, analyze, load_csv
+
+df = load_csv("examples/ohlcv.csv")
+result = analyze(df, ICTConfig(mode="historical"))
+print(len(result.key_levels), len(result.sweeps), len(result.cisds))
+```
+
+## The frozen setup
+
+The package ships one setup, not a parameter buffet:
+
+```text
+1D : Ichimoku cloud + Tenkan/Kijun + MACD     (3/3)
+4H : Ichimoku cloud + Tenkan/Kijun + MACD     (>= 2/3)
+15m: CISD long
+     + a sweep in the last 15 bars
+     + FVG/IFVG/OB PDA
+     + displacement quality
+     + weighted score
+```
+
+Entry: next 15m open.  
+Stop: CISD invalidation wick.  
+Target: fixed 2R by default.  
+Risk: fixed fractional, one position per symbol, optional max concurrency.
+
+Every filter is explicit and can be disabled to run an ablation:
+
+```text
+--allow-no-sweep
+--min-setup-score
+--min-disp-body / --min-disp-atr / --min-disp-multiple
+--fvg-min-atr / --fvg-min-body
+```
+
+## Package layout
+
+```text
+src/ict_trader/
+  concepts.py     key levels, FVG, IFVG, OB, structure, chart
+  cisd.py         Pine-style CISD state machine
+  sweeps.py       key levels + sweep/reclaim events
+  enhancements.py HTF CISD, SMT, session levels
+  indicators.py   Ichimoku, MACD, HTF resampling
+  quality.py      displacement + weighted score
+  setup.py        frozen multi-timeframe setup
+  strategy.py     execution, risk, MAE/MFE, metrics
+  walk_forward.py purged out-of-sample folds
+  cli.py          `ict-trader`
+```
+
+## Output: trade card
+
+`ict-trader plan` returns:
+
+```json
+{
+  "decision": "TRADE",
+  "setup": {
+    "direction": "bull",
+    "level": 71.21,
+    "stop": 70.6,
+    "target": 76.0,
+    "grade": 4,
+    "quality": 0.71,
+    "checks": {
+      "sweep": true,
+      "pda": true,
+      "volume": true
+    }
+  }
+}
+```
+
+If the 1D/4H/sweep/quality gates are not met, it returns:
+
+```json
+{"decision": "NO_TRADE"}
+```
+
+This is a feature. Most days should be `NO_TRADE`.
+
+## AI skill
+
+The repository ships an agent skill at:
+
+```text
+skills/ict-analysis/SKILL.md
+```
+
+The skill requires the model to call the engine and read its JSON. It is not
+allowed to invent levels or reverse-engineer a signal from a screenshot.
+
+See:
+
+- `skills/ict-analysis/SKILL.md`
+- `skills/ict-analysis/references/ict_playbook.md`
+- `skills/ict-analysis/schemas/trade_plan.schema.json`
+
+## Quality gates
+
+Before a strategy change is accepted:
+
+```text
+1. Unit tests pass.
+2. No future data: levels carry known_at.
+3. Entry is next bar, never the signal bar.
+4. A-share test uses T+1 and stamp duty.
+5. MAE/MFE are recorded.
+6. Walk-forward has at least 3 positive and inspectable folds.
+7. Sample >= 50 trades before changing thresholds.
+```
+
+## What this is not
+
+- Not financial advice.
+- Not a guaranteed profitable system.
+- Not a replacement for point-in-time data.
+- Not a full execution simulator (limit-up/down, suspension, borrow fees are
+  still on the roadmap).
+
+## License
+
+MIT. See `LICENSE`.

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ICT Trade Plan",
+  "type": "object",
+  "required": ["symbol", "as_of", "decision"],
+  "properties": {
+    "symbol": {"type": "string"},
+    "as_of": {"type": "string"},
+    "decision": {"enum": ["TRADE", "NO_TRADE"]},
+    "reason": {"type": ["string", "null"]},
+    "key_levels": {
+      "type": "object",
+      "properties": {
+        "above": {"type": "array", "items": {"$ref": "#/$defs/level"}},
+        "below": {"type": "array", "items": {"$ref": "#/$defs/level"}}
+      }
+    },
+    "recent_sweeps": {"type": "array", "items": {"$ref": "#/$defs/sweep"}},
+    "setup": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["direction", "entry_reference", "stop", "target", "r_multiple"],
+          "properties": {
+            "direction": {"enum": ["bull", "bear"]},
+            "entry_reference": {"type": "number"},
+            "stop": {"type": "number"},
+            "target": {"type": "number"},
+            "r_multiple": {"type": "number"},
+            "grade": {"type": "integer"},
+            "quality": {"type": "number"},
+            "checks": {"type": "object", "additionalProperties": {"type": "boolean"}}
+          }
+        }
+      ]
+    },
+    "risk": {
+      "type": ["object", "null"],
+      "properties": {
+        "risk_pct": {"type": "number"},
+        "position_size": {"type": "string"}
+      }
+    }
+  },
+  "$defs": {
+    "level": {
+      "type": "object",
+      "required": ["name", "price"],
+      "properties": {
+        "name": {"type": "string"},
+        "price": {"type": "number"}
+      }
+    },
+    "sweep": {
+      "type": "object",
+      "required": ["direction", "name", "level"],
+      "properties": {
+        "direction": {"enum": ["bull", "bear"]},
+        "name": {"type": "string"},
+        "level": {"type": "number"},
+        "time": {"type": "string"}
+      }
+    }
+  }
+}

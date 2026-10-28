@@ -1,0 +1,39 @@
+{
+  "symbol": "SZ000858",
+  "last_time": "2026-10-28 15:00:00",
+  "last_close": 72.4,
+  "decision": "NO_TRADE",
+  "setup": null,
+  "recent_sweeps": [
+    {
+      "direction": "bull",
+      "name": "SSL",
+      "level": 72.1,
+      "time": "2026-10-21 13:45:00"
+    },
+    {
+      "direction": "bear",
+      "name": "BSL",
+      "level": 72.5,
+      "time": "2026-10-23 10:00:00"
+    },
+    {
+      "direction": "bear",
+      "name": "BSL",
+      "level": 72.97,
+      "time": "2026-10-23 10:45:00"
+    },
+    {
+      "direction": "bear",
+      "name": "BSL",
+      "level": 76.17,
+      "time": "2026-10-27 10:15:00"
+    },
+    {
+      "direction": "bull",
+      "name": "SSL",
+      "level": 71.69,
+      "time": "2026-10-28 09:45:00"
+    }
+  ]
+}
