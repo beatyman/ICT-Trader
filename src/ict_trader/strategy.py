@@ -83,6 +83,13 @@ class Trade:
     be_triggered: bool = False
     t1_locked: bool = False
     sell_tax: float = 0.0
+    planned_entry: float | None = None
+    planned_sl: float | None = None
+    planned_tp: float | None = None
+    entry_deviation_r: float = 0.0
+    stop_deviation_r: float = 0.0
+    quality: float = 0.0
+    rule_version: str = "frozen-v1"
 
 
 @dataclass
@@ -393,6 +400,7 @@ def simulate_cisd(
         r = net / risk
         equity *= (1 + cfg.risk_pct * r)
         day_r[dates.iloc[exit_idx].date()] = day_r.get(dates.iloc[exit_idx].date(), 0.0) + r
+        entry_dev_r = ((entry - c.level) if c.direction == "bull" else (c.level - entry)) / risk
         trades.append(Trade(
             symbol=symbol,
             direction=c.direction,
@@ -416,6 +424,13 @@ def simulate_cisd(
             be_triggered=bool(be_armed),
             t1_locked=bool(t1_locked),
             sell_tax=float(tax),
+            planned_entry=float(c.level),
+            planned_sl=float(c.sl),
+            planned_tp=float(tp),
+            entry_deviation_r=float(entry_dev_r),
+            stop_deviation_r=0.0,
+            quality=float(getattr(c, "quality", 0.0)),
+            rule_version="frozen-v1",
         ))
         eq_points.append((dates.iloc[exit_idx], equity))
 

@@ -146,7 +146,39 @@ Results on the same 8 datasets:
 The zero OTE result is useful: it shows the current CISD entry is not the same as a deep
 OTE entry. Forcing OTE onto this setup would change the model, not improve it.
 
+## PD arrays and inducement (optional, default off)
+
+`pd_arrays.py` adds three independent arrays:
+
+```text
+rejection    long-wick rejection at a confirmed swing
+breaker      a mitigated order block that flipped sides
+mitigation   failed swing (lower high / higher low) without a sweep
+```
+
+`--require-pda-array` requires one of them near the CISD level; it is off by default.
+
+`count_path_liquidity()` counts minor swing highs (for a long) or lows (for a short)
+between entry and target. `--max-inducements N` can reject a setup with too many
+obstacles on the path. This is a **path/inducement proxy**, not a claim that every
+minor swing is an institutional trap.
+
+## Execution journal
+
+`journal.py` and the `ict-trader journal` subcommand normalise each trade into:
+
+```text
+planned vs actual entry, stop and target
+entry_deviation_r, stop_deviation_r
+reason, grade, quality, sample_class, rule_version
+```
+
+The backtest always fills at the plan plus modelled slippage, so it cannot detect a
+discretionary rule break. The schema exists to make a live log comparable; the
+`process_errors` count is only a price-deviation audit, not a complete process score.
+
 ## Next candidates (not implemented)
+
 
 
 These need separate A/B tests before becoming defaults:

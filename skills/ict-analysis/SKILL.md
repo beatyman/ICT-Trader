@@ -175,6 +175,7 @@ setup.quality
 setup.grade
 sweep within 15 bars (and reclaim_bars <= 3 by default)
 1D/4H scores
+optional quality_parts: pd / ote / pda_arrays / inducement_candidates
 ```
 
 Then produce a trade card. If the plan is stale, say `no-trade`, not “wait for a
@@ -189,9 +190,13 @@ ict-trader backtest --csv data/15m.csv --daily-csv data/daily.csv \
   --market cn --t-plus-1 --out output/trades.csv --metrics output/metrics.json
 
 ict-trader walk-forward --trades output/trades.csv --folds 5 --embargo-days 5
+
+ict-trader journal --trades output/trades.csv --out output/journal.csv \
+  --summary output/journal_summary.json
 ```
 
 Report sample size, win rate, average R, PF, max drawdown and fold stability.
+Also report `process_errors` from the journal when discussing execution, not just P&L.
 Never present a 4-trade sample as proof.
 
 ## Output contract

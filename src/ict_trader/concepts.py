@@ -43,6 +43,7 @@ from matplotlib.patches import Rectangle
 
 from .cisd import CISD, CISDConfig, detect_cisd
 from .enhancements import SMT, SessionLevel, detect_htf_cisds, detect_session_levels, detect_smt
+from .pd_arrays import PDAArray, detect_breakers, detect_mitigations, detect_rejections
 from .sweeps import KeyLevel, LiquiditySweep, detect_key_levels, detect_sweeps, nearest_key_target
 
 Direction = Literal["bull", "bear"]
@@ -185,6 +186,7 @@ class ICTResult:
     events: list[StructureEvent] = field(default_factory=list)
     fvgs: list[FVG] = field(default_factory=list)
     order_blocks: list[OrderBlock] = field(default_factory=list)
+    pd_arrays: list[PDAArray] = field(default_factory=list)
     liquidity: list[Liquidity] = field(default_factory=list)
     gaps: list[Gap] = field(default_factory=list)
     killzones: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
@@ -598,6 +600,10 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
     if cfg.show_bpr:
         fvgs.extend(detect_bpr(fvgs))
     obs = detect_order_blocks(df, events, swings, cfg)
+    pd_arrays = (detect_rejections(df, swings)
+                 + detect_breakers(obs)
+                 + detect_mitigations(df, swings))
+    pd_arrays.sort(key=lambda x: x.confirmed_at)
     liq = detect_liquidity(df, pivots, cfg)
     gaps = detect_gaps(df, cfg)
     kz = detect_killzones(df, cfg)
@@ -648,6 +654,7 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
 
     return ICTResult(
         bars=df, swings=swings, events=events, fvgs=fvgs, order_blocks=obs,
+        pd_arrays=pd_arrays,
         liquidity=liq, gaps=gaps, killzones=kz, fib=fib, trend=trend,
         cisds=cisds, htf_cisds=htf_cisds, sessions=sessions, smts=smts,
         key_levels=key_levels, sweeps=sweeps, config=cfg,

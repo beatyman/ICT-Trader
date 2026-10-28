@@ -27,6 +27,7 @@ import pandas as pd
 from .cisd import CISD
 from .concepts import ICTConfig, analyze, load_csv
 from .context import dealing_range, in_session, ote_from_signal
+from .pd_arrays import count_path_liquidity, near_arrays
 from .sweeps import nearest_key_target
 from .strategy import StrategyConfig, simulate_cisd
 from .indicators import add_indicators, align_htf, ichimoku, macd, resample_cn_4h, resample_htf
@@ -85,6 +86,9 @@ class SetupConfig:
     ote_gate: bool = False
     ote_min: float = 0.62
     ote_max: float = 0.79
+    require_pda_array: bool = False
+    pda_array_tol_atr: float = 0.75
+    max_inducements: int = -1
 
 
 def _htf(df: pd.DataFrame, rule: str, market: str = "cn") -> pd.DataFrame:
@@ -114,6 +118,11 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     i15 = ichimoku(df)
     m15 = macd(df)
     close = df["close"].to_numpy(float)
+    high = df["high"].to_numpy(float)
+    low = df["low"].to_numpy(float)
+    tr = np.maximum.reduce([high - low, np.abs(high - np.r_[np.nan, close[:-1]]),
+                            np.abs(low - np.r_[np.nan, close[:-1]])])
+    atr14 = pd.Series(tr).rolling(14, min_periods=1).mean().to_numpy()
     out: list[CISD] = []
     for c in result.cisds:
         t = c.end
@@ -140,6 +149,11 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             ote_pos = ote_from_signal(df, c.start, c.end, c.level, c.direction)
             if ote_pos is None or not (cfg.ote_min <= ote_pos <= cfg.ote_max):
                 continue
+
+        array_hits = near_arrays(result.pd_arrays, c.level, c.direction,
+                                 atr14[t], t, cfg.pda_array_tol_atr)
+        if cfg.require_pda_array and not array_hits:
+            continue
 
         row1 = d1.iloc[t]
         row4 = h4.iloc[t]
@@ -233,6 +247,8 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 quality_parts["pd"] = float(pd_pos)
             if ote_pos is not None:
                 quality_parts["ote"] = float(ote_pos)
+            if array_hits:
+                quality_parts["pda_arrays"] = [a.kind for a in array_hits]
             target = None
             mode = cfg.target_mode
             if cfg.use_key_targets and mode == "fixed":
@@ -247,6 +263,14 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                         target = tgt
                 if target is None and mode == "liquidity":
                     continue
+            path_target = target
+            if path_target is None:
+                risk = abs(c.level - c.sl)
+                path_target = c.level + (cfg.rr * risk if c.direction == "bull" else -cfg.rr * risk)
+            inducements = count_path_liquidity(result.swings, c.level, path_target, c.direction)
+            if cfg.max_inducements >= 0 and inducements > cfg.max_inducements:
+                continue
+            quality_parts["inducement_candidates"] = inducements
             out.append(replace(c, target=target, quality=quality, quality_parts=quality_parts))
     return out
 
@@ -309,6 +333,8 @@ def main() -> None:
                     default="none")
     ap.add_argument("--pd-gate", action="store_true")
     ap.add_argument("--ote-gate", action="store_true")
+    ap.add_argument("--require-pda-array", action="store_true")
+    ap.add_argument("--max-inducements", type=int, default=-1)
     ap.add_argument("--min-disp-body", type=float, default=0.0)
     ap.add_argument("--min-disp-atr", type=float, default=0.0)
     ap.add_argument("--min-disp-multiple", type=float, default=0.0)
@@ -333,6 +359,8 @@ def main() -> None:
                       session_gate=args.session_gate,
                       pd_gate=args.pd_gate,
                       ote_gate=args.ote_gate,
+                      require_pda_array=args.require_pda_array,
+                      max_inducements=args.max_inducements,
                       min_disp_body_ratio=args.min_disp_body,
                       min_disp_atr=args.min_disp_atr,
                       min_disp_multiple=args.min_disp_multiple,

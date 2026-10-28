@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from .concepts import ICTConfig, analyze, atr as atr_series, load_csv, plot, signals_frame
+from .journal import COLUMNS, process_summary
 from .setup import SetupConfig, build_setup, run_one
 from .walk_forward import purged_walk_forward
 
@@ -49,6 +50,7 @@ def cmd_analyze(args) -> None:
         "last_close": float(df["close"].iloc[-1]),
         "key_levels": len(res.key_levels),
         "sweeps": len(res.sweeps),
+        "pd_arrays": len(res.pd_arrays),
         "cisds": len(res.cisds),
         "chart": str(out),
         "signals": args.signals,
@@ -88,6 +90,8 @@ def _setup_config(args) -> SetupConfig:
         session_gate=args.session_gate,
         pd_gate=args.pd_gate,
         ote_gate=args.ote_gate,
+        require_pda_array=args.require_pda_array,
+        max_inducements=args.max_inducements,
     )
 
 
@@ -173,6 +177,20 @@ def cmd_backtest(args) -> None:
     print(f"trades: {args.out}")
 
 
+def cmd_journal(args) -> None:
+    df = pd.read_csv(args.trades)
+    for col in COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+    journal = df[COLUMNS].copy()
+    journal["sample_class"] = journal["sample_class"].fillna("observation")
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    journal.to_csv(args.out, index=False, encoding="utf-8-sig")
+    summary = process_summary(journal)
+    _write_json(args.summary, summary)
+    print(json.dumps({"journal": args.out, **summary}, ensure_ascii=False, indent=2))
+
+
 def cmd_walk_forward(args) -> None:
     df = pd.read_csv(args.trades)
     df["entry_time"] = pd.to_datetime(df["entry_time"])
@@ -252,6 +270,10 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="only buy discount / sell premium of the last confirmed range")
     p.add_argument("--ote-gate", action="store_true",
                    help="require 0.62-0.79 retracement of the last completed leg")
+    p.add_argument("--require-pda-array", action="store_true",
+                   help="require a nearby breaker/mitigation/rejection array")
+    p.add_argument("--max-inducements", type=int, default=-1,
+                   help="reject if more minor swings lie between entry and target (-1=off)")
 
 
 def main(argv=None) -> None:
@@ -276,6 +298,12 @@ def main(argv=None) -> None:
     b.add_argument("--out", default="output/trades.csv")
     b.add_argument("--metrics", default="output/metrics.json")
     b.set_defaults(func=cmd_backtest)
+
+    j = sub.add_parser("journal", help="normalise a trades CSV into an execution journal")
+    j.add_argument("--trades", required=True)
+    j.add_argument("--out", default="output/journal.csv")
+    j.add_argument("--summary", default="output/journal_summary.json")
+    j.set_defaults(func=cmd_journal)
 
     w = sub.add_parser("walk-forward", help="purged walk-forward from a trade CSV")
     w.add_argument("--trades", required=True)

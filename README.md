@@ -96,6 +96,15 @@ ict-trader walk-forward \
   --embargo-days 5
 ```
 
+Execution journal:
+
+```bash
+ict-trader journal \
+  --trades output/trades.csv \
+  --out output/journal.csv \
+  --summary output/journal_summary.json
+```
+
 Python:
 
 ```python
@@ -141,6 +150,8 @@ Every filter is explicit and can be disabled to run an ablation:
 --session-gate none|auto|london|ny_am|ny_pm|cn|hk
 --pd-gate
 --ote-gate
+--require-pda-array
+--max-inducements
 --min-setup-score
 --min-disp-body / --min-disp-atr / --min-disp-multiple
 --fvg-min-atr / --fvg-min-body
@@ -159,6 +170,8 @@ src/ict_trader/
   cisd.py         Pine-style CISD state machine
   sweeps.py       key levels + sweep/reclaim events
   context.py      optional session / premium-discount / OTE gates
+  pd_arrays.py    breaker / mitigation / rejection arrays
+  journal.py      planned-vs-actual execution journal
   enhancements.py HTF CISD, SMT, session levels
   indicators.py   Ichimoku, MACD, HTF resampling
   quality.py      displacement + weighted score
