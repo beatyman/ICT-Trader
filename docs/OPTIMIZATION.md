@@ -349,10 +349,31 @@ train: 27 trades, 59.3%, +0.352R
 test:  18 trades, 61.1%, +0.432R
 ```
 
-This is the first configuration in the study that is positive in **both** train and
-test, but 18 hold-out trades is still far below 100.  It is not a default.  It also
-shows that "OTE" is not one universal band: for FVG-delivery entries, shallow
+On the original 8-case basket this was the first configuration that was positive in
+both train and test, but 18 hold-out trades is far below 100.  It is not a default.
+It also shows that "OTE" is not one universal band: for FVG-delivery entries, shallow
 retracement performs better than the classic deep OTE.
+
+### Expanded-sample check: the 18-trade result did not hold
+
+The 8-dataset basket used short 12k crypto slices.  Re-running on the full 2025–2026
+BTC history and adding SH600519 changes the picture:
+
+| dataset / config | trades | win rate | avg R | total R |
+|---|---:|---:|---:|---:|
+| BTC full, FVG | 118 | 35.6% | -0.227 | -26.78 |
+| BTC full, FVG + OTE ≤ 0.30 | 56 | 41.1% | -0.136 | -7.64 |
+| SH600519, FVG | 11 | 45.5% | +0.123 | +1.35 |
+| SH600519, FVG + OTE ≤ 0.30 | 8 | 37.5% | +0.029 | +0.23 |
+
+On full BTC, shallow OTE improves the loss rate but **does not turn the strategy
+positive**.  Monthly BTC results swing from strongly positive (2025-05, 2025-08,
+2026-08, 2026-09) to strongly negative (2025-06, 2026-01, 2026-05, 2026-07), so the
+earlier +0.43R hold-out was a regime/sample artifact, not a stable edge.
+
+**Conclusion: do not promote shallow OTE to default.**  Keep it as a research
+condition and require a larger, walk-forward sample before drawing a conclusion.
+
 
 
 
