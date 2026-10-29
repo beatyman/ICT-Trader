@@ -142,3 +142,10 @@ scripts/plot_ict_signal.py
 ```
 
 The output HTML is self-contained, so it can be opened without a Plotly CDN.
+
+## One renderer only
+
+`scripts/plot_ict_signal.py` is the approved renderer.  Do not hand-write a
+different chart in an answer: that produces inconsistent styles and cannot be
+reproduced.  If the style needs to change, change this script first.
+

@@ -213,6 +213,11 @@ Rules:
 - every Entry/SL/TP must come from the CSV or a real detected level;
 - show gross RR and net RR, including commission/slippage/sell tax.
 
+**One renderer only.** Do not hand-write a different matplotlib/Plotly chart in
+the answer. The approved renderer is `scripts/plot_ict_signal.py`. If its style
+is unsuitable, change that script (and its docs/tests) first, then regenerate.
+Ad-hoc charts create inconsistent output and are not reproducible.
+
 ### 4. If `decision == "TRADE"`
 
 Verify:
