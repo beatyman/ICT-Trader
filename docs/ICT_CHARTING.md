@@ -1,224 +1,105 @@
 # ICT signal chart
 
-There are two approved renderers:
+The fixed analysis standard is:
 
 ```text
-scripts/plot_ict_clean.py    static PNG, clean light layout (preferred)
-scripts/plot_ict_signal.py   interactive Plotly HTML
+scripts/plot_ict_plotly.py   30-day 15m Plotly dual-panel
 ```
 
-Both use the repository's detectors and never invent an FVG, OB, sweep or CISD.
+It draws the last 30 calendar days of 15m bars, a 75/25 price/volume split,
+shared time axis, real structures only, and a labelled plan.
 
-## Clean PNG
+`scripts/plot_ict_clean.py` (static PNG) and `scripts/plot_ict_signal.py`
+(legacy Plotly) are secondary and must not be used for the standard analysis
+chart.  See [ICT_CHART_STANDARD.md](ICT_CHART_STANDARD.md) for the full contract.
+
+## Standard command
 
 ```bash
-python scripts/plot_ict_clean.py \
-  --csv output/ict/hk09988_15m_2025_2026.csv \
-  --symbol HK.09988 \
-  --last-bars 96 \
-  --out output/ict/hk09988_plan.png
-```
-
-It draws K-lines, volume, key levels, active FVG/OB, sweeps, and a plan.
-
-For a single-panel session view (recommended on a large gap day):
-
-```bash
-python scripts/plot_ict_clean.py \
-  --csv us_googl_15m_recent.csv \
-  --symbol US.GOOGL \
-  --start "2026-10-29 09:30" \
-  --end "2026-10-29 10:30" \
-  --plan-json output/ict/googl_plan.json \
-  --out output/ict/us_googl_session.png
-```
-
-`--start/--end` select the plotted bars; structures are still detected on the
-history ending at `--end`, so no future bar is used.
-
-A plan is drawn by default.  It can come from:
-
-```text
---plan-json ict-trader plan JSON (only decision=TRADE)
---direction/--entry/--sl/--tp/--trigger-time
-otherwise AUTO CONDITIONAL from last CISD / FVG / key level
-```
-
-Example with an engine plan:
-
-```bash
-python scripts/plot_ict_clean.py \
-  --csv us_googl_15m_closed.csv \
-  --symbol US.GOOGL \
-  --plan-json output/ict/googl_plan_latest.json \
-  --out output/ict/us_googl_clean.png
-```
-
-## Interactive 30-day dual-panel (Plotly)
-
-`scripts/plot_ict_plotly.py` implements the 30-day, 15m, price + volume
-dual-panel layout:
-
-```bash
-python scripts/plot_ict_plotly.py \
-  --csv us_msft_15m_closed.csv \
+ict-trader plan \
+  --csv data/15m.csv \
+  --daily-csv data/daily.csv \
+  --market us \
   --symbol US.MSFT \
+  --stack 1d_1h_15m \
+  --json-out output/ict/msft_plan.json
+
+python scripts/plot_ict_plotly.py \
+  --csv data/15m.csv \
+  --symbol US.MSFT \
+  --timeframe 15m \
   --days 30 \
   --market us \
   --plan-json output/ict/msft_plan.json \
-  --out output/ict/us_msft_spec.html
+  --out output/ict/us_msft.html
 ```
 
-It uses true time on the shared x-axis, hides weekends/overnight for cash
-markets, draws only detected structures, and keeps the risk/reward zones from
-the trigger bar to the latest bar.
-
-## Interactive HTML
-
-`scripts/plot_ict_signal.py` uses Plotly and supports the same plan flags.
-
-## Plan is drawn by default
-
-The chart renders a **conditional trade plan** unless explicitly disabled:
-
-```text
-default: --plan auto
-```
-
-`auto` chooses, in order:
-
-```text
-1. the last CISD within 40 bars
-2. otherwise the nearest active bullish/bearish FVG or OB
-3. otherwise the nearest key level in the 15m trend direction
-```
-
-The plan is always labelled:
-
-```text
-AUTO CONDITIONAL
-```
-
-It is **not** a confirmed entry.  If the source is a CISD older than 20 bars,
-the label includes `(stale)`.
-
-To draw structures only:
+## Explicit plan
 
 ```bash
-python scripts/plot_ict_signal.py ... --plan none
-```
-
-An explicit plan always overrides `--plan auto`:
-
-```bash
-python scripts/plot_ict_signal.py ... \
-  --direction long --entry 96.15 --sl 95.25 --tp 99.30 \
-  --trigger-time "2026-10-29 16:00:00"
-```
-
-## Install
-
-```bash
-python -m pip install pandas plotly
-```
-
-Run from the repository root, or install the package with `pip install -e .`.
-
-## Structure-only chart
-
-```bash
-python scripts/plot_ict_signal.py \
-  --csv output/ict/hk03690_15m_2025_2026.csv \
-  --symbol HK.03690 \
-  --last-bars 300 \
-  --hide-weekends \
-  --plan none \
-  --out output/ict/hk03690_ict.html
-```
-
-If no trade plan is supplied, the chart shows:
-
-```text
-NO TRADE watermark
-key levels
-active FVGs + CE
-active order blocks
-recent sweeps
-recent CISD
-structure events
-```
-
-## Chart with a confirmed plan
-
-```bash
-python scripts/plot_ict_signal.py \
+python scripts/plot_ict_plotly.py \
   --csv data/15m.csv \
-  --symbol BTCUSDT \
+  --symbol US.MSFT \
+  --days 30 \
+  --market us \
   --direction long \
-  --entry 79933.7 \
-  --sl 79666.9 \
-  --tp 81344 \
-  --trigger-time "2026-10-29 03:00:00" \
-  --commission-bps 5 \
-  --slippage-bps 2 \
-  --sell-tax-bps 0 \
-  --out output/ict/btc_plan.html
+  --entry 522.50 \
+  --sl 518.80 \
+  --tp 534.57 \
+  --trigger-time "2026-10-29 10:45:00" \
+  --out output/ict/us_msft.html
 ```
 
-The script validates:
+## Plan rules
+
+Priority:
 
 ```text
-long:  SL < Entry < TP
-short: TP < Entry < SL
-trigger time exists in the CSV
+--plan-json (only decision=TRADE)
+--direction/--entry/--sl/--tp/--trigger-time
+AUTO CONDITIONAL from real structure
 ```
 
-It computes:
+An auto plan is always labelled `AUTO CONDITIONAL`; it is not a confirmed
+trade.  The source CISD is marked `(stale)` when older than 20 bars.
+
+## Window rules
 
 ```text
-gross RR = reward / risk
-net RR   = (reward - entry/exit costs) / (risk + entry/exit costs)
+15m
+last 30 calendar days
+all real bars in that window
+no padding, no synthetic bars
 ```
 
-The chart draws:
+For US/HK cash equities the window usually contains about 500–550 bars, not
+2880, because only regular trading hours exist.
+
+## Visual rules
 
 ```text
-Entry line
-SL line
-TP line
-red risk rectangle
-green reward rectangle
-RR / Net RR annotation
+dark theme
+row 1: candles + structures + plan (75%)
+row 2: volume (25%)
+shared x-axis
+rangeslider off
+weekends/overnight hidden for cash markets
+FVG/OB rectangles: no border, low opacity
+sweep: arrow annotation
+CISD: one vertical dashed line
 ```
 
-## Data contract
-
-Required columns:
+## Self-check
 
 ```text
-date, open, high, low, close
+[ ] 30-day 15m window, real bars only
+[ ] two rows, shared x-axis, volume below
+[ ] rangeslider off
+[ ] no border on FVG/OB boxes
+[ ] sweep uses arrows, not circles
+[ ] CISD vertical line only where detected
+[ ] risk/reward zones start at trigger and end at latest bar
+[ ] RR and Net RR shown
+[ ] no future data used for Entry/SL/TP
+[ ] absent structure not drawn
 ```
-
-`volume` is optional.  `date` may be `YYYY-MM-DD HH:MM:SS` or ISO timestamps.
-Use the same `--timeframe` label as the CSV (default `15m`).
-
-## No-lookahead rule
-
-The detector uses only the loaded bars up to the last row.  The optional trade
-plan is drawn on the right side of the trigger bar only; it does not feed future
-prices back into the signal logic.
-
-## Files
-
-```text
-scripts/plot_ict_signal.py
-```
-
-The output HTML is self-contained, so it can be opened without a Plotly CDN.
-
-## One renderer only
-
-`scripts/plot_ict_signal.py` is the approved renderer.  Do not hand-write a
-different chart in an answer: that produces inconsistent styles and cannot be
-reproduced.  If the style needs to change, change this script first.
-

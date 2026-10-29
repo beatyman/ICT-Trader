@@ -187,14 +187,19 @@ Do not turn a `NO_TRADE` into a discretionary buy.
 When the user asks for a chart, use:
 
 ```bash
-python scripts/plot_ict_signal.py \
+python scripts/plot_ict_plotly.py \
   --csv data/15m.csv \
   --symbol SYMBOL \
-  --last-bars 300 \
+  --timeframe 15m \
+  --days 30 \
+  --market us \
   --out output/ict/SYMBOL_chart.html
 ```
 
-**A trade plan is drawn by default** (`--plan auto`).  It must be labelled
+Add `--plan-json output/ict/plan.json` to use the engine plan, or pass
+`--direction/--entry/--sl/--tp/--trigger-time` for an explicit plan.
+
+**A trade plan is drawn by default.**  It must be labelled
 `AUTO CONDITIONAL` and is derived from real structure, in this order:
 
 ```text
@@ -209,21 +214,27 @@ Rules:
 - if the source CISD is older than 20 bars, mark it `(stale)`;
 - if the user supplies `direction/entry/sl/tp/trigger_time`, that explicit plan
   overrides auto;
-- `--plan none` is allowed only for a structure-only chart;
 - every Entry/SL/TP must come from the CSV or a real detected level;
 - show gross RR and net RR, including commission/slippage/sell tax.
 
 **One renderer only.** Do not hand-write a different matplotlib/Plotly chart in
-the answer. Use one of the two approved renderers:
+the answer. Use:
 
 ```text
-scripts/plot_ict_clean.py    static PNG, clean light layout
-scripts/plot_ict_plotly.py   30-day Plotly dual-panel, price + volume
-scripts/plot_ict_signal.py   legacy interactive Plotly HTML
+scripts/plot_ict_plotly.py
 ```
 
-If a style is unsuitable, change that script (and its docs/tests) first, then
-regenerate. Ad-hoc charts create inconsistent output and are not reproducible.
+That script is the fixed ICT chart standard: 30-day 15m window, price + volume
+dual panel, shared x-axis, dark theme, real structures only, and a plan labelled
+`PLAN` or `AUTO CONDITIONAL`.
+
+`scripts/plot_ict_clean.py` and `scripts/plot_ict_signal.py` are deprecated for
+analysis charts. If the layout is unsuitable, change the canonical script first,
+then regenerate.
+
+See [ICT_CHART_STANDARD.md](../../docs/ICT_CHART_STANDARD.md) for the full
+contract and self-check.
+
 
 
 ### 4. If `decision == "TRADE"`
