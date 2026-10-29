@@ -214,9 +214,16 @@ Rules:
 - show gross RR and net RR, including commission/slippage/sell tax.
 
 **One renderer only.** Do not hand-write a different matplotlib/Plotly chart in
-the answer. The approved renderer is `scripts/plot_ict_signal.py`. If its style
-is unsuitable, change that script (and its docs/tests) first, then regenerate.
-Ad-hoc charts create inconsistent output and are not reproducible.
+the answer. Use one of the two approved renderers:
+
+```text
+scripts/plot_ict_clean.py    static PNG, clean light layout (preferred)
+scripts/plot_ict_signal.py   interactive Plotly HTML
+```
+
+If a style is unsuitable, change that script (and its docs/tests) first, then
+regenerate. Ad-hoc charts create inconsistent output and are not reproducible.
+
 
 ### 4. If `decision == "TRADE"`
 

@@ -1,8 +1,47 @@
 # ICT signal chart
 
-`scripts/plot_ict_signal.py` draws a real-bar ICT chart with Plotly.  It reads a
-CSV and uses the repository's detectors; it never invents an FVG, OB, sweep or
-CISD.
+There are two approved renderers:
+
+```text
+scripts/plot_ict_clean.py    static PNG, clean light layout (preferred)
+scripts/plot_ict_signal.py   interactive Plotly HTML
+```
+
+Both use the repository's detectors and never invent an FVG, OB, sweep or CISD.
+
+## Clean PNG
+
+```bash
+python scripts/plot_ict_clean.py \
+  --csv output/ict/hk09988_15m_2025_2026.csv \
+  --symbol HK.09988 \
+  --last-bars 96 \
+  --out output/ict/hk09988_plan.png
+```
+
+It draws K-lines, volume, key levels, active FVG/OB, sweeps, and a plan.
+
+A plan is drawn by default.  It can come from:
+
+```text
+--plan-json ict-trader plan JSON (only decision=TRADE)
+--direction/--entry/--sl/--tp/--trigger-time
+otherwise AUTO CONDITIONAL from last CISD / FVG / key level
+```
+
+Example with an engine plan:
+
+```bash
+python scripts/plot_ict_clean.py \
+  --csv us_googl_15m_closed.csv \
+  --symbol US.GOOGL \
+  --plan-json output/ict/googl_plan_latest.json \
+  --out output/ict/us_googl_clean.png
+```
+
+## Interactive HTML
+
+`scripts/plot_ict_signal.py` uses Plotly and supports the same plan flags.
 
 ## Plan is drawn by default
 
