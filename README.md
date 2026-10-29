@@ -129,7 +129,7 @@ The package ships one setup, not a parameter buffet:
      + weighted score
 ```
 
-Entry: next 15m open by default; `--entry-mode retest_key` waits for a retest of the CISD level.
+Entry: next 15m open by default; `--entry-mode retest_key` waits for a retest of the CISD level; `--entry-mode fvg_ce` waits for the FVG 50% CE.
 Stop: CISD invalidation wick.
 Target: fixed 2R by default; `--target-mode liquidity|hybrid` uses the nearest unswept opposing pool.
 Risk: fixed fractional, one position per symbol, optional max concurrency.
@@ -143,7 +143,7 @@ Every filter is explicit and can be disabled to run an ablation:
 ```text
 --allow-no-sweep
 --sweep-reclaim-bars
---entry-mode next_open|retest_key
+--entry-mode next_open|retest_key|fvg_ce
 --target-mode fixed|liquidity|hybrid
 --trail-activate-r / --trail-atr-mult
 --max-daily-loss-r

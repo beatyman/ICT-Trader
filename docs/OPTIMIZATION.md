@@ -437,6 +437,20 @@ On the same 8-case FVG-only candidate it changed **nothing**: 45 trades before a
 45 after, same win rate and R.  The FVGs that actually trigger already tend to be
 fresh; the filter is therefore a guard for future data, not a source of edge.
 
+### FVG CE entry (optional)
+
+`--entry-mode fvg_ce` waits for the 50% CE of the nearest valid FVG instead of
+entering at the next open.  On the same 8-case FVG-only + OTE≤0.30 candidate:
+
+| entry | trades | win rate | weighted avg R | total R |
+|---|---:|---:|---:|---:|
+| next open | 45 | 60.0% | +0.384 | +17.29 |
+| FVG CE | 33 | 57.6% | +0.413 | +13.64 |
+
+CE slightly improves average R but loses total R and 12 trades; HK 09988 gets worse,
+CN and ETH get better.  Not a default.  It is a valid execution variant to test on a
+larger, out-of-sample sample.
+
 ### Silver Bullet windows (optional)
 
 The Versus Trade / ICT article specifies New York local windows:

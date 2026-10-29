@@ -173,7 +173,7 @@ def simulate_cisd(
         "not_triggered": 0,
     }
     mode = cfg.entry_mode
-    if mode not in {"next_open", "retest_key"}:
+    if mode not in {"next_open", "retest_key", "fvg_ce"}:
         raise ValueError(f"unknown entry_mode: {mode}")
 
     # result.cisds is already time-ordered; use only information at c.end
@@ -186,6 +186,9 @@ def simulate_cisd(
             stats["skipped_busy"] += 1
             continue
         if mode == "retest_key" and t + cfg.retest_max_bars <= busy_until:
+            stats["skipped_busy"] += 1
+            continue
+        if mode == "fvg_ce" and t + cfg.retest_max_bars <= busy_until:
             stats["skipped_busy"] += 1
             continue
         if c.direction == "bull" and not cfg.allow_long:
@@ -212,9 +215,19 @@ def simulate_cisd(
             stats["skipped_risk"] += 1
             continue
 
-        if mode == "retest_key":
+        if mode in {"retest_key", "fvg_ce"}:
             entry_idx = None
             raw_entry = None
+            target_level = c.entry_hint if mode == "fvg_ce" else c.level
+            if target_level is None:
+                stats["not_triggered"] += 1
+                continue
+            # A CE limit on the wrong side of invalidation is not a trade.
+            if (c.direction == "bull" and target_level <= c.sl) or (
+                c.direction == "bear" and target_level >= c.sl
+            ):
+                stats["skipped_gap"] += 1
+                continue
             start = max(t + 1, t + cfg.entry_delay)
             stop_at = min(n, t + cfg.retest_max_bars + 1)
             for k in range(start, stop_at):
@@ -222,14 +235,14 @@ def simulate_cisd(
                     continue
                 a = atr[k] if not np.isnan(atr[k]) and atr[k] > 0 else 0.0
                 tol = a * cfg.retest_tolerance_atr
-                if c.direction == "bull" and low[k] <= c.level + tol:
-                    # A buy limit at the key fills at the limit unless the bar
+                if c.direction == "bull" and low[k] <= target_level + tol:
+                    # A buy limit at the level fills at the limit unless the bar
                     # opens below it, in which case the better open is used.
-                    raw_entry = min(open_[k], c.level + tol)
+                    raw_entry = min(open_[k], target_level + tol)
                     entry_idx = k
                     break
-                if c.direction == "bear" and high[k] >= c.level - tol:
-                    raw_entry = max(open_[k], c.level - tol)
+                if c.direction == "bear" and high[k] >= target_level - tol:
+                    raw_entry = max(open_[k], target_level - tol)
                     entry_idx = k
                     break
             if entry_idx is None:
@@ -254,7 +267,7 @@ def simulate_cisd(
         if risk <= 0:
             stats["skipped_risk"] += 1
             continue
-        if mode == "retest_key":
+        if mode in {"retest_key", "fvg_ce"}:
             # A limit that fills beyond its invalidation is not a valid trade.
             if (c.direction == "bull" and entry <= c.sl) or (c.direction == "bear" and entry >= c.sl):
                 stats["skipped_gap"] += 1

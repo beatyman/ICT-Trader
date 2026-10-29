@@ -72,6 +72,7 @@ class CISD:
     tf: str = "base"
     quality: float = 0.0
     quality_parts: dict = field(default_factory=dict)
+    entry_hint: float | None = None
 
     @property
     def rr(self) -> float:

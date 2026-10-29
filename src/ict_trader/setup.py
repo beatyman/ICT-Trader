@@ -489,7 +489,9 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                         "atr_pct": float(reg.atr_pct),
                         "vol_rank": float(reg.vol_rank),
                     })
-            out.append(replace(c, target=target, quality=quality, quality_parts=quality_parts))
+            entry_hint = float(chosen_fvg.ce) if cfg.entry_mode == "fvg_ce" and chosen_fvg else None
+            out.append(replace(c, target=target, quality=quality,
+                               quality_parts=quality_parts, entry_hint=entry_hint))
     return out
 
 
@@ -544,7 +546,7 @@ def main() -> None:
     ap.add_argument("--sweep-reclaim-bars", type=int, default=3)
     ap.add_argument("--use-key-targets", action="store_true")
     ap.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid"], default="fixed")
-    ap.add_argument("--entry-mode", choices=["next_open", "retest_key"], default="next_open")
+    ap.add_argument("--entry-mode", choices=["next_open", "retest_key", "fvg_ce"], default="next_open")
     ap.add_argument("--retest-max-bars", type=int, default=20)
     ap.add_argument("--retest-tolerance-atr", type=float, default=0.0)
     ap.add_argument("--trail-activate-r", type=float, default=0.0)

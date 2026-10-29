@@ -324,8 +324,8 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="require killzone + DOL + sweep + net RR for a TRADE")
     p.add_argument("--fvg-min-atr", type=float, default=0.25)
     p.add_argument("--fvg-min-body", type=float, default=0.5)
-    p.add_argument("--entry-mode", choices=["next_open", "retest_key"], default="next_open",
-                   help="enter at next open, or wait for a retest of the CISD key level")
+    p.add_argument("--entry-mode", choices=["next_open", "retest_key", "fvg_ce"], default="next_open",
+                   help="enter at next open, retest the CISD key level, or retest the FVG CE")
     p.add_argument("--retest-max-bars", type=int, default=20)
     p.add_argument("--retest-tolerance-atr", type=float, default=0.0)
     p.add_argument("--trail-activate-r", type=float, default=0.0,
