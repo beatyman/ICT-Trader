@@ -23,6 +23,13 @@ Rules:
 - Never silently replace missing bars, forward-fill prices, or change the timezone.
 - Never infer numeric OHLCV from a screenshot. Ask for the CSV/JSON or a data source.
 - A synthetic demo is labelled `synthetic: true` and cannot be presented as live evidence.
+- A scraped **summary**, search snippet or “full scrape” that admits Cloudflare/region
+  blocking is not a full-text source. Label claims from it `interpretive` or `missing`;
+  do not cite it as `observed`.
+- When sources disagree (for example Asian session 19:00–00:00 vs 20:00–00:00 vs
+  19:00–02:00), record the conflict and choose one explicitly; do not average them into
+  a “consensus”.
+
 
 ## 2. Evidence classes
 
