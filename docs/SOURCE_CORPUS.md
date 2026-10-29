@@ -9,20 +9,20 @@ blocks full-text access is not promoted to evidence just because a summary file 
 
 | Corpus | Articles | Chars | Local path | Access |
 |---|---:|---:|---|---|
-| The Inner Circle Traders course | 51 | 701,989 | `output/ict/ict_course/` | full HTML text |
-| Trading Strategy Guides | 16 | 223,026 | `output/ict/tsg_course/` | full HTML text |
-| Vantage Academy (UK) | 126 | 2,780,659 | `output/ict/vantage_course/` | full HTML text |
-| ePlanet Brokers Training | 75 | 1,833,168 | `output/ict/eplanet_course/` | full HTML text |
-| Volity Forex Education | 13 | 115,276 | `output/ict/volity_course/` | full HTML text |
-| Tradervue Blog | 12 | 227,529 | `output/ict/tradervue_course/` | full HTML text |
-| Altrady Crypto | 8 | 93,078 | `output/ict/altrady_course/` | full HTML text |
-| TTrades Education | 34 | 162,948 | `output/ict/ttrades_course/` | full HTML text |
-| Finxsol Blog | 4 | 48,577 | `output/ict/finxsol_course/` | full HTML text |
-| ITBFX Blog | 1 | 22,109 | `output/ict/itbfx_course/` | full HTML text |
-| Trade The Pool | 3 | 47,917 | `output/ict/ttp_course/` | full HTML text |
-| Stoic Edge | 26 | 157,699 | `output/ict/stoic_course/` | full HTML text |
-| Flux Charts | 10 | 49,257 | `output/ict/flux_course/` | full HTML text |
-| 4xPip Blog | 4 | 62,575 | `output/ict/4xpip_course/` | full HTML text |
+| The Inner Circle Traders course | 51 | 701,989 | `corpus/ict_course/` | full HTML text |
+| Trading Strategy Guides | 16 | 223,026 | `corpus/tsg_course/` | full HTML text |
+| Vantage Academy (UK) | 126 | 2,780,659 | `corpus/vantage_course/` | full HTML text |
+| ePlanet Brokers Training | 75 | 1,833,168 | `corpus/eplanet_course/` | full HTML text |
+| Volity Forex Education | 13 | 115,276 | `corpus/volity_course/` | full HTML text |
+| Tradervue Blog | 12 | 227,529 | `corpus/tradervue_course/` | full HTML text |
+| Altrady Crypto | 8 | 93,078 | `corpus/altrady_course/` | full HTML text |
+| TTrades Education | 34 | 162,948 | `corpus/ttrades_course/` | full HTML text |
+| Finxsol Blog | 4 | 48,577 | `corpus/finxsol_course/` | full HTML text |
+| ITBFX Blog | 1 | 22,109 | `corpus/itbfx_course/` | full HTML text |
+| Trade The Pool | 3 | 47,917 | `corpus/ttp_course/` | full HTML text |
+| Stoic Edge | 26 | 157,699 | `corpus/stoic_course/` | full HTML text |
+| Flux Charts | 10 | 49,257 | `corpus/flux_course/` | full HTML text |
+| 4xPip Blog | 4 | 62,575 | `corpus/4xpip_course/` | full HTML text |
 
 Total: **383 full articles**, about **6.6M characters**.
 
@@ -90,3 +90,4 @@ snippets, not full articles.
 Full text can support `observed` claims only when the engine reproduces the rule on
 closed bars.  Even full text is not a backtest.  Summaries and snippets stay
 `interpretive` or `missing`.
+

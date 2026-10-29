@@ -1,0 +1,147 @@
+{
+  "sources": 14,
+  "articles": 383,
+  "chars": 6525807,
+  "items": [
+    {
+      "source_dir": "4xpip_course",
+      "articles": 4,
+      "chars": 62575,
+      "corpus_sha256_prefix": "4a831bbcac4cdc7c",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "altrady_course",
+      "articles": 8,
+      "chars": 93078,
+      "corpus_sha256_prefix": "531a7351303298c6",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "eplanet_course",
+      "articles": 75,
+      "chars": 1833168,
+      "corpus_sha256_prefix": "eb7efdec58dc2f62",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "finxsol_course",
+      "articles": 4,
+      "chars": 48577,
+      "corpus_sha256_prefix": "04237a8699496f48",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "flux_course",
+      "articles": 10,
+      "chars": 49257,
+      "corpus_sha256_prefix": "c6f1729ed8a97b13",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "ict_course",
+      "articles": 51,
+      "chars": 701989,
+      "corpus_sha256_prefix": "08227b4c5a10ae95",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "itbfx_course",
+      "articles": 1,
+      "chars": 22109,
+      "corpus_sha256_prefix": "b34b831c6b0f535b",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "stoic_course",
+      "articles": 26,
+      "chars": 157699,
+      "corpus_sha256_prefix": "7928d96cff6118e1",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "tradervue_course",
+      "articles": 12,
+      "chars": 227529,
+      "corpus_sha256_prefix": "4131c5ae915f7fb4",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "tsg_course",
+      "articles": 16,
+      "chars": 223026,
+      "corpus_sha256_prefix": "542839094924b023",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "ttp_course",
+      "articles": 3,
+      "chars": 47917,
+      "corpus_sha256_prefix": "092a5b16455d8277",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "ttrades_course",
+      "articles": 34,
+      "chars": 162948,
+      "corpus_sha256_prefix": "c06db30a9b70b6b3",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "vantage_course",
+      "articles": 126,
+      "chars": 2780659,
+      "corpus_sha256_prefix": "65f369d80ff03208",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    },
+    {
+      "source_dir": "volity_course",
+      "articles": 13,
+      "chars": 115276,
+      "corpus_sha256_prefix": "b022337c77522291",
+      "files": [
+        "corpus.md",
+        "articles.json"
+      ]
+    }
+  ]
+}
