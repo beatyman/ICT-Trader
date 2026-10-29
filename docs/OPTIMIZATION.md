@@ -401,6 +401,28 @@ This is a regime artifact, not a stable gate.  The optional gates exist for rese
 
 They are **off by default**.  Do not promote `up + high volatility` from 21 BTC trades.
 
+### Silver Bullet windows (optional)
+
+The Versus Trade / ICT article specifies New York local windows:
+
+```text
+03:00–04:00  London open
+10:00–11:00  NY AM
+14:00–15:00  NY PM
+```
+
+Added `--session-gate silver_bullet`.  On the FVG-only + OTE≤0.30 candidate:
+
+| gate | trades | win rate | weighted avg R | total R |
+|---|---:|---:|---:|---:|
+| none | 45 | 60.0% | +0.384 | +17.29 |
+| silver_bullet | 12 | 75.0% | +0.842 | +10.11 |
+
+This is a large improvement in the sample, but only 12 trades.  The article itself
+warns that time windows reduce eligible setups and do not necessarily raise win rate
+or RR.  It remains an optional research gate, not the default.
+
+
 ### Grid result: the best sample combo
 
 A 16-config grid over two stacks, two origins, two OTE modes and 2.0/2.5R was run on

@@ -51,3 +51,17 @@ def test_ote_from_signal_range():
     assert abs(ote_from_signal(df, 1, 3, 121, "bull") - 0.30) < 1e-9
     # bear range 100..130, entry 109 -> 0.30
     assert abs(ote_from_signal(df, 1, 3, 109, "bear") - 0.30) < 1e-9
+
+
+def test_silver_bullet_windows_are_new_york_time():
+    df = pd.DataFrame({
+        "date": pd.to_datetime([
+            "2026-10-28 03:30", "2026-10-28 09:00",
+            "2026-10-28 10:30", "2026-10-28 14:30",
+        ])
+    })
+    assert in_session(df, 0, "crypto", "silver_bullet")
+    assert not in_session(df, 1, "crypto", "silver_bullet")
+    assert in_session(df, 2, "crypto", "silver_bullet")
+    assert in_session(df, 3, "crypto", "silver_bullet")
+

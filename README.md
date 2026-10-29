@@ -147,7 +147,7 @@ Every filter is explicit and can be disabled to run an ablation:
 --target-mode fixed|liquidity|hybrid
 --trail-activate-r / --trail-atr-mult
 --max-daily-loss-r
---session-gate none|auto|london|ny_am|ny_pm|cn|hk
+--session-gate none|auto|london|ny_am|ny_pm|silver_bullet|cn|hk
 --pd-gate
 --ote-gate
 --require-pda-array

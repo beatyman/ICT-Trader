@@ -332,7 +332,7 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="trailing distance in entry-bar ATR (0=off)")
     p.add_argument("--max-daily-loss-r", type=float, default=0.0,
                    help="stop new entries after this daily closed R loss (0=off)")
-    p.add_argument("--session-gate", choices=["none", "auto", "london", "ny_am", "ny_pm", "cn", "hk"],
+    p.add_argument("--session-gate", choices=["none", "auto", "london", "ny_am", "ny_pm", "silver_bullet", "cn", "hk"],
                    default="none", help="optional trading-session gate")
     p.add_argument("--pd-gate", action="store_true",
                    help="only buy discount / sell premium of the last confirmed range")

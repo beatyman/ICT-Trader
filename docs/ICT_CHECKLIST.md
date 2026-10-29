@@ -17,7 +17,7 @@ The enforceable sequence is:
 |---|---|---|
 | 1 | 1D bias aligned | `stack=1d_1h_15m`, `min_1d_score=3` |
 | 2 | External liquidity target | `target_mode=dol` (or fixed 2R as a fallback) |
-| 3 | Session / kill zone | `session_gate=auto|hk|ny_am|...` |
+| 3 | Session / kill zone | `session_gate=auto|hk|ny_am|silver_bullet|...` |
 | 4 | Structure event | CISD in the bias direction |
 | 5 | PD array | `origin_filter=fvg` or `require_pda_array` |
 | 6 | RR ≥ 2 from the structural stop | `min_target_rr=2.0` |
