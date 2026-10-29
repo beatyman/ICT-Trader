@@ -531,7 +531,7 @@ def main() -> None:
     ap.add_argument("--trail-activate-r", type=float, default=0.0)
     ap.add_argument("--trail-atr-mult", type=float, default=0.0)
     ap.add_argument("--max-daily-loss-r", type=float, default=0.0)
-    ap.add_argument("--session-gate", choices=["none", "auto", "london", "ny_am", "ny_pm", "silver_bullet", "cn", "hk"],
+    ap.add_argument("--session-gate", choices=["none", "auto", "asian", "london", "london_close", "ny_am", "ny_pm", "silver_bullet", "cn", "hk"],
                     default="none")
     ap.add_argument("--pd-gate", action="store_true")
     ap.add_argument("--ote-gate", action="store_true")

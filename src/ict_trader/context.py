@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 Market = Literal["cn", "hk", "crypto", "other"]
-SessionGate = Literal["none", "auto", "london", "ny_am", "ny_pm", "silver_bullet", "cn", "hk"]
+SessionGate = Literal["none", "auto", "asian", "london", "london_close", "ny_am", "ny_pm", "silver_bullet", "cn", "hk"]
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,9 @@ _SESSION_WINDOWS: dict[str, tuple[str, list[tuple[dtime, dtime]]]] = {
     "cn": ("Asia/Shanghai", [(dtime(9, 30), dtime(11, 30)), (dtime(13, 0), dtime(15, 0))]),
     "hk": ("Asia/Hong_Kong", [(dtime(9, 30), dtime(12, 0)), (dtime(13, 0), dtime(16, 0))]),
     "london": ("America/New_York", [(dtime(2, 0), dtime(5, 0))]),
+    # ICT teaching: Asian range accumulates 19:00-00:00 NY; London close 10:00-12:00 NY.
+    "asian": ("America/New_York", [(dtime(19, 0), dtime(23, 59, 59))]),
+    "london_close": ("America/New_York", [(dtime(10, 0), dtime(12, 0))]),
     "ny_am": ("America/New_York", [(dtime(7, 0), dtime(10, 0))]),
     "ny_pm": ("America/New_York", [(dtime(13, 30), dtime(16, 0))]),
     # ICT Silver Bullet windows, New York local time.

@@ -64,3 +64,16 @@ def test_silver_bullet_windows_are_new_york_time():
     assert not in_session(df, 1, "crypto", "silver_bullet")
     assert in_session(df, 2, "crypto", "silver_bullet")
     assert in_session(df, 3, "crypto", "silver_bullet")
+
+
+def test_asian_and_london_close_windows():
+    df = pd.DataFrame({
+        "date": pd.to_datetime([
+            "2026-10-28 20:00", "2026-10-28 18:00",
+            "2026-10-28 10:30", "2026-10-28 12:30",
+        ])
+    })
+    assert in_session(df, 0, "crypto", "asian")
+    assert not in_session(df, 1, "crypto", "asian")
+    assert in_session(df, 2, "crypto", "london_close")
+    assert not in_session(df, 3, "crypto", "london_close")
