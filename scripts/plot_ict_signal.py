@@ -92,7 +92,7 @@ def _auto_plan(view: pd.DataFrame, result, atr: float, min_gross_rr: float = 2.5
     source = ""
     if recent:
         c = recent[-1]
-        direction = c.direction
+        direction = "long" if c.direction == "bull" else "short"
         entry = float(c.level)
         sl = float(c.sl)
         source = f"last CISD {view['date'].iloc[c.end]}"
