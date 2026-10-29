@@ -429,6 +429,7 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 quality_parts["fvg_ce"] = float(chosen_fvg.ce)
                 quality_parts["fvg_size_atr"] = float(chosen_fvg.size_atr)
                 quality_parts["fvg_first"] = bool(chosen_fvg.first_presented)
+                quality_parts["fvg_fresh"] = bool(chosen_fvg.fresh)
             target = None
             mode = cfg.target_mode
             if cfg.use_key_targets and mode == "fixed":

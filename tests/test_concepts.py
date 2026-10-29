@@ -24,6 +24,16 @@ def test_fvg_ce_and_first_presented():
     assert f.ce == (f.top + f.bottom) / 2
 
 
+def test_fvg_fresh_until_first_touch():
+    f = FVG("bull", 110.0, 100.0, 1, 3, 3)
+    assert f.fresh
+    f.touched_at = 8
+    assert not f.fresh
+    f.active = False
+    f.mitigated = True
+    assert not f.fresh
+
+
 def test_analyze_and_signals():
     df = sample_df()
     cfg = ICTConfig(swing_len=3, plot_bars=60)

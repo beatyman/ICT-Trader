@@ -12,8 +12,9 @@ blocks full-text access is not promoted to evidence just because a summary file 
 | The Inner Circle Traders course | 51 | 701,989 | `output/ict/ict_course/` | full HTML text |
 | Trading Strategy Guides | 16 | 223,026 | `output/ict/tsg_course/` | full HTML text |
 | Vantage Academy (UK) | 126 | 2,780,659 | `output/ict/vantage_course/` | full HTML text |
+| ePlanet Brokers Training | 75 | 1,833,168 | `output/ict/eplanet_course/` | full HTML text |
 
-Total: **193 full articles**, about **3.7M characters**.
+Total: **268 full articles**, about **5.5M characters**.
 
 ## Blocked / summary-only
 
@@ -34,6 +35,10 @@ snippets, not full articles.
   conservative CE, confirmation entry, Candle-2 stop, freshness, target liquidity.
 - **Vantage Academy**: generic risk, position sizing, psychology, Fibonacci,
   candlesticks and platform mechanics.  It is **not** an ICT edge source.
+- **ePlanet Brokers**: SMC-first explanations of OB/FVG/liquidity/inducement,
+  plus the claim that ICT is SMC with extra layers.  Its FVG article says fresh
+  gaps are more reliable; the scrape summary's “6-hour validity” is **not** in the
+  article and is not adopted.
 
 ## Source conflicts to keep explicit
 

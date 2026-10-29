@@ -132,11 +132,17 @@ class FVG:
     body_ratio: float = 0.0
     volume_ratio: float = 0.0
     first_presented: bool = False
+    touched_at: int | None = None
 
     @property
     def ce(self) -> float:
         """Consequent Encroachment: the 50% midpoint of the gap."""
         return (float(self.top) + float(self.bottom)) / 2.0
+
+    @property
+    def fresh(self) -> bool:
+        """True only while no later wick has traded inside the gap."""
+        return bool(self.active and self.touched_at is None)
 
 
 @dataclass
@@ -351,6 +357,8 @@ def detect_fvgs(df: pd.DataFrame, cfg: ICTConfig) -> list[FVG]:
     for f in out:
         for t in range(f.created + 1, n):
             if f.direction == "bull":
+                if low[t] < f.top and f.touched_at is None:
+                    f.touched_at = t
                 if low[t] <= f.bottom:
                     f.active = False
                     f.mitigated = True
@@ -359,6 +367,8 @@ def detect_fvgs(df: pd.DataFrame, cfg: ICTConfig) -> list[FVG]:
                 if low[t] < f.top:
                     f.right = t
             else:
+                if high[t] > f.bottom and f.touched_at is None:
+                    f.touched_at = t
                 if high[t] >= f.top:
                     f.active = False
                     f.mitigated = True
