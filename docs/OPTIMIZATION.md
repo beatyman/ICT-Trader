@@ -401,6 +401,35 @@ This is a regime artifact, not a stable gate.  The optional gates exist for rese
 
 They are **off by default**.  Do not promote `up + high volatility` from 21 BTC trades.
 
+### FVG Consequent Encroachment and First Presented
+
+Course 51–52 introduces two FVG refinements:
+
+```text
+CE = (top + bottom) / 2
+First Presented FVG = first gap of the displacement cluster
+```
+
+Implemented:
+
+```text
+FVG.ce
+FVG.first_presented
+quality_parts.fvg_ce / fvg_size_atr / fvg_first
+--require-first-fvg
+```
+
+A/B on the FVG-only + OTE≤0.30 candidate:
+
+| filter | trades | win rate | avg R |
+|---|---:|---:|---:|
+| none | 45 | 60.0% | +0.384 |
+| require first FVG | **0** | — | — |
+
+The strict `--require-first-fvg` rejected every trade: the nearest active FVG was
+usually a later gap after the first one had already been mitigated.  Keeping it
+optional; a better next step is to rank by CE/first-presented rather than hard-reject.
+
 ### Silver Bullet windows (optional)
 
 The Versus Trade / ICT article specifies New York local windows:

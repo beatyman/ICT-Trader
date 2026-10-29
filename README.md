@@ -151,6 +151,7 @@ Every filter is explicit and can be disabled to run an ablation:
 --pd-gate
 --ote-gate
 --require-pda-array
+--require-first-fvg
 --max-inducements
 --quality-profile standard|high_value
 --stack 1d_4h_15m|1d_1h_15m|1d_15m|4h_15m|4h_1h_15m

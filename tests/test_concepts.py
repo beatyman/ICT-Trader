@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ict_trader.concepts import ICTConfig, analyze, load_csv, plot, signals_frame
+from ict_trader.concepts import FVG, ICTConfig, analyze, load_csv, plot, signals_frame
 
 
 def sample_df(n: int = 80) -> pd.DataFrame:
@@ -16,6 +16,12 @@ def sample_df(n: int = 80) -> pd.DataFrame:
     return pd.DataFrame(
         {"date": dates, "open": open_, "high": high, "low": low, "close": close, "volume": 1000}
     )
+
+
+def test_fvg_ce_and_first_presented():
+    f = FVG("bull", 110.0, 100.0, 1, 3, 3, first_presented=True)
+    assert f.ce == 105.0
+    assert f.ce == (f.top + f.bottom) / 2
 
 
 def test_analyze_and_signals():

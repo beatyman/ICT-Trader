@@ -99,6 +99,7 @@ def _setup_config(args) -> SetupConfig:
         regime_trend_gate=args.regime_trend_gate,
         regime_vol_gate=args.regime_vol_gate,
         require_pda_array=args.require_pda_array,
+        require_first_fvg=args.require_first_fvg,
         max_inducements=args.max_inducements,
         quality_profile=args.quality_profile,
         stack=args.stack,
@@ -344,6 +345,8 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
     p.add_argument("--regime-vol-gate", choices=["none", "low", "normal", "high"], default="none")
     p.add_argument("--require-pda-array", action="store_true",
                    help="require a nearby breaker/mitigation/rejection array")
+    p.add_argument("--require-first-fvg", action="store_true",
+                   help="require the first FVG of the displacement cluster")
     p.add_argument("--max-inducements", type=int, default=-1,
                    help="reject if more minor swings lie between entry and target (-1=off)")
     p.add_argument("--quality-profile", choices=["standard", "high_value"], default="standard",

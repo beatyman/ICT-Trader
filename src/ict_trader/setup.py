@@ -91,6 +91,7 @@ class SetupConfig:
     ote_max: float = 0.79
     require_pda_array: bool = False
     pda_array_tol_atr: float = 0.75
+    require_first_fvg: bool = False
     htf_fvg: bool = True
     htf_fvg_window: int = 15
     regime_features: bool = True
@@ -275,6 +276,14 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                                  atr14[t], t, cfg.pda_array_tol_atr)
         if cfg.require_pda_array and not array_hits:
             continue
+        fvg_hits = [
+            f for f in result.fvgs
+            if f.direction == c.direction and f.created <= t and f.active
+        ]
+        fvg_hits.sort(key=lambda f: abs(f.ce - c.level))
+        chosen_fvg = fvg_hits[0] if fvg_hits else None
+        if cfg.require_first_fvg and (chosen_fvg is None or not chosen_fvg.first_presented):
+            continue
 
         row1 = d1.iloc[t]
         row4 = h4.iloc[t] if h4 is not None else None
@@ -416,6 +425,10 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 quality_parts["ote"] = float(ote_pos)
             if array_hits:
                 quality_parts["pda_arrays"] = [a.kind for a in array_hits]
+            if chosen_fvg is not None:
+                quality_parts["fvg_ce"] = float(chosen_fvg.ce)
+                quality_parts["fvg_size_atr"] = float(chosen_fvg.size_atr)
+                quality_parts["fvg_first"] = bool(chosen_fvg.first_presented)
             target = None
             mode = cfg.target_mode
             if cfg.use_key_targets and mode == "fixed":
@@ -540,6 +553,7 @@ def main() -> None:
     ap.add_argument("--regime-trend-gate", choices=["none", "up", "down", "aligned"], default="none")
     ap.add_argument("--regime-vol-gate", choices=["none", "low", "normal", "high"], default="none")
     ap.add_argument("--require-pda-array", action="store_true")
+    ap.add_argument("--require-first-fvg", action="store_true")
     ap.add_argument("--max-inducements", type=int, default=-1)
     ap.add_argument("--quality-profile", choices=["standard", "high_value"], default="standard")
     ap.add_argument("--stack", choices=["1d_4h_15m", "1d_1h_15m", "1d_15m", "4h_15m", "4h_1h_15m"],
@@ -576,6 +590,7 @@ def main() -> None:
                       regime_trend_gate=args.regime_trend_gate,
                       regime_vol_gate=args.regime_vol_gate,
                       require_pda_array=args.require_pda_array,
+                      require_first_fvg=args.require_first_fvg,
                       max_inducements=args.max_inducements,
                       quality_profile=args.quality_profile,
                       stack=args.stack,

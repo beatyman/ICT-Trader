@@ -131,6 +131,12 @@ class FVG:
     size_atr: float = 0.0
     body_ratio: float = 0.0
     volume_ratio: float = 0.0
+    first_presented: bool = False
+
+    @property
+    def ce(self) -> float:
+        """Consequent Encroachment: the 50% midpoint of the gap."""
+        return (float(self.top) + float(self.bottom)) / 2.0
 
 
 @dataclass
@@ -333,6 +339,13 @@ def detect_fvgs(df: pd.DataFrame, cfg: ICTConfig) -> list[FVG]:
                 out.append(FVG("bear", float(low[i - 2]), float(high[i]), i - 2, i, i,
                                size_atr=gap / max(atr14[i], 1e-12), body_ratio=body_ratio,
                                volume_ratio=vol_ratio))
+
+    # The first FVG of a displacement cluster is the highest-priority retest.
+    by_dir: dict[str, list[FVG]] = {"bull": [], "bear": []}
+    for f in sorted(out, key=lambda x: x.created):
+        prior = [g for g in by_dir[f.direction] if f.created - g.created <= 5]
+        f.first_presented = not prior
+        by_dir[f.direction].append(f)
 
     # update mitigation and right edges
     for f in out:
