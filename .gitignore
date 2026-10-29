@@ -8,6 +8,7 @@ htmlcov/
 build/
 dist/
 output/
+data/
 .DS_Store
 Thumbs.db
 

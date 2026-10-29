@@ -153,7 +153,7 @@ def detect_htf_cisds(df: pd.DataFrame, tfs: Iterable[str] = ("1h", "4h")) -> lis
     out: list[CISD] = []
     for tf in tfs:
         try:
-            htf = idx.resample(tf).agg(
+            htf = idx.resample(tf, label="left", closed="left").agg(
                 {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
             ).dropna(subset=["open", "high", "low", "close"])
         except Exception:

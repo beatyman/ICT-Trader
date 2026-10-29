@@ -249,11 +249,11 @@ mfe_r, mae_r, exit_efficiency, exit_reason, rule_break
 | `--require-first-fvg` | done, rejects all in sample |
 | `--require-fresh-fvg` | done, no change in sample |
 | `--entry-mode fvg_ce` | done, mixed A/B |
-| Candle 2/3 | not implemented |
+| Candle 2/3 | done, rejected (E1) |
 | Stop A/B | not implemented |
 | Partial at DOL | not implemented |
 | Range break-retest | not implemented |
-| MFE/MAE | not implemented |
+| MFE/MAE | done |
 | SMT feed | not implemented |
 
 ## 10. Execution order

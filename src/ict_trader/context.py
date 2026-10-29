@@ -155,3 +155,69 @@ def ote_retracement(swings: Iterable, entry: float, direction: str) -> float | N
     if high <= low:
         return None
     return min(max((entry - low) / (high - low), 0.0), 1.0)
+
+
+def candle2_closure(prior_high: float, prior_low: float,
+                    cur_high: float, cur_low: float, cur_close: float) -> str | None:
+    """ICT Candle-2 fake-break closure (E1).
+
+    A bullish C2 sweeps the prior low and closes back inside the prior range
+    (above the prior low); a bearish C2 sweeps the prior high and closes back
+    inside (below the prior high).  ``None`` when neither happens.
+
+    This is a daily/HTF bias filter, not a standalone entry.
+    """
+    if cur_low < prior_low and cur_close > prior_low:
+        return "bull"
+    if cur_high > prior_high and cur_close < prior_high:
+        return "bear"
+    return None
+
+
+def candle3_closure(prior_high: float, prior_low: float,
+                    c2_open: float, c2_close: float, c2_high: float, c2_low: float,
+                    c3_open: float, c3_close: float) -> str | None:
+    """ICT Candle-3 reversal (E1).
+
+    C2 fails when the next bar (C3) engulfs C2's body and closes through it.
+    The returned direction is the *new* bias (opposite of the failed C2):
+    a bullish C2 that gets engulfed downward yields ``"bear"``, a bearish C2
+    engulfed upward yields ``"bull"``.
+    """
+    c2_dir = candle2_closure(prior_high, prior_low, c2_high, c2_low, c2_close)
+    if c2_dir is None:
+        return None
+    body_hi = max(float(c2_open), float(c2_close))
+    body_lo = min(float(c2_open), float(c2_close))
+    if c2_dir == "bull":
+        # C2 hinted long; C3 engulfs its body and closes through the low.
+        if float(c3_close) < body_lo:
+            return "bear"
+    else:
+        # C2 hinted short; C3 engulfs its body and closes through the high.
+        if float(c3_close) > body_hi:
+            return "bull"
+    return None
+
+
+def structure_bias(swings: Iterable, t: int, lookback: int = 2) -> str:
+    """ICT daily-bias structure: HH/HL vs LH/LL (corpus high-consensus).
+
+    Bullish = the last two swing highs are rising AND the last two swing lows
+    are rising (higher-high / higher-low).  Bearish = the mirror.  Anything
+    else (mixed, or fewer than two swings on each side) is ``"flat"``.
+    """
+    highs = [s for s in swings if getattr(s, "kind", "") == "H" and int(s.confirmed_at) <= t]
+    lows = [s for s in swings if getattr(s, "kind", "") == "L" and int(s.confirmed_at) <= t]
+    if len(highs) >= lookback and len(lows) >= lookback:
+        h1, h2 = highs[-lookback], highs[-1]
+        l1, l2 = lows[-lookback], lows[-1]
+        hh = float(h2.price) > float(h1.price)
+        hl = float(l2.price) > float(l1.price)
+        lh = float(h2.price) < float(h1.price)
+        ll = float(l2.price) < float(l1.price)
+        if hh and hl:
+            return "bull"
+        if lh and ll:
+            return "bear"
+    return "flat"

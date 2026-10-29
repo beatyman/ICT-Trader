@@ -85,6 +85,8 @@ BUILTIN_EXPERIMENTS: dict[str, dict[str, Any]] = {
     "rr_2_5": {"rr": 2.5, "min_target_rr": 2.5},
     "dol": {"target_mode": "dol"},
     "silver_bullet": {"session_gate": "silver_bullet"},
+    "c2": {"daily_bias_filter": "c2"},
+    "c3": {"daily_bias_filter": "c3"},
 }
 
 

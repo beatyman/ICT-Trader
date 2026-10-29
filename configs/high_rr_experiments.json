@@ -1,0 +1,5 @@
+{
+  "baseline": {},
+  "high_rr": { "quality_profile": "high_rr" },
+  "high_rr_dol": { "quality_profile": "high_rr", "target_mode": "dol" }
+}

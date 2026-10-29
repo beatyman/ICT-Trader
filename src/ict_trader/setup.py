@@ -26,7 +26,8 @@ import pandas as pd
 
 from .cisd import CISD
 from .concepts import ICTConfig, analyze, detect_fvgs, load_csv
-from .context import dealing_range, in_session, ote_from_signal
+from .context import (candle2_closure, candle3_closure, dealing_range, in_session,
+                      ote_from_signal, structure_bias)
 from .pd_arrays import count_path_liquidity, near_arrays
 from .sweeps import nearest_key_target
 from .strategy import StrategyConfig, simulate_cisd
@@ -58,7 +59,7 @@ class SetupConfig:
     sweep_window: int = 15
     sweep_reclaim_bars: int = 3
     use_key_targets: bool = False
-    target_mode: str = "fixed"  # fixed | liquidity | hybrid | dol
+    target_mode: str = "fixed"  # fixed | liquidity | hybrid | dol | htf_dol
     min_target_rr: float = 2.0
     max_target_rr: float = 6.0
     min_disp_body_ratio: float = 0.0
@@ -101,6 +102,8 @@ class SetupConfig:
     max_inducements: int = -1
     quality_profile: str = "standard"  # standard | high_value
     stack: str = "1d_4h_15m"  # 1d_4h_15m | 1d_1h_15m | 1d_15m | 4h_15m | 4h_1h_15m
+    daily_bias_filter: str = "none"  # none | c2 | c3 (E1: Candle 2/3 daily bias)
+    htf_structure_gate: str = "none"  # none | aligned (corpus HTF structure HH/HL vs LH/LL)
 
 
 def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
@@ -109,16 +112,29 @@ def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
     The high-value profile is deliberately a *starting point*, not a proven
     edge: the 0.65 displacement threshold improved the in-sample basket but did
     not survive a chronological hold-out in the bundled study.
+
+    The high-rr profile wires the cross-source corpus consensus (see
+    docs/HIGH_QUALITY_SETUP.md): higher grade/confluence, strong displacement,
+    fresh FVG and a 2.5R floor, without touching the target mode.
     """
-    if cfg.quality_profile != "high_value":
-        return cfg
-    return replace(
-        cfg,
-        min_grade=max(cfg.min_grade, 4),
-        min_confluence=max(cfg.min_confluence, 3),
-        min_disp_body_ratio=max(cfg.min_disp_body_ratio, 0.65),
-        min_target_rr=max(cfg.min_target_rr, 2.0),
-    )
+    if cfg.quality_profile == "high_value":
+        return replace(
+            cfg,
+            min_grade=max(cfg.min_grade, 4),
+            min_confluence=max(cfg.min_confluence, 3),
+            min_disp_body_ratio=max(cfg.min_disp_body_ratio, 0.65),
+            min_target_rr=max(cfg.min_target_rr, 2.0),
+        )
+    if cfg.quality_profile == "high_rr":
+        # A/B result (BTC/ETH/SOL 15m, 2020-2026): grade>=4 and confluence>=3
+        # both reject every signal (the engine's grade tops out at 3 and
+        # confluence at 2); raising the fixed RR and the DOL target both made
+        # expectancy WORSE.  The only lever that helped was displacement.
+        return replace(
+            cfg,
+            min_disp_body_ratio=max(cfg.min_disp_body_ratio, 0.65),
+        )
+    return cfg
 
 
 def _drop_incomplete_htf(base: pd.DataFrame, h: pd.DataFrame) -> pd.DataFrame:
@@ -229,6 +245,52 @@ def _htf_fvg_delivery(zones: list[tuple[float, float, int, str, str]],
 
 
 
+def _daily_bias_series(df: pd.DataFrame, daily: pd.DataFrame | None,
+                       cfg: SetupConfig, spec: StackSpec) -> list[str | None]:
+    """E1: bias-TF Candle-2/3 state, right-aligned to the base bars.
+
+    Each base bar sees only the most recently *closed* bias-TF bar (``searchsorted
+    side="right"`` minus one), so the filter never uses an in-progress daily/4H bar.
+    Returns a list aligned to ``len(df)`` of ``"bull"``/``"bear"``/``None``.
+    """
+    if cfg.daily_bias_filter not in {"c2", "c3"}:
+        return [None] * len(df)
+    d = _raw_htf(df, daily, spec.bias_tf, cfg.market)
+    if d is None or len(d) < 2:
+        return [None] * len(df)
+    d = d.reset_index(drop=True)
+    n = len(d)
+    bias: list[str | None] = [None] * n
+    mode = cfg.daily_bias_filter
+    for i in range(n):
+        if i < 1:
+            continue
+        prev = d.iloc[i - 1]
+        cur = d.iloc[i]
+        if mode == "c2":
+            bias[i] = candle2_closure(
+                float(prev["high"]), float(prev["low"]),
+                float(cur["high"]), float(cur["low"]), float(cur["close"]))
+        else:
+            if i < 2:
+                continue
+            c2 = d.iloc[i - 1]
+            c3 = d.iloc[i]
+            bias[i] = candle3_closure(
+                float(prev["high"]), float(prev["low"]),
+                float(c2["open"]), float(c2["close"]),
+                float(c2["high"]), float(c2["low"]),
+                float(c3["open"]), float(c3["close"]))
+    ddates = pd.to_datetime(d["date"]).to_numpy()
+    base_dates = pd.to_datetime(df["date"]).to_numpy()
+    out: list[str | None] = [None] * len(df)
+    for j, bd in enumerate(base_dates):
+        idx = int(np.searchsorted(ddates, bd, side="right")) - 1
+        if 0 <= idx < n:
+            out[j] = bias[idx]
+    return out
+
+
 def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 daily: pd.DataFrame | None = None) -> list[CISD]:
     cfg = apply_quality_profile(cfg)
@@ -246,12 +308,19 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                             np.abs(low - np.r_[np.nan, close[:-1]])])
     atr14 = pd.Series(tr).rolling(14, min_periods=1).mean().to_numpy()
     htf_zones = _htf_fvg_zones(df, daily, cfg) if cfg.htf_fvg else []
+    daily_bias = _daily_bias_series(df, daily, cfg, spec)
     out: list[CISD] = []
     for c in result.cisds:
         t = c.end
         if c.direction == "bear" and not cfg.allow_short:
             continue
         if c.grade < cfg.min_grade or sum(bool(v) for v in c.checks.values()) < cfg.min_confluence:
+            continue
+        bias_dir = daily_bias[t]
+        if cfg.daily_bias_filter != "none" and bias_dir != c.direction:
+            continue
+        htf_struct = structure_bias(result.swings, t)
+        if cfg.htf_structure_gate == "aligned" and htf_struct != c.direction:
             continue
         if cfg.session_gate != "none" and not in_session(df, t, cfg.market, cfg.session_gate):
             continue
@@ -289,6 +358,13 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             continue
         if cfg.require_first_fvg and (chosen_fvg is None or not chosen_fvg.first_presented):
             continue
+
+        ob_hits = [
+            o for o in result.order_blocks
+            if o.direction == c.direction and o.created <= t and o.active
+        ]
+        ob_hits.sort(key=lambda o: abs(o.mean - c.level))
+        chosen_ob = ob_hits[0] if ob_hits else None
 
         row1 = d1.iloc[t]
         row4 = h4.iloc[t] if h4 is not None else None
@@ -423,6 +499,8 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 "disp_body_atr": float(disp.body_atr),
                 "disp_body_multiple": float(disp.body_multiple),
                 "disp_volume_ratio": float(disp.volume_ratio),
+                "daily_bias": bias_dir or "",
+                "htf_structure": htf_struct,
             })
             if pd_pos is not None:
                 quality_parts["pd"] = float(pd_pos)
@@ -439,7 +517,7 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             mode = cfg.target_mode
             if cfg.use_key_targets and mode == "fixed":
                 mode = "hybrid"
-            if mode in {"liquidity", "hybrid", "dol"}:
+            if mode in {"liquidity", "hybrid", "dol", "htf_dol"}:
                 levels = [k for k in result.key_levels
                           if k.known_at <= t
                           and (k.sweep_bar is None or k.sweep_bar > t)
@@ -450,8 +528,21 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                      if (k.price > c.level if c.direction == "bull" else k.price < c.level)],
                     key=lambda p: abs(p - c.level),
                 )
-                if mode == "dol":
-                    valid = [p for p in prices if risk > 0
+                if mode in {"dol", "htf_dol"}:
+                    if mode == "htf_dol":
+                        # Corpus HTF DOL: prefer time-anchored session/pool levels
+                        # (PDH/PWH/EQH above, PDL/PWL/EQL below), skip arbitrary
+                        # swing BSL/SSL. Fall back to all levels if none anchor.
+                        anchored = [k for k in levels if k.source in {"session", "pool"}]
+                        pool_prices = sorted(
+                            [k.price for k in anchored
+                             if (k.price > c.level if c.direction == "bull" else k.price < c.level)],
+                            key=lambda p: abs(p - c.level),
+                        )
+                        pool_prices = pool_prices or prices
+                    else:
+                        pool_prices = prices
+                    valid = [p for p in pool_prices if risk > 0
                              and cfg.min_target_rr <= abs(p - c.level) / risk <= cfg.max_target_rr]
                     target = valid[0] if valid else None
                     if target is None:
@@ -489,7 +580,20 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                         "atr_pct": float(reg.atr_pct),
                         "vol_rank": float(reg.vol_rank),
                     })
-            entry_hint = float(chosen_fvg.ce) if cfg.entry_mode == "fvg_ce" and chosen_fvg else None
+            if cfg.entry_mode == "fvg_ce" and chosen_fvg:
+                entry_hint = float(chosen_fvg.ce)
+            elif cfg.entry_mode == "ob_me" and chosen_ob:
+                entry_hint = float(chosen_ob.mean)
+            elif cfg.entry_mode == "ote":
+                seg_high = float(high[c.start:c.end + 1].max())
+                seg_low = float(low[c.start:c.end + 1].min())
+                if seg_high > seg_low:
+                    entry_hint = (seg_high - 0.705 * (seg_high - seg_low)) if c.direction == "bull" \
+                        else (seg_low + 0.705 * (seg_high - seg_low))
+                else:
+                    entry_hint = None
+            else:
+                entry_hint = None
             out.append(replace(c, target=target, quality=quality,
                                quality_parts=quality_parts, entry_hint=entry_hint))
     return out
@@ -545,8 +649,8 @@ def main() -> None:
     ap.add_argument("--origin-filter", choices=["any", "both", "sweep", "fvg"], default="any")
     ap.add_argument("--sweep-reclaim-bars", type=int, default=3)
     ap.add_argument("--use-key-targets", action="store_true")
-    ap.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid"], default="fixed")
-    ap.add_argument("--entry-mode", choices=["next_open", "retest_key", "fvg_ce"], default="next_open")
+    ap.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid", "dol", "htf_dol"], default="fixed")
+    ap.add_argument("--entry-mode", choices=["next_open", "retest_key", "fvg_ce", "ob_me", "ote"], default="next_open")
     ap.add_argument("--retest-max-bars", type=int, default=20)
     ap.add_argument("--retest-tolerance-atr", type=float, default=0.0)
     ap.add_argument("--trail-activate-r", type=float, default=0.0)
@@ -564,9 +668,13 @@ def main() -> None:
     ap.add_argument("--require-first-fvg", action="store_true")
     ap.add_argument("--require-fresh-fvg", action="store_true")
     ap.add_argument("--max-inducements", type=int, default=-1)
-    ap.add_argument("--quality-profile", choices=["standard", "high_value"], default="standard")
+    ap.add_argument("--quality-profile", choices=["standard", "high_value", "high_rr"], default="standard")
     ap.add_argument("--stack", choices=["1d_4h_15m", "1d_1h_15m", "1d_15m", "4h_15m", "4h_1h_15m"],
                     default="1d_4h_15m")
+    ap.add_argument("--daily-bias-filter", choices=["none", "c2", "c3"], default="none",
+                    help="E1: require a Candle-2/3 daily bias aligned with the signal")
+    ap.add_argument("--htf-structure-gate", choices=["none", "aligned"], default="none",
+                    help="require HTF structure (HH/HL for long, LH/LL for short) aligned with the signal")
     ap.add_argument("--min-disp-body", type=float, default=0.0)
     ap.add_argument("--min-disp-atr", type=float, default=0.0)
     ap.add_argument("--min-disp-multiple", type=float, default=0.0)
@@ -609,7 +717,9 @@ def main() -> None:
                       min_disp_multiple=args.min_disp_multiple,
                       min_setup_score=args.min_setup_score,
                       min_target_rr=args.min_target_rr,
-                      max_target_rr=args.max_target_rr)
+                      max_target_rr=args.max_target_rr,
+                      daily_bias_filter=args.daily_bias_filter,
+                      htf_structure_gate=args.htf_structure_gate)
     trades, m = run_one(args.csv, cfg, daily_path=args.daily_csv)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([t.__dict__ for t in trades]).to_csv(args.out, index=False, encoding="utf-8-sig")

@@ -156,6 +156,11 @@ class OrderBlock:
     active: bool = True
     mitigated: bool = False
 
+    @property
+    def mean(self) -> float:
+        """Mean threshold: the 50% level of the OB range (TTrades/TSG entry)."""
+        return (float(self.top) + float(self.bottom)) / 2.0
+
 
 @dataclass
 class Liquidity:

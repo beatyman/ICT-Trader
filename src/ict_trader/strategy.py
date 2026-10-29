@@ -173,7 +173,7 @@ def simulate_cisd(
         "not_triggered": 0,
     }
     mode = cfg.entry_mode
-    if mode not in {"next_open", "retest_key", "fvg_ce"}:
+    if mode not in {"next_open", "retest_key", "fvg_ce", "ob_me", "ote"}:
         raise ValueError(f"unknown entry_mode: {mode}")
 
     # result.cisds is already time-ordered; use only information at c.end
@@ -189,6 +189,9 @@ def simulate_cisd(
             stats["skipped_busy"] += 1
             continue
         if mode == "fvg_ce" and t + cfg.retest_max_bars <= busy_until:
+            stats["skipped_busy"] += 1
+            continue
+        if mode in {"ob_me", "ote"} and t + cfg.retest_max_bars <= busy_until:
             stats["skipped_busy"] += 1
             continue
         if c.direction == "bull" and not cfg.allow_long:
@@ -215,10 +218,10 @@ def simulate_cisd(
             stats["skipped_risk"] += 1
             continue
 
-        if mode in {"retest_key", "fvg_ce"}:
+        if mode in {"retest_key", "fvg_ce", "ob_me", "ote"}:
             entry_idx = None
             raw_entry = None
-            target_level = c.entry_hint if mode == "fvg_ce" else c.level
+            target_level = c.entry_hint if mode in {"fvg_ce", "ob_me", "ote"} else c.level
             if target_level is None:
                 stats["not_triggered"] += 1
                 continue
@@ -267,7 +270,7 @@ def simulate_cisd(
         if risk <= 0:
             stats["skipped_risk"] += 1
             continue
-        if mode in {"retest_key", "fvg_ce"}:
+        if mode in {"retest_key", "fvg_ce", "ob_me", "ote"}:
             # A limit that fills beyond its invalidation is not a valid trade.
             if (c.direction == "bull" and entry <= c.sl) or (c.direction == "bear" and entry >= c.sl):
                 stats["skipped_gap"] += 1

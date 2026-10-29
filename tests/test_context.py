@@ -2,7 +2,9 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from ict_trader.context import DealingRange, dealing_range, in_session, ote_from_signal, ote_retracement
+from ict_trader.context import (DealingRange, candle2_closure, candle3_closure,
+                                dealing_range, in_session, ote_from_signal, ote_retracement,
+                                structure_bias)
 
 
 @dataclass
@@ -77,3 +79,38 @@ def test_asian_and_london_close_windows():
     assert not in_session(df, 1, "crypto", "asian")     # 18:00 NY
     assert in_session(df, 2, "crypto", "london_close")  # 10:30 NY
     assert not in_session(df, 3, "crypto", "london_close")  # 12:30 NY
+
+
+def test_candle2_closure_bull_bear_none():
+    # bull: 当日低点跌破前低, 收盘收回前低上方
+    assert candle2_closure(100, 90, 95, 85, 92) == "bull"
+    # bear: 当日高点突破前高, 收盘收回前高下方
+    assert candle2_closure(100, 90, 105, 95, 98) == "bear"
+    # 未 sweep: none
+    assert candle2_closure(100, 90, 95, 92, 94) is None
+    # sweep 但收盘未收回: none
+    assert candle2_closure(100, 90, 95, 85, 88) is None
+
+
+def test_candle3_closure_reversal():
+    # C2 bullish (sweep 前低收回), C3 吞没 C2 实体向下 -> bear
+    assert candle3_closure(100, 90, 91, 92, 95, 85, 90, 88) == "bear"
+    # C2 bearish (sweep 前高收回), C3 吞没 C2 实体向上 -> bull
+    assert candle3_closure(100, 90, 99, 98, 105, 95, 100, 102) == "bull"
+    # 无 C2 形态 -> none
+    assert candle3_closure(100, 90, 91, 92, 95, 92, 90, 88) is None
+
+
+def test_structure_bias_hh_hl_lh_ll():
+    # HH/HL -> bull
+    bull = [P("H", 100, 1, 2), P("L", 50, 3, 4), P("H", 120, 5, 6), P("L", 60, 7, 8)]
+    assert structure_bias(bull, 8) == "bull"
+    # LH/LL -> bear
+    bear = [P("H", 120, 1, 2), P("L", 60, 3, 4), P("H", 100, 5, 6), P("L", 50, 7, 8)]
+    assert structure_bias(bear, 8) == "bear"
+    # 不足两个 swing -> flat
+    flat = [P("H", 100, 1, 2), P("L", 50, 3, 4)]
+    assert structure_bias(flat, 4) == "flat"
+    # 混合（HH 但 LL）-> flat
+    mixed = [P("H", 100, 1, 2), P("L", 60, 3, 4), P("H", 120, 5, 6), P("L", 50, 7, 8)]
+    assert structure_bias(mixed, 8) == "flat"

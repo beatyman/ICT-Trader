@@ -66,7 +66,10 @@ def resample_htf(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     x = df.copy()
     x["date"] = pd.to_datetime(x["date"])
     x = x.set_index("date")
-    out = x.resample(rule, label="right", closed="right").agg(
+    # label="left", closed="left" aligns to the exchange's bar-open boundary
+    # (UTC midnight for 1D, 00:00/04:00/... for 4H).  The old right/right
+    # shifted the HTF bar by one 15m bar, so open/close were wrong.
+    out = x.resample(rule, label="left", closed="left").agg(
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
     ).dropna(subset=["open", "high", "low", "close"])
     out = out.reset_index()
