@@ -416,11 +416,15 @@ Added `--session-gate silver_bullet`.  On the FVG-only + OTE≤0.30 candidate:
 | gate | trades | win rate | weighted avg R | total R |
 |---|---:|---:|---:|---:|
 | none | 45 | 60.0% | +0.384 | +17.29 |
-| silver_bullet | 12 | 75.0% | +0.842 | +10.11 |
+| silver_bullet | 8 | 50.0% | +0.508 | +4.07 |
 
-This is a large improvement in the sample, but only 12 trades.  The article itself
-warns that time windows reduce eligible setups and do not necessarily raise win rate
-or RR.  It remains an optional research gate, not the default.
+This is a larger average R but a **lower win rate** and only 8 trades.  The article
+itself warns that time windows reduce eligible setups and do not necessarily raise
+win rate or RR.  It remains an optional research gate, not the default.
+
+An earlier run showed 12 trades / 75% because naive crypto timestamps were interpreted
+as New York time.  Binance 15m timestamps are UTC; after fixing the timezone conversion
+the corrected result is the 8-trade table above.
 
 
 ### Grid result: the best sample combo

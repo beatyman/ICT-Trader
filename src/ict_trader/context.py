@@ -61,15 +61,26 @@ _SESSION_WINDOWS: dict[str, tuple[str, list[tuple[dtime, dtime]]]] = {
 }
 
 
-def _as_zone(df: pd.DataFrame, idx: int, zone: str) -> pd.Timestamp:
+def _as_zone(df: pd.DataFrame, idx: int, zone: str, market: str = "other") -> pd.Timestamp:
     ts = pd.Timestamp(df["date"].iloc[idx])
     if ts.tzinfo is None:
-        return ts.tz_localize(zone, ambiguous="NaT", nonexistent="shift_forward")
+        source = {
+            "cn": "Asia/Shanghai",
+            "hk": "Asia/Hong_Kong",
+            "crypto": "UTC",
+            "other": "UTC",
+        }.get(market, "UTC")
+        return ts.tz_localize(source, ambiguous="NaT", nonexistent="shift_forward").tz_convert(zone)
     return ts.tz_convert(zone)
 
 
 def in_session(df: pd.DataFrame, idx: int, market: str, gate: SessionGate) -> bool:
-    """Return whether a closed bar falls in the requested cash/session window."""
+    """Return whether a closed bar falls in the requested cash/session window.
+
+    Naive timestamps are interpreted in the market's native timezone (UTC for
+    crypto) and then converted to the session timezone.  This matters for the
+    New York kill zones: Binance 15m timestamps are UTC, not New York local.
+    """
     if gate == "none":
         return True
     if gate == "auto":
@@ -82,7 +93,7 @@ def in_session(df: pd.DataFrame, idx: int, market: str, gate: SessionGate) -> bo
     else:
         key = gate
     zone, windows = _SESSION_WINDOWS[key]
-    t = _as_zone(df, idx, zone).time()
+    t = _as_zone(df, idx, zone, market).time()
     return any(start <= t <= end for start, end in windows)
 
 
