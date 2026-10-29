@@ -22,8 +22,9 @@ blocks full-text access is not promoted to evidence just because a summary file 
 | Trade The Pool | 3 | 47,917 | `output/ict/ttp_course/` | full HTML text |
 | Stoic Edge | 26 | 157,699 | `output/ict/stoic_course/` | full HTML text |
 | Flux Charts | 10 | 49,257 | `output/ict/flux_course/` | full HTML text |
+| 4xPip Blog | 4 | 62,575 | `output/ict/4xpip_course/` | full HTML text |
 
-Total: **379 full articles**, about **6.5M characters**.
+Total: **383 full articles**, about **6.6M characters**.
 
 ## Blocked / summary-only
 
@@ -70,6 +71,9 @@ snippets, not full articles.
   any new indicator.
 - **Flux Charts**: clean definitions of liquidity grab/sweep, Unicorn (breaker+FVG),
   Turtle Soup and SMT.  Useful as confluence labels; no measured edge.
+- **4xPip**: beginner ICT/SMC plus MT4/MT5 automation.  Its useful warning is about
+  Martingale/grid margin blow-ups; its Smart Reaction Zones indicator just combines
+  displacement, imbalance, sweep and structure, which we already model separately.
 
 ## Source conflicts to keep explicit
 
