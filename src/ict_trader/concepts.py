@@ -292,11 +292,30 @@ def detect_structure(df: pd.DataFrame, swings: list[Swing]) -> tuple[list[Struct
     last_broken_low: float | None = None
     trend_series = np.zeros(n, dtype=int)
 
+    # Point-in-time swing pointers.  The old implementation rebuilt
+    # `[s for s in swings ...]` on every bar, which is O(N * swings) and
+    # unusable on multi-year 15m histories.
+    highs_sorted = sorted(
+        (s for s in swings if s.kind == "H"),
+        key=lambda s: (int(s.confirmed_at), int(s.index)),
+    )
+    lows_sorted = sorted(
+        (s for s in swings if s.kind == "L"),
+        key=lambda s: (int(s.confirmed_at), int(s.index)),
+    )
+    hi = li = 0
+    last_high: Swing | None = None
+    last_low: Swing | None = None
+
     for t in range(n):
-        highs = [s for s in swings if s.kind == "H" and s.confirmed_at <= t and s.index < t]
-        lows = [s for s in swings if s.kind == "L" and s.confirmed_at <= t and s.index < t]
-        sh = highs[-1] if highs else None
-        sl = lows[-1] if lows else None
+        while hi < len(highs_sorted) and int(highs_sorted[hi].confirmed_at) <= t:
+            last_high = highs_sorted[hi]
+            hi += 1
+        while li < len(lows_sorted) and int(lows_sorted[li].confirmed_at) <= t:
+            last_low = lows_sorted[li]
+            li += 1
+        sh = last_high if last_high is not None and last_high.index < t else None
+        sl = last_low if last_low is not None and last_low.index < t else None
 
         if sh is not None and close[t] > sh.price and sh.price != last_broken_high:
             kind: Literal["MSS", "BOS"] = "MSS" if trend <= 0 else "BOS"
@@ -354,28 +373,35 @@ def detect_fvgs(df: pd.DataFrame, cfg: ICTConfig) -> list[FVG]:
         by_dir[f.direction].append(f)
 
     # update mitigation and right edges
+    # Vectorised per-gap scan.  The old Python nested loop was O(FVG * N) in
+    # interpreted code and became unusable on multi-year 15m histories.
     for f in out:
-        for t in range(f.created + 1, n):
-            if f.direction == "bull":
-                if low[t] < f.top and f.touched_at is None:
-                    f.touched_at = t
-                if low[t] <= f.bottom:
-                    f.active = False
-                    f.mitigated = True
-                    f.right = t
-                    break
-                if low[t] < f.top:
-                    f.right = t
-            else:
-                if high[t] > f.bottom and f.touched_at is None:
-                    f.touched_at = t
-                if high[t] >= f.top:
-                    f.active = False
-                    f.mitigated = True
-                    f.right = t
-                    break
-                if high[t] > f.bottom:
-                    f.right = t
+        start = f.created + 1
+        if start >= n:
+            f.right = n - 1
+            continue
+        if f.direction == "bull":
+            lows = low[start:]
+            touch = lows < f.top
+            full = lows <= f.bottom
+            if touch.any():
+                f.touched_at = start + int(np.argmax(touch))
+            if full.any():
+                f.active = False
+                f.mitigated = True
+                f.right = start + int(np.argmax(full))
+                continue
+        else:
+            highs = high[start:]
+            touch = highs > f.bottom
+            full = highs >= f.top
+            if touch.any():
+                f.touched_at = start + int(np.argmax(touch))
+            if full.any():
+                f.active = False
+                f.mitigated = True
+                f.right = start + int(np.argmax(full))
+                continue
         if f.active:
             f.right = n - 1
     return out
