@@ -61,6 +61,9 @@ Do not use for:
 11. **Use one state.** `confirmed`, `developing`, `invalidated` or `no-trade`.
     `confirmed` requires closed-bar evidence and **net** RR >= 2; a high quality
     score alone is not confirmation.
+12. **One primary PD array.** Pick the entry array the model can actually test
+    (CISD, FVG, OB, breaker or rejection). Other arrays are confluence, not extra
+    requirements. Stacking every array produces fewer, not better, trades.
 12. **Respect sample size.** Never optimize or claim an edge below 100 trades.
     Report `sample_class` from the backtest and separate process errors from P&L.
 

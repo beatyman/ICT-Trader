@@ -15,8 +15,12 @@ blocks full-text access is not promoted to evidence just because a summary file 
 | ePlanet Brokers Training | 75 | 1,833,168 | `output/ict/eplanet_course/` | full HTML text |
 | Volity Forex Education | 13 | 115,276 | `output/ict/volity_course/` | full HTML text |
 | Tradervue Blog | 12 | 227,529 | `output/ict/tradervue_course/` | full HTML text |
+| Altrady Crypto | 8 | 93,078 | `output/ict/altrady_course/` | full HTML text |
+| TTrades Education | 34 | 162,948 | `output/ict/ttrades_course/` | full HTML text |
+| Finxsol Blog | 4 | 48,577 | `output/ict/finxsol_course/` | full HTML text |
+| ITBFX Blog | 1 | 22,109 | `output/ict/itbfx_course/` | full HTML text |
 
-Total: **293 full articles**, about **5.8M characters**.
+Total: **340 full articles**, about **6.2M characters**.
 
 ## Blocked / summary-only
 
@@ -46,6 +50,15 @@ snippets, not full articles.
   weekly risk budget, drawdown circuit breaker.
 - **Tradervue**: execution and journaling, not ICT edge.  Its ICT article is
   descriptive; its value is risk-reward, MFE/MAE, daily loss limits and review.
+- **Altrady**: crypto adaptation of ICT/SMC.  It explicitly warns that 24/7 crypto
+  has no clean kill zones, so session filters need re-testing and wider stops.
+- **TTrades**: Fractal Model.  The usable additions are Candle 2/Candle 3 closure,
+  CISD as swing confirmation, internal/external liquidity and protected swings.
+  It also argues for using **one** PD array, not stacking all of them.
+- **Finxsol / ITBFX**: mostly narrative and broker education.  Finxsol's
+  sweep-vs-grab distinction is not standardized across sources; do not hard-code it.
+  ITBFX's UTC kill-zone table conflicts with the NY tables, another reason to keep
+  session windows configurable.
 
 ## Source conflicts to keep explicit
 
