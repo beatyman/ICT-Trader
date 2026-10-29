@@ -119,8 +119,18 @@ def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
     )
 
 
+def _drop_incomplete_htf(base: pd.DataFrame, h: pd.DataFrame) -> pd.DataFrame:
+    """Drop a resampled HTF bar whose period closes after the last base bar."""
+    if len(h) == 0 or len(base) == 0:
+        return h
+    if pd.to_datetime(h["date"].iloc[-1]) > pd.to_datetime(base["date"].iloc[-1]):
+        return h.iloc[:-1].reset_index(drop=True)
+    return h
+
+
 def _htf(df: pd.DataFrame, rule: str, market: str = "cn") -> pd.DataFrame:
     h = resample_cn_4h(df) if (rule == "4h" and market == "cn") else resample_htf(df, rule)
+    h = _drop_incomplete_htf(df, h)
     return align_htf(df, h, ["close", "tenkan", "kijun", "span_a", "span_b", "cloud_top", "cloud_bottom",
                              "macd", "macd_signal", "macd_hist"])
 
@@ -169,10 +179,10 @@ def _raw_htf(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str)
         h = daily.copy()
         h["date"] = (pd.to_datetime(h["date"]).dt.normalize()
                      + pd.Timedelta(hours=16 if market == "hk" else 15))
-        return h.sort_values("date")
+        return _drop_incomplete_htf(df, h.sort_values("date").reset_index(drop=True))
     if tf == "4h" and market == "cn":
-        return resample_cn_4h(df)
-    return resample_htf(df, tf)
+        return _drop_incomplete_htf(df, resample_cn_4h(df))
+    return _drop_incomplete_htf(df, resample_htf(df, tf))
 
 
 def _htf_fvg_zones(df: pd.DataFrame, daily: pd.DataFrame | None,
