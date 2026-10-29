@@ -54,6 +54,25 @@ python scripts/plot_ict_clean.py \
   --out output/ict/us_googl_clean.png
 ```
 
+## Interactive 30-day dual-panel (Plotly)
+
+`scripts/plot_ict_plotly.py` implements the 30-day, 15m, price + volume
+dual-panel layout:
+
+```bash
+python scripts/plot_ict_plotly.py \
+  --csv us_msft_15m_closed.csv \
+  --symbol US.MSFT \
+  --days 30 \
+  --market us \
+  --plan-json output/ict/msft_plan.json \
+  --out output/ict/us_msft_spec.html
+```
+
+It uses true time on the shared x-axis, hides weekends/overnight for cash
+markets, draws only detected structures, and keeps the risk/reward zones from
+the trigger bar to the latest bar.
+
 ## Interactive HTML
 
 `scripts/plot_ict_signal.py` uses Plotly and supports the same plan flags.

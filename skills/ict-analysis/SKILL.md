@@ -217,8 +217,9 @@ Rules:
 the answer. Use one of the two approved renderers:
 
 ```text
-scripts/plot_ict_clean.py    static PNG, clean light layout (preferred)
-scripts/plot_ict_signal.py   interactive Plotly HTML
+scripts/plot_ict_clean.py    static PNG, clean light layout
+scripts/plot_ict_plotly.py   30-day Plotly dual-panel, price + volume
+scripts/plot_ict_signal.py   legacy interactive Plotly HTML
 ```
 
 If a style is unsuitable, change that script (and its docs/tests) first, then
