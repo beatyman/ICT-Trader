@@ -19,8 +19,11 @@ blocks full-text access is not promoted to evidence just because a summary file 
 | TTrades Education | 34 | 162,948 | `output/ict/ttrades_course/` | full HTML text |
 | Finxsol Blog | 4 | 48,577 | `output/ict/finxsol_course/` | full HTML text |
 | ITBFX Blog | 1 | 22,109 | `output/ict/itbfx_course/` | full HTML text |
+| Trade The Pool | 3 | 47,917 | `output/ict/ttp_course/` | full HTML text |
+| Stoic Edge | 26 | 157,699 | `output/ict/stoic_course/` | full HTML text |
+| Flux Charts | 10 | 49,257 | `output/ict/flux_course/` | full HTML text |
 
-Total: **340 full articles**, about **6.2M characters**.
+Total: **379 full articles**, about **6.5M characters**.
 
 ## Blocked / summary-only
 
@@ -59,6 +62,14 @@ snippets, not full articles.
   sweep-vs-grab distinction is not standardized across sources; do not hard-code it.
   ITBFX's UTC kill-zone table conflicts with the NY tables, another reason to keep
   session windows configurable.
+- **Trade The Pool**: stock-prop context and beginner ICT.  Useful for cash-session
+  examples, not for a new entry model.
+- **Stoic Edge**: the most evidence-aware source.  One range map, two setups
+  (sweep-retest, break-retest), explicit test specification, no-hindsight rule and
+  structural stop sizing.  This supports our `NO_TRADE`/audit direction more than
+  any new indicator.
+- **Flux Charts**: clean definitions of liquidity grab/sweep, Unicorn (breaker+FVG),
+  Turtle Soup and SMT.  Useful as confluence labels; no measured edge.
 
 ## Source conflicts to keep explicit
 
