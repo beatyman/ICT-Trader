@@ -92,6 +92,7 @@ class SetupConfig:
     require_pda_array: bool = False
     pda_array_tol_atr: float = 0.75
     require_first_fvg: bool = False
+    require_fresh_fvg: bool = False
     htf_fvg: bool = True
     htf_fvg_window: int = 15
     regime_features: bool = True
@@ -281,7 +282,11 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             if f.direction == c.direction and f.created <= t and f.active
         ]
         fvg_hits.sort(key=lambda f: abs(f.ce - c.level))
+        if cfg.require_fresh_fvg:
+            fvg_hits = [f for f in fvg_hits if f.fresh]
         chosen_fvg = fvg_hits[0] if fvg_hits else None
+        if cfg.require_fresh_fvg and chosen_fvg is None:
+            continue
         if cfg.require_first_fvg and (chosen_fvg is None or not chosen_fvg.first_presented):
             continue
 
@@ -555,6 +560,7 @@ def main() -> None:
     ap.add_argument("--regime-vol-gate", choices=["none", "low", "normal", "high"], default="none")
     ap.add_argument("--require-pda-array", action="store_true")
     ap.add_argument("--require-first-fvg", action="store_true")
+    ap.add_argument("--require-fresh-fvg", action="store_true")
     ap.add_argument("--max-inducements", type=int, default=-1)
     ap.add_argument("--quality-profile", choices=["standard", "high_value"], default="standard")
     ap.add_argument("--stack", choices=["1d_4h_15m", "1d_1h_15m", "1d_15m", "4h_15m", "4h_1h_15m"],
@@ -592,6 +598,7 @@ def main() -> None:
                       regime_vol_gate=args.regime_vol_gate,
                       require_pda_array=args.require_pda_array,
                       require_first_fvg=args.require_first_fvg,
+                      require_fresh_fvg=args.require_fresh_fvg,
                       max_inducements=args.max_inducements,
                       quality_profile=args.quality_profile,
                       stack=args.stack,

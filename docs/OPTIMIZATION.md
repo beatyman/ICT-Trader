@@ -430,6 +430,13 @@ The strict `--require-first-fvg` rejected every trade: the nearest active FVG wa
 usually a later gap after the first one had already been mitigated.  Keeping it
 optional; a better next step is to rank by CE/first-presented rather than hard-reject.
 
+### FVG freshness
+
+`--require-fresh-fvg` uses `FVG.fresh` (active and never touched by a later wick).
+On the same 8-case FVG-only candidate it changed **nothing**: 45 trades before and
+45 after, same win rate and R.  The FVGs that actually trigger already tend to be
+fresh; the filter is therefore a guard for future data, not a source of edge.
+
 ### Silver Bullet windows (optional)
 
 The Versus Trade / ICT article specifies New York local windows:
