@@ -13,8 +13,10 @@ blocks full-text access is not promoted to evidence just because a summary file 
 | Trading Strategy Guides | 16 | 223,026 | `output/ict/tsg_course/` | full HTML text |
 | Vantage Academy (UK) | 126 | 2,780,659 | `output/ict/vantage_course/` | full HTML text |
 | ePlanet Brokers Training | 75 | 1,833,168 | `output/ict/eplanet_course/` | full HTML text |
+| Volity Forex Education | 13 | 115,276 | `output/ict/volity_course/` | full HTML text |
+| Tradervue Blog | 12 | 227,529 | `output/ict/tradervue_course/` | full HTML text |
 
-Total: **268 full articles**, about **5.5M characters**.
+Total: **293 full articles**, about **5.8M characters**.
 
 ## Blocked / summary-only
 
@@ -39,6 +41,11 @@ snippets, not full articles.
   plus the claim that ICT is SMC with extra layers.  Its FVG article says fresh
   gaps are more reliable; the scrape summary's “6-hour validity” is **not** in the
   article and is not adopted.
+- **Volity**: concise ICT/SMC explainers (rejection block, SFP, AMD, liquidity)
+  and a five-layer risk framework: 1% per trade, 3% daily loss, leverage cap,
+  weekly risk budget, drawdown circuit breaker.
+- **Tradervue**: execution and journaling, not ICT edge.  Its ICT article is
+  descriptive; its value is risk-reward, MFE/MAE, daily loss limits and review.
 
 ## Source conflicts to keep explicit
 

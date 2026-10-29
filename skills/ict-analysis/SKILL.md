@@ -50,7 +50,9 @@ Do not use for:
 6. **No probability claims.** Do not say "80% chance" unless a validated model
    produced a calibrated probability.
 7. **Risk first.** Every trade card must include stop, target, R:R and a
-   position-size method.
+   position-size method. Default caps: 1% equity per trade, 3% daily loss,
+   6% rolling weekly loss, and a 10% drawdown pause. Treat these as hard
+   process gates, not suggestions.
 8. **Not financial advice.** State the research/education nature when relevant.
 9. **Record provenance.** Report source, `as_of`, timezone, bar count and whether
    the data is verified or synthetic. A forming bar is not closed.
