@@ -1,0 +1,13 @@
+{
+  "baseline": {},
+  "entry_ce": {
+    "entry_mode": "fvg_ce"
+  },
+  "fresh_fvg": {
+    "require_fresh_fvg": true
+  },
+  "rr_2_5": {
+    "rr": 2.5,
+    "min_target_rr": 2.5
+  }
+}

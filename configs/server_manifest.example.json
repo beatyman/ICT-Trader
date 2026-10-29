@@ -1,0 +1,36 @@
+{
+  "datasets": [
+    {
+      "name": "btc_train",
+      "path": "/data/ict/btc_15m_train_2020_2023.csv",
+      "split": "train",
+      "symbol": "BTC",
+      "market": "crypto",
+      "daily": null
+    },
+    {
+      "name": "btc_val",
+      "path": "/data/ict/btc_15m_val_2024.csv",
+      "split": "val",
+      "symbol": "BTC",
+      "market": "crypto",
+      "daily": null
+    },
+    {
+      "name": "eth_train",
+      "path": "/data/ict/eth_15m_train_2020_2023.csv",
+      "split": "train",
+      "symbol": "ETH",
+      "market": "crypto",
+      "daily": null
+    },
+    {
+      "name": "eth_val",
+      "path": "/data/ict/eth_15m_val_2024.csv",
+      "split": "val",
+      "symbol": "ETH",
+      "market": "crypto",
+      "daily": null
+    }
+  ]
+}
