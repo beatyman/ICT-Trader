@@ -72,6 +72,96 @@ def _net_rr(direction: str, entry: float, sl: float, tp: float, commission_bps: 
     return gross_rr, net_rr
 
 
+def _auto_plan(view: pd.DataFrame, result, atr: float, min_gross_rr: float = 2.5) -> dict | None:
+    """Derive a labelled conditional plan from real structure.
+
+    This is deliberately conservative: it uses the last CISD if one exists in
+    the recent window; otherwise it uses the nearest active FVG/OB or key level
+    in the direction of the 15m trend.  It never claims the plan is triggered.
+    """
+    n = len(view)
+    last = n - 1
+    price = float(view["close"].iloc[-1])
+    visible = [
+        k for k in result.key_levels
+        if k.known_at <= last
+        and (k.sweep_bar is None or k.sweep_bar > last)
+        and (k.broken_at is None or k.broken_at > last)
+    ]
+    recent = [c for c in result.cisds if last - c.end <= 40]
+    source = ""
+    if recent:
+        c = recent[-1]
+        direction = c.direction
+        entry = float(c.level)
+        sl = float(c.sl)
+        source = f"last CISD {view['date'].iloc[c.end]}"
+        if last - c.end > 20:
+            source += " (stale)"
+    else:
+        trend = int(result.trend.iloc[-1]) if result.trend is not None else 0
+        direction = "long" if trend >= 0 else "short"
+        fvgs = [f for f in result.fvgs if f.active and f.created <= last]
+        if direction == "long":
+            pool = [f for f in fvgs if f.direction == "bull" and f.ce <= price + 0.5 * atr]
+            if pool:
+                f = max(pool, key=lambda x: x.ce)
+                entry = float(f.ce)
+                sl = float(f.bottom) - 0.25 * atr
+                source = "nearest bullish FVG"
+            else:
+                supports = [k.price for k in visible if k.price < price]
+                entry = price
+                sl = (max(supports) - 0.25 * atr) if supports else (price - 1.5 * atr)
+                source = "nearest key level"
+        else:
+            pool = [f for f in fvgs if f.direction == "bear" and f.ce >= price - 0.5 * atr]
+            if pool:
+                f = min(pool, key=lambda x: x.ce)
+                entry = float(f.ce)
+                sl = float(f.top) + 0.25 * atr
+                source = "nearest bearish FVG"
+            else:
+                resists = [k.price for k in visible if k.price > price]
+                entry = price
+                sl = (min(resists) + 0.25 * atr) if resists else (price + 1.5 * atr)
+                source = "nearest key level"
+
+    risk = abs(entry - sl)
+    if risk <= 0 or not pd.notna(risk):
+        sl = entry - 1.5 * atr if direction == "long" else entry + 1.5 * atr
+    if direction == "long" and sl >= entry:
+        sl = entry - 1.5 * atr
+    if direction == "short" and sl <= entry:
+        sl = entry + 1.5 * atr
+    risk = abs(entry - sl)
+    if risk <= 0 or not pd.notna(risk):
+        return None
+    if direction == "long":
+        targets = sorted([float(k.price) for k in visible if k.price > entry])
+    else:
+        targets = sorted([float(k.price) for k in visible if k.price < entry], reverse=True)
+    target = None
+    for t in targets:
+        rr = (t - entry) / risk if direction == "long" else (entry - t) / risk
+        if rr >= min_gross_rr:
+            target = t
+            break
+    if target is None:
+        target = entry + min_gross_rr * risk if direction == "long" else entry - min_gross_rr * risk
+
+    return {
+        "direction": direction,
+        "entry": float(entry),
+        "sl": float(sl),
+        "tp": float(target),
+        "trigger_time": view["date"].iloc[last],
+        "source": source,
+        "conditional": True,
+    }
+
+
+
 def build_chart(df: pd.DataFrame, args) -> go.Figure:
     if len(df) < 30:
         raise SystemExit("not enough bars: need at least 30")
@@ -198,7 +288,8 @@ def build_chart(df: pd.DataFrame, args) -> go.Figure:
             font=dict(size=9, color=color), xanchor="left",
         )
 
-    # ---- optional trade plan --------------------------------------
+    # ---- trade plan: explicit, auto, or none -----------------------
+    plan = None
     if args.direction:
         if args.entry is None or args.sl is None or args.tp is None:
             raise SystemExit("--direction requires --entry --sl --tp")
@@ -208,8 +299,22 @@ def build_chart(df: pd.DataFrame, args) -> go.Figure:
             raise SystemExit("long plan requires SL < Entry < TP")
         if args.direction == "short" and not (args.tp < args.entry < args.sl):
             raise SystemExit("short plan requires TP < Entry < SL")
+        plan = {
+            "direction": args.direction,
+            "entry": float(args.entry),
+            "sl": float(args.sl),
+            "tp": float(args.tp),
+            "trigger_time": args.trigger_time,
+            "source": "explicit",
+            "conditional": False,
+        }
+    elif args.plan == "auto":
+        atr_series = (view["high"] - view["low"]).rolling(14, min_periods=1).mean()
+        atr = float(atr_series.iloc[-1])
+        plan = _auto_plan(view, result, atr, min_gross_rr=2.5)
 
-        trigger = pd.Timestamp(args.trigger_time)
+    if plan:
+        trigger = pd.Timestamp(plan["trigger_time"])
         matches = view.index[view["date"] == trigger].tolist()
         if not matches:
             raise SystemExit(f"trigger_time not found in data: {trigger}")
@@ -218,32 +323,37 @@ def build_chart(df: pd.DataFrame, args) -> go.Figure:
         x1 = view["date"].iloc[-1]
 
         fig.add_shape(
-            type="rect", x0=x0, x1=x1, y0=args.entry, y1=args.sl,
+            type="rect", x0=x0, x1=x1, y0=plan["entry"], y1=plan["sl"],
             fillcolor="rgba(255,0,0,0.12)", line=dict(width=0), layer="below",
         )
         fig.add_shape(
-            type="rect", x0=x0, x1=x1, y0=args.entry, y1=args.tp,
+            type="rect", x0=x0, x1=x1, y0=plan["entry"], y1=plan["tp"],
             fillcolor="rgba(0,255,0,0.10)", line=dict(width=0), layer="below",
         )
-        fig.add_hline(y=args.entry, line_color="#42a5f5", line_width=2,
-                      annotation_text=f"Entry {args.entry:g}", annotation_position="right")
-        fig.add_hline(y=args.sl, line_color="#ef5350", line_dash="dash",
-                      annotation_text=f"SL {args.sl:g}", annotation_position="right")
-        fig.add_hline(y=args.tp, line_color="#66bb6a", line_dash="dash",
-                      annotation_text=f"TP {args.tp:g}", annotation_position="right")
+        fig.add_hline(y=plan["entry"], line_color="#42a5f5", line_width=2,
+                      annotation_text=f"Entry {plan['entry']:g}",
+                      annotation_position="right")
+        fig.add_hline(y=plan["sl"], line_color="#ef5350", line_dash="dash",
+                      annotation_text=f"SL {plan['sl']:g}", annotation_position="right")
+        fig.add_hline(y=plan["tp"], line_color="#66bb6a", line_dash="dash",
+                      annotation_text=f"TP {plan['tp']:g}", annotation_position="right")
 
         gross_rr, net_rr = _net_rr(
-            args.direction, args.entry, args.sl, args.tp,
+            plan["direction"], plan["entry"], plan["sl"], plan["tp"],
             args.commission_bps, args.slippage_bps, args.sell_tax_bps,
         )
+        label = "AUTO CONDITIONAL" if plan["conditional"] else "PLAN"
         fig.add_annotation(
-            x=x1, y=args.entry,
-            text=f"RR: {gross_rr:.2f} | Net RR: {net_rr:.2f}",
+            x=x1, y=plan["entry"],
+            text=f"{label} | RR: {gross_rr:.2f} | Net RR: {net_rr:.2f}",
             showarrow=True, arrowhead=0, ax=0, ay=-45,
-            font=dict(size=12, color="#ffffff"),
-            bgcolor="rgba(0,0,0,0.6)",
+            font=dict(size=11, color="#ffffff"),
+            bgcolor="rgba(0,0,0,0.65)",
         )
-        status = f"{args.direction.upper()} plan | gross RR {gross_rr:.2f} | net RR {net_rr:.2f}"
+        status = (
+            f"{plan['direction'].upper()} {label} ({plan['source']}) "
+            f"| gross RR {gross_rr:.2f} | net RR {net_rr:.2f}"
+        )
     else:
         status = "NO_TRADE — no confirmed setup supplied"
         fig.add_annotation(
@@ -284,6 +394,8 @@ def main() -> None:
     ap.add_argument("--out", default="ict_chart.html")
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--hide-weekends", action="store_true")
+    ap.add_argument("--plan", choices=["auto", "none"], default="auto",
+                    help="auto derives a conditional plan from real structure")
     ap.add_argument("--direction", choices=["long", "short"], default=None)
     ap.add_argument("--entry", type=float, default=None)
     ap.add_argument("--sl", type=float, default=None)

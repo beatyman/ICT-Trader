@@ -4,6 +4,45 @@
 CSV and uses the repository's detectors; it never invents an FVG, OB, sweep or
 CISD.
 
+## Plan is drawn by default
+
+The chart renders a **conditional trade plan** unless explicitly disabled:
+
+```text
+default: --plan auto
+```
+
+`auto` chooses, in order:
+
+```text
+1. the last CISD within 40 bars
+2. otherwise the nearest active bullish/bearish FVG or OB
+3. otherwise the nearest key level in the 15m trend direction
+```
+
+The plan is always labelled:
+
+```text
+AUTO CONDITIONAL
+```
+
+It is **not** a confirmed entry.  If the source is a CISD older than 20 bars,
+the label includes `(stale)`.
+
+To draw structures only:
+
+```bash
+python scripts/plot_ict_signal.py ... --plan none
+```
+
+An explicit plan always overrides `--plan auto`:
+
+```bash
+python scripts/plot_ict_signal.py ... \
+  --direction long --entry 96.15 --sl 95.25 --tp 99.30 \
+  --trigger-time "2026-10-29 16:00:00"
+```
+
 ## Install
 
 ```bash
@@ -20,6 +59,7 @@ python scripts/plot_ict_signal.py \
   --symbol HK.03690 \
   --last-bars 300 \
   --hide-weekends \
+  --plan none \
   --out output/ict/hk03690_ict.html
 ```
 

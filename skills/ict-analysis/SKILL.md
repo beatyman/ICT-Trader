@@ -182,6 +182,37 @@ What would change the decision
 
 Do not turn a `NO_TRADE` into a discretionary buy.
 
+### 3b. Charting contract
+
+When the user asks for a chart, use:
+
+```bash
+python scripts/plot_ict_signal.py \
+  --csv data/15m.csv \
+  --symbol SYMBOL \
+  --last-bars 300 \
+  --out output/ict/SYMBOL_chart.html
+```
+
+**A trade plan is drawn by default** (`--plan auto`).  It must be labelled
+`AUTO CONDITIONAL` and is derived from real structure, in this order:
+
+```text
+last CISD within 40 bars
+else nearest active FVG/OB
+else nearest key level in the 15m trend direction
+```
+
+Rules:
+
+- never call an auto plan confirmed;
+- if the source CISD is older than 20 bars, mark it `(stale)`;
+- if the user supplies `direction/entry/sl/tp/trigger_time`, that explicit plan
+  overrides auto;
+- `--plan none` is allowed only for a structure-only chart;
+- every Entry/SL/TP must come from the CSV or a real detected level;
+- show gross RR and net RR, including commission/slippage/sell tax.
+
 ### 4. If `decision == "TRADE"`
 
 Verify:
