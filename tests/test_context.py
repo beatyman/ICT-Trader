@@ -64,4 +64,3 @@ def test_silver_bullet_windows_are_new_york_time():
     assert not in_session(df, 1, "crypto", "silver_bullet")
     assert in_session(df, 2, "crypto", "silver_bullet")
     assert in_session(df, 3, "crypto", "silver_bullet")
-
