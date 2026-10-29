@@ -90,16 +90,36 @@ def render(args) -> Path:
     df = load_csv(args.csv)
     if len(df) < 30:
         raise SystemExit("need at least 30 bars")
-    view = df.tail(max(30, args.last_bars)).reset_index(drop=True)
+
+    # A session window may contain only a few bars.  Analyse a longer history
+    # ending at --end, then plot only the requested window.  This keeps the
+    # right side of the chart free of pre-window candles without inventing any.
+    end = pd.Timestamp(args.end) if args.end else df["date"].iloc[-1]
+    hist = df[df["date"] <= end].reset_index(drop=True)
+    if len(hist) < 30:
+        raise SystemExit("need at least 30 bars up to --end")
+    analysis = hist.tail(max(300, args.last_bars)).reset_index(drop=True)
+    if args.start:
+        start = pd.Timestamp(args.start)
+        view = hist[(hist["date"] >= start) & (hist["date"] <= end)].reset_index(drop=True)
+    else:
+        view = analysis.tail(max(30, args.last_bars)).reset_index(drop=True)
+    if view.empty:
+        raise SystemExit("no bars in requested window")
+
     n = len(view)
     last = n - 1
     price = float(view["close"].iloc[-1])
     result = analyze(
-        view,
+        analysis,
         ICTConfig(mode="historical", show_sessions=False, show_htf_cisd=False,
                   cisd_all=True, cisd_min_grade=0, sweep_reclaim_bars=args.sweep_reclaim_bars),
     )
     plan = _resolve_plan(args, view, result)
+
+    def view_index(dt) -> int | None:
+        hits = view.index[view["date"] == pd.Timestamp(dt)].tolist()
+        return int(hits[0]) if hits else None
 
     fig = plt.figure(figsize=(18, 10), dpi=180, facecolor="white")
     gs = fig.add_gridspec(2, 1, height_ratios=[4.2, 1.0], hspace=.05,
@@ -133,29 +153,48 @@ def render(args) -> Path:
         handles.append(Line2D([0], [0], color=color, lw=1.2, ls=(0, (5, 3)),
                               label=f"{k.name} {k.price:.4g}"))
 
-    # ---- active FVG / OB -------------------------------------------
-    fvgs = [f for f in result.fvgs if f.active and f.created <= last]
-    for f in fvgs[-2:]:
-        x0 = view["date"].iloc[max(0, f.left)]
-        x1 = view["date"].iloc[min(n - 1, max(f.right, f.left + 1))]
-        ax.add_patch(Rectangle((max(0, f.left), float(f.bottom)),
-                               max(1, min(n - 1, f.right) - max(0, f.left)),
-                               float(f.top - f.bottom),
+    # ---- active FVG / OB (mapped onto the plotted window) ----------
+    view_end = view["date"].iloc[-1]
+    view_start = view["date"].iloc[0]
+    y_lo = float(view["low"].min()) - 1.0
+    y_hi = float(view["high"].max()) + 1.0
+    for f in [f for f in result.fvgs if f.active][-2:]:
+        if f.bottom > y_hi or f.top < y_lo:
+            continue
+        left_date = analysis["date"].iloc[max(0, f.left)]
+        right_date = analysis["date"].iloc[min(len(analysis) - 1, f.right)]
+        if right_date < view_start or left_date > view_end:
+            continue
+        x0 = int(view.index[view["date"] >= left_date][0])
+        x1 = int(view.index[view["date"] <= right_date][-1])
+        if x1 <= x0:
+            continue
+        ax.add_patch(Rectangle((x0, float(f.bottom)), x1 - x0, float(f.top - f.bottom),
                                facecolor="#f9a825", alpha=.14, edgecolor="#f9a825",
                                linewidth=1.0, linestyle="--", zorder=1))
-        ax.text(max(0, f.left), float(f.top), "FVG", fontsize=8, color="#8d6e00")
-    for ob in [o for o in result.order_blocks if o.active and o.created <= last][-2:]:
-        ax.add_patch(Rectangle((max(0, ob.left), float(ob.bottom)),
-                               max(1, min(n - 1, ob.right) - max(0, ob.left)),
-                               float(ob.top - ob.bottom),
+        ax.text(x0, float(f.top), "FVG", fontsize=8, color="#8d6e00", clip_on=True)
+    for ob in [o for o in result.order_blocks if o.active][-2:]:
+        if ob.bottom > y_hi or ob.top < y_lo:
+            continue
+        left_date = analysis["date"].iloc[max(0, ob.left)]
+        right_date = analysis["date"].iloc[min(len(analysis) - 1, ob.right)]
+        if right_date < view_start or left_date > view_end:
+            continue
+        x0 = int(view.index[view["date"] >= left_date][0])
+        x1 = int(view.index[view["date"] <= right_date][-1])
+        if x1 <= x0:
+            continue
+        ax.add_patch(Rectangle((x0, float(ob.bottom)), x1 - x0, float(ob.top - ob.bottom),
                                facecolor="#1565c0", alpha=.10, edgecolor="#1565c0",
                                linewidth=1.0, linestyle="--", zorder=1))
-        ax.text(max(0, ob.left), float(ob.top), "OB", fontsize=8, color="#0d47a1")
+        ax.text(x0, float(ob.top), "OB", fontsize=8, color="#0d47a1", clip_on=True)
 
     # ---- sweeps -----------------------------------------------------
     for s in result.sweeps[-8:]:
-        j = s.sweep_bar
-        if 0 <= j < n:
+        if not (0 <= s.sweep_bar < len(analysis)):
+            continue
+        j = view_index(analysis["date"].iloc[s.sweep_bar])
+        if j is not None:
             col = "#1b8a4b" if s.direction == "bull" else "#c62828"
             ax.scatter([j], [s.sweep_price], marker="x", s=65, color=col,
                        linewidth=1.5, zorder=9)
@@ -165,25 +204,26 @@ def render(args) -> Path:
         ti = view.index[view["date"] == pd.Timestamp(plan["trigger_time"])].tolist()
         if not ti:
             raise SystemExit(f"trigger_time not found: {plan['trigger_time']}")
-        x0 = view["date"].iloc[int(ti[0])]
-        x1 = view["date"].iloc[-1]
-        ax.add_patch(Rectangle((int(ti[0]), plan["sl"]),
-                               n - int(ti[0]), plan["entry"] - plan["sl"],
+        ti = int(ti[0])
+        future = 10
+        x_end = n - 1 + future
+        ax.add_patch(Rectangle((ti, plan["sl"]),
+                               x_end - ti, plan["entry"] - plan["sl"],
                                facecolor="#c62828", alpha=.08, linewidth=0, zorder=0))
-        ax.add_patch(Rectangle((int(ti[0]), plan["entry"]),
-                               n - int(ti[0]), plan["tp"] - plan["entry"],
+        ax.add_patch(Rectangle((ti, plan["entry"]),
+                               x_end - ti, plan["tp"] - plan["entry"],
                                facecolor="#1b8a4b", alpha=.07, linewidth=0, zorder=0))
-        ax.plot([int(ti[0]), n - 1], [plan["entry"], plan["entry"]],
+        ax.plot([ti, x_end], [plan["entry"], plan["entry"]],
                 color="#1565c0", lw=2.2, zorder=8)
-        ax.plot([int(ti[0]), n - 1], [plan["sl"], plan["sl"]],
+        ax.plot([ti, x_end], [plan["sl"], plan["sl"]],
                 color="#c62828", lw=1.2, ls=(0, (4, 3)), zorder=7)
-        ax.plot([int(ti[0]), n - 1], [plan["tp"], plan["tp"]],
+        ax.plot([ti, x_end], [plan["tp"], plan["tp"]],
                 color="#1b8a4b", lw=1.2, ls=(0, (4, 3)), zorder=7)
-        ax.text(n - 1 + .4, plan["entry"], f"{plan['direction'].upper()} {plan['entry']:.4g}",
+        ax.text(x_end + .4, plan["entry"], f"{plan['direction'].upper()} {plan['entry']:.4g}",
                 fontsize=9, color="#1565c0", va="center", ha="left", fontweight="bold")
-        ax.text(n - 1 + .4, plan["sl"], f"SL {plan['sl']:.4g}", fontsize=9,
+        ax.text(x_end + .4, plan["sl"], f"SL {plan['sl']:.4g}", fontsize=9,
                 color="#c62828", va="center", ha="left")
-        ax.text(n - 1 + .4, plan["tp"], f"TP {plan['tp']:.4g}", fontsize=9,
+        ax.text(x_end + .4, plan["tp"], f"TP {plan['tp']:.4g}", fontsize=9,
                 color="#1b8a4b", va="center", ha="left")
         gross, net = _net_rr(plan["direction"], plan["entry"], plan["sl"], plan["tp"],
                              args.commission_bps, args.slippage_bps, args.sell_tax_bps)
@@ -242,6 +282,10 @@ def main() -> None:
     ap.add_argument("--symbol", default="")
     ap.add_argument("--timeframe", default="15m")
     ap.add_argument("--last-bars", type=int, default=96)
+    ap.add_argument("--start", default=None,
+                    help="plot window start (e.g. '2026-10-29 09:30')")
+    ap.add_argument("--end", default=None,
+                    help="plot window end / last closed bar")
     ap.add_argument("--sweep-reclaim-bars", type=int, default=3)
     ap.add_argument("--out", default="ict_plan.png")
     ap.add_argument("--plan-json", default=None,
