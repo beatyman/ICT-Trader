@@ -21,6 +21,21 @@ python scripts/plot_ict_clean.py \
 
 It draws K-lines, volume, key levels, active FVG/OB, sweeps, and a plan.
 
+For a single-panel session view (recommended on a large gap day):
+
+```bash
+python scripts/plot_ict_clean.py \
+  --csv us_googl_15m_recent.csv \
+  --symbol US.GOOGL \
+  --start "2026-10-29 09:30" \
+  --end "2026-10-29 10:30" \
+  --plan-json output/ict/googl_plan.json \
+  --out output/ict/us_googl_session.png
+```
+
+`--start/--end` select the plotted bars; structures are still detected on the
+history ending at `--end`, so no future bar is used.
+
 A plan is drawn by default.  It can come from:
 
 ```text
