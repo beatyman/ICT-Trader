@@ -161,6 +161,8 @@ def render(args) -> Path:
     for f in [f for f in result.fvgs if f.active][-2:]:
         if f.bottom > y_hi or f.top < y_lo:
             continue
+        if analysis["date"].iloc[f.created] < view_start:
+            continue
         left_date = analysis["date"].iloc[max(0, f.left)]
         right_date = analysis["date"].iloc[min(len(analysis) - 1, f.right)]
         if right_date < view_start or left_date > view_end:
@@ -175,6 +177,8 @@ def render(args) -> Path:
         ax.text(x0, float(f.top), "FVG", fontsize=8, color="#8d6e00", clip_on=True)
     for ob in [o for o in result.order_blocks if o.active][-2:]:
         if ob.bottom > y_hi or ob.top < y_lo:
+            continue
+        if analysis["date"].iloc[ob.created] < view_start:
             continue
         left_date = analysis["date"].iloc[max(0, ob.left)]
         right_date = analysis["date"].iloc[min(len(analysis) - 1, ob.right)]
