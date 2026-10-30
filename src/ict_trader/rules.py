@@ -600,9 +600,14 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         gs_decision = "INCOMPLETE"
     else:
         gs_decision = "PASS"
+    quality_flags = [
+        g["id"] for g in good
+        if not g["necessary"] and (g["status"] != "PASS" or g.get("note") in {"touch_only", "reverse_cisd"})
+    ]
     good_report = {"decision": gs_decision, "criteria": good,
                    "failed": [g["id"] for g in req if g["status"] == "FAIL"],
-                   "incomplete": [g["id"] for g in req if g["status"] == "N/A"]}
+                   "incomplete": [g["id"] for g in req if g["status"] == "N/A"],
+                   "quality_flags": quality_flags}
     req = [g for g in good if g["necessary"]]
     plan_status = plan.get("plan_status", "conditional") if plan else None
     strict_decision, hard_bad = decide_from_good(good, plan)
@@ -636,5 +641,6 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         "atr": round(atr, 6),
         "blocking_failures": [g["id"] for g in hard_bad],
         "blockers": blocker_details,
+        "quality_flags": quality_flags,
         "rules": [r.as_dict() for r in rules],
     }
