@@ -28,6 +28,10 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+
 import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
@@ -439,6 +443,33 @@ def render(args) -> Path:
             fontsize=8.6, color="#222222",
             bbox=dict(boxstyle="round,pad=.4", fc="white", ec="#9e9e9e", lw=1.0, alpha=.98),
             zorder=20)
+
+    # ---- long/short trade logic (bottom-left) -----------------------
+    logic_lines = []
+    def _fmt_logic(direction, entry, sl, tp, net):
+        d = direction.upper()
+        if d == "SHORT":
+            trig = f"反抽 {entry:.2f} 失败 + 向下 CISD"
+            inv = f"收盘站上 {sl:.2f}"
+        else:
+            trig = f"回踩 {entry:.2f} 反弹 + 向上 CISD"
+            inv = f"收盘跌破 {sl:.2f}"
+        tag = "开空" if d == "SHORT" else "开多"
+        logic_lines.append(f"{tag} {d}: {entry:.2f} / SL {sl:.2f} / TP {tp:.2f} | net {net:+.2f}R")
+        logic_lines.append(f"    触发: {trig}")
+        logic_lines.append(f"    失效: {inv}")
+    if plan:
+        _fmt_logic(plan["direction"], plan["entry"], plan["sl"], plan["tp"], net)
+    if args.alt_entry and args.alt_direction:
+        alt_gross, alt_net = _net_rr(args.alt_direction, float(args.alt_entry), float(args.alt_sl),
+                                     float(args.alt_tp), args.commission_bps, args.slippage_bps,
+                                     args.sell_tax_bps)
+        _fmt_logic(args.alt_direction, float(args.alt_entry), float(args.alt_sl), float(args.alt_tp), alt_net)
+    if logic_lines:
+        ax.text(.012, .015, "\n".join(logic_lines), transform=ax.transAxes,
+                va="bottom", ha="left", fontsize=7.2, color="#222222",
+                bbox=dict(boxstyle="round,pad=.35", fc="white", ec="#9e9e9e", lw=.8, alpha=.96),
+                zorder=21)
     if args.alt_entry:
         handles.append(Line2D([0], [0], color="#8BC34A", lw=1.2, ls=":",
                               label=f"{args.alt_direction.upper()} SCENARIO"))
