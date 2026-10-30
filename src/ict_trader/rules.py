@@ -606,6 +606,9 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     req = [g for g in good if g["necessary"]]
     plan_status = plan.get("plan_status", "conditional") if plan else None
     strict_decision, hard_bad = decide_from_good(good, plan)
+    blocker_details = [{"id": g["id"], "status": g["status"],
+                        "type": "real_fail" if g["status"] == "FAIL" else "n_a"}
+                       for g in hard_bad]
 
     if mode == "shadow":
         old_decision = "TRADE" if plan and plan_status in {"triggered", "conditional"} else "NO_TRADE"
@@ -632,5 +635,6 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         "last_close": price,
         "atr": round(atr, 6),
         "blocking_failures": [g["id"] for g in hard_bad],
+        "blockers": blocker_details,
         "rules": [r.as_dict() for r in rules],
     }
