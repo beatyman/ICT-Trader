@@ -171,6 +171,8 @@ def _htf_pda(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str =
                 reverse_cisd = bool(opposite) and not htf_cisd
                 last_close = float(h["close"].iloc[-1])
                 delivered = _delivery_state(direction, last_close, bottom, top, htf_cisd, h_atr)
+                delivery_dist = ((last_close - top) / h_atr if direction == "long"
+                                 else (bottom - last_close) / h_atr) if h_atr > 0 else 0.0
                 dist = max(bottom - price, price - top, 0.0)
                 key = (rank, dist)
                 if best_key is None or key < best_key:
@@ -178,6 +180,7 @@ def _htf_pda(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str =
                     best = {
                         "tf": tf, "kind": kind, "bottom": bottom, "top": top,
                         "touch": touch, "delivered": delivered,
+                        "delivery_distance_atr": round(float(delivery_dist), 3),
                         "touch_semantics": touch_semantics,
                         "current_touch": current_touch,
                         "historical_touch": not hist.empty,
@@ -277,6 +280,20 @@ def _sequence_check(sweeps, events, cisds, entry_bar: int | None,
     return {"valid": True, "reason": "sweep -> MSS -> CISD",
             "sweep_bar": sweep.sweep_bar, "mss_bar": mss.index,
             "cisd_bar": c.end, "entry_bar": entry_bar}
+
+
+
+def decide_from_good(good: list[dict], plan: dict | None) -> tuple[str, list[dict]]:
+    hard = [g for g in good if g.get("necessary")]
+    bad = [g for g in hard if g.get("status") != "PASS"]
+    status = plan.get("plan_status", "conditional") if plan else None
+    if bad or plan is None:
+        return "NO_TRADE", bad
+    if status == "triggered":
+        return "TRADE", bad
+    if status == "conditional":
+        return "CONDITIONAL", bad
+    return "NO_TRADE", bad
 
 
 def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
@@ -527,23 +544,6 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
             "distance_to_entry_pct": None if dist_pct is None else round(dist_pct * 100, 3),
             "fill_probability_flag": "low" if (dist_atr is not None and (dist_atr > 1.0 or dist_pct > .015)) else "normal",
         }
-    blocking_fail = [r for r in rules if r.blocking and (r.status != "PASS" or r.provisional)]
-    strict_decision = "TRADE" if plan and not blocking_fail else "NO_TRADE"
-
-    if mode == "shadow":
-        old_decision = "TRADE" if plan else "NO_TRADE"
-        shadow = {
-            "old_decision": old_decision,
-            "new_decision": strict_decision,
-            "diff": [r.rule_id for r in blocking_fail],
-            "provisional": [r.rule_id for r in rules if r.provisional],
-            "would_block": strict_decision != old_decision,
-        }
-        decision = strict_decision
-    else:
-        shadow = None
-        decision = strict_decision
-
     # ---- GS chain ----------------------------------------------------
     by_id = {r.rule_id: r for r in rules}
 
@@ -592,6 +592,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                 g["htf_cisd"] = pda.get("htf_cisd")
                 g["touch_semantics"] = pda.get("touch_semantics")
                 g["cisd_bar"] = pda.get("cisd_bar")
+                g["delivery_distance_atr"] = pda.get("delivery_distance_atr")
     req = [g for g in good if g["necessary"]]
     if any(g["status"] == "FAIL" for g in req):
         gs_decision = "FAIL"
@@ -602,6 +603,23 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     good_report = {"decision": gs_decision, "criteria": good,
                    "failed": [g["id"] for g in req if g["status"] == "FAIL"],
                    "incomplete": [g["id"] for g in req if g["status"] == "N/A"]}
+    req = [g for g in good if g["necessary"]]
+    plan_status = plan.get("plan_status", "conditional") if plan else None
+    strict_decision, hard_bad = decide_from_good(good, plan)
+
+    if mode == "shadow":
+        old_decision = "TRADE" if plan and plan_status in {"triggered", "conditional"} else "NO_TRADE"
+        shadow = {
+            "old_decision": old_decision,
+            "new_decision": strict_decision,
+            "diff": [g["id"] for g in hard_bad],
+            "provisional": [r.rule_id for r in rules if r.provisional],
+            "would_block": strict_decision != old_decision,
+        }
+        decision = strict_decision
+    else:
+        shadow = None
+        decision = strict_decision
     return {
         "decision": decision,
         "strict_decision": strict_decision,
@@ -613,6 +631,6 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
 
         "last_close": price,
         "atr": round(atr, 6),
-        "blocking_failures": [r.rule_id for r in blocking_fail],
+        "blocking_failures": [g["id"] for g in hard_bad],
         "rules": [r.as_dict() for r in rules],
     }

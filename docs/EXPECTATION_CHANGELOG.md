@@ -36,6 +36,17 @@ No evidence, no merge.
 - confirmed_by: P1 regression owner
 - regression_case: BTCUSDT 2026-10-30 12:45 UTC, short conditional plan
 
+## EC-20261030-04
+
+- change_id: EC-20261030-04
+- rule_id: decision aggregator / GS-01..GS-08
+- old_expected: decision TRADE if plan exists and only blocking L rules pass
+- new_expected: all hard_gate GS-01..GS-08 must PASS; conditional plan -> CONDITIONAL
+- evidence: GS-05/GS-06/GS-07 were necessary=true but not blocking; A2 could return TRADE
+- classification: implementation_error
+- confirmed_by: architecture owner
+- regression_case: A2 only GS-06 FAIL; A3 only GS-08 FAIL
+
 ## Template
 
 ```text
