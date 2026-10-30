@@ -26,7 +26,7 @@ def validate(text: str) -> list[str]:
             val = values.get(field, "")
             if not val or val.upper() in {"TODO", "TBD", "N/A"}:
                 errors.append(f"{head}: missing/empty {field}")
-        if values.get("classification") not in {"expectation_error", "implementation_error", "data_issue"}:
+        if values.get("classification") not in {"expectation_error", "implementation_error", "implementation_regression", "data_issue"}:
             errors.append(f"{head}: invalid classification")
     return errors
 

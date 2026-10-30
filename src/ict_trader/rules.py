@@ -96,7 +96,13 @@ def _score_row(r, atr: float, eq_atr: float = 0.05) -> dict:
 
 
 def _htf_scores(df: pd.DataFrame, tf: str, eq_atr: float = 0.05) -> dict:
-    h = _drop_incomplete_htf(df, resample_htf(df, tf), tf)
+    h = resample_htf(df, tf)
+    # If the caller already passed daily bars, the last daily bar is complete
+    # relative to its own timestamp; do not drop it a second time.
+    daily_input = (tf == "1d" and len(df) > 1
+                   and (df["date"].iloc[-1] - df["date"].iloc[-2]) >= pd.Timedelta(hours=20))
+    if not daily_input:
+        h = _drop_incomplete_htf(df, h, tf)
     if len(h) < 2:
         return {"long": 0, "short": 0, "bar": None, "error": "insufficient_htf"}
     return _score_row(add_indicators(h).iloc[-1], _atr(h), eq_atr)
@@ -513,18 +519,26 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     stop_ok = None
     stop_reason = "no plan"
     if plan:
-        sw = max(recent_sweeps, key=lambda x: x.sweep_bar) if recent_sweeps else None
-        if sw is not None:
-            ob = obs[0] if obs else None
-            ob_edge = float(ob.bottom if plan["direction"] == "long" else ob.top) if ob else float(sw.sweep_price)
-            expected = structural_stop(plan["direction"], sw.sweep_price, ob_edge, atr)
+        direction = plan["direction"]
+        entry = float(plan["entry"])
+        if direction == "short":
+            levels = [k for k in res.key_levels if k.name == "BSL"
+                      and k.sweep_bar is None and k.price > entry]
+            level = min(levels, key=lambda k: k.price) if levels else None
+            expected = float(level.price) + .1 * atr if level is not None else None
+        else:
+            levels = [k for k in res.key_levels if k.name == "SSL"
+                      and k.sweep_bar is None and k.price < entry]
+            level = max(levels, key=lambda k: k.price) if levels else None
+            expected = float(level.price) - .1 * atr if level is not None else None
+        if expected is not None:
             stop_ok = abs(float(plan["sl"]) - expected) <= .5 * atr
             stop_value = {"expected": round(expected, 4), "plan_sl": float(plan["sl"]),
                           "delta_atr": round(abs(float(plan["sl"]) - expected) / atr, 3),
-                          "sweep": True, "ob": ob is not None}
-            stop_reason = "" if stop_ok else "plan SL outside structural stop"
+                          "level": level.name, "level_price": float(level.price)}
+            stop_reason = "" if stop_ok else "plan SL outside structural level"
         else:
-            stop_reason = "no sweep for structural stop"
+            stop_reason = "no opposite-side BSL/SSL level"
     rules.append(_status("L4-01", "L4", "stop", stop_ok, blocking=False,
                          value=stop_value, reason=stop_reason))
     rules.append(_status("L4-02", "L4", "target", None if not plan else abs(plan["tp"] - plan["entry"]) > 0,

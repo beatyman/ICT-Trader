@@ -58,6 +58,28 @@ No evidence, no merge.
 - confirmed_by: P1 regression owner
 - regression_case: BTCUSDT 2026-10-30 12:45 UTC, conditional short plan
 
+## EC-20261030-06
+
+- change_id: EC-20261030-06
+- rule_id: L5-03 / _htf_scores
+- old_expected: daily input uses 2026-10-28 bar after double _drop_incomplete_htf
+- new_expected: daily input uses 2026-10-29 complete bar
+- evidence: _htf_scores(daily,"1d") called _drop_incomplete_htf on an already-daily frame
+- classification: implementation_regression
+- confirmed_by: P1 regression owner
+- regression_case: BTCUSDT 2026-10-30 12:45 UTC, L5-03 1D bar
+
+## EC-20261030-07
+
+- change_id: EC-20261030-07
+- rule_id: L4-01 / GS-07
+- old_expected: short structural stop from latest sweep extreme 77,181 -> 77,206.65
+- new_expected: short structural stop from nearest BSL 78,776.5 + 0.1 ATR -> 78,802.15
+- evidence: previous code used a bullish SSL sweep for a short plan; expected stop was below entry
+- classification: implementation_error
+- confirmed_by: P1 regression owner
+- regression_case: BTCUSDT 2026-10-30 12:45 UTC, conditional short plan
+
 ## Template
 
 ```text
