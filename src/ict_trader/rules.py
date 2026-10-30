@@ -81,6 +81,54 @@ def _plan_net_rr(plan: dict | None) -> tuple[float | None, float | None]:
     return gross, net
 
 
+
+def _htf_pda(df: pd.DataFrame, price: float, atr: float) -> dict | None:
+    """Return the nearest active 1H/4H FVG/OB containing price."""
+    for tf in ("1h", "4h"):
+        h = resample_htf(df, tf)
+        if len(h) and h["date"].iloc[-1] > df["date"].iloc[-1]:
+            h = h.iloc[:-1]
+        if len(h) < 30:
+            continue
+        r = analyze(h, ICTConfig(mode="historical", show_sessions=False,
+                                 show_htf_cisd=False, cisd_all=True, cisd_min_grade=0))
+        for f in [x for x in r.fvgs if x.active]:
+            if float(f.bottom) - .5 * atr <= price <= float(f.top) + .5 * atr:
+                return {"tf": tf, "kind": "FVG", "bottom": float(f.bottom), "top": float(f.top)}
+        for o in [x for x in r.order_blocks if x.active]:
+            if float(o.bottom) - .5 * atr <= price <= float(o.top) + .5 * atr:
+                return {"tf": tf, "kind": "OB", "bottom": float(o.bottom), "top": float(o.top)}
+    return None
+
+
+def _smt_check(df: pd.DataFrame, smt_df: pd.DataFrame | None) -> tuple[bool | None, str]:
+    if smt_df is None or "date" not in smt_df.columns:
+        return None, "no second symbol"
+    a = df[["date", "close"]].set_index("date")["close"]
+    b = smt_df[["date", "close"]].set_index("date")["close"]
+    joined = pd.concat([a.rename("a"), b.rename("b")], axis=1).dropna().tail(120)
+    if len(joined) < 40:
+        return None, "insufficient aligned bars"
+    corr = float(joined["a"].pct_change().corr(joined["b"].pct_change()))
+    if corr < .70:
+        return False, f"correlation {corr:.2f} < 0.70"
+    ra = analyze(df[df["date"].isin(joined.index)].reset_index(drop=True),
+                 ICTConfig(mode="historical", show_sessions=False, show_htf_cisd=False,
+                           cisd_all=True, cisd_min_grade=0))
+    rb = analyze(smt_df[smt_df["date"].isin(joined.index)].reset_index(drop=True),
+                 ICTConfig(mode="historical", show_sessions=False, show_htf_cisd=False,
+                           cisd_all=True, cisd_min_grade=0))
+    ah = [s for s in ra.swings if s.kind == "H"][-2:]
+    bh = [s for s in rb.swings if s.kind == "H"][-2:]
+    al = [s for s in ra.swings if s.kind == "L"][-2:]
+    bl = [s for s in rb.swings if s.kind == "L"][-2:]
+    if len(ah) == len(bh) == 2 and ah[-1].price > ah[-2].price and bh[-1].price <= bh[-2].price:
+        return True, "bearish SMT: primary HH, secondary not HH"
+    if len(al) == len(bl) == 2 and al[-1].price < al[-2].price and bl[-1].price >= bl[-2].price:
+        return True, "bullish SMT: primary LL, secondary not LL"
+    return False, "no aligned divergence"
+
+
 def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
           market: str = "crypto", plan: dict | None = None,
           smt_df: pd.DataFrame | None = None) -> dict:
@@ -178,6 +226,18 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                                                "below": [round(k.price, 4) for k in below[:3]]},
                          reason="no unswept opposite pool" if not (above or below) else ""))
 
+    pda = _htf_pda(df, price, atr)
+    rules.append(_status("L2-08", "L2", "HTF PDA delivery", pda is not None,
+                         blocking=False, value=pda,
+                         reason="price not in an active 1H/4H PDA" if pda is None else ""))
+    rvol = float(df["volume"].iloc[-1] / df["volume"].tail(20).mean()) if "volume" in df else None
+    rules.append(_status("L2-09", "L2", "volume / RVOL", None if rvol is None else rvol >= 1.5,
+                         blocking=False, value=None if rvol is None else round(rvol, 3),
+                         reason="no volume" if rvol is None else "RVOL below 1.5" if rvol < 1.5 else ""))
+    smt_ok, smt_reason = _smt_check(df, smt_df)
+    rules.append(_status("L2-10", "L2", "SMT divergence", smt_ok, blocking=False,
+                         value=smt_reason, reason=smt_reason if smt_ok is not True else ""))
+
     # ---- L3 ---------------------------------------------------------
     fvgs = [f for f in res.fvgs if f.active]
     obs = [o for o in res.order_blocks if o.active]
@@ -199,6 +259,26 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                                 "sequence": sequence_ok, "poi": bool(fvgs or obs)}))
     rules.append(_status("L3-06", "L3", "OTE", None, blocking=False,
                          reason="optional; no dealing range in this audit"))
+
+    ote = None
+    ote_reason = "no plan"
+    if plan:
+        highs = [s.price for s in res.swings if s.kind == "H"]
+        lows = [s.price for s in res.swings if s.kind == "L"]
+        if highs and lows:
+            hi, lo = max(highs[-3:]), min(lows[-3:])
+            if hi > lo:
+                e = float(plan["entry"])
+                ote = ((hi - e) / (hi - lo)) if plan["direction"] == "long" else ((e - lo) / (hi - lo))
+                ote_reason = f"retracement {ote:.2f}"
+    rules.append(_status("L3-07", "L3", "OTE 0.62-0.79",
+                         None if ote is None else (0.62 <= ote <= 0.79),
+                         blocking=False, value=None if ote is None else round(ote, 3),
+                         reason=ote_reason if ote is None else ("outside OTE" if not (0.62 <= ote <= 0.79) else "")))
+    rules.append(_status("L3-08", "L3", "Breaker", None, blocking=False,
+                         reason="breaker classifier not implemented"))
+    fresh = [f for f in res.fvgs if f.active and getattr(f, "fresh", False)]
+    rules.append(_status("L3-09", "L3", "fresh FVG/CE", bool(fresh), blocking=False, value=len(fresh)))
 
     # ---- L4 ---------------------------------------------------------
     gross, net = _plan_net_rr(plan)
@@ -261,12 +341,12 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         gs("GS-07", "structural stop", ["L4-01"], True),
         gs("GS-08", "net RR >= 2.5", ["L4-03"], True),
         gs("GS-09", "killzone/session", ["L5-01"], False),
-        gs("GS-10", "HTF PDA delivery", [], False, "not automated"),
+        gs("GS-10", "HTF PDA delivery", ["L2-08"], False),
         gs("GS-11", "volume/RVOL", [], False, "not automated"),
-        gs("GS-12", "SMT", ["L2-06"], False),
-        gs("GS-13", "OTE", ["L3-06"], False),
-        gs("GS-14", "Breaker", ["L3-03"], False),
-        gs("GS-15", "fresh FVG/CE", ["L3-01"], False, "fresh flag not scored"),
+        gs("GS-12", "SMT", ["L2-10"], False),
+        gs("GS-13", "OTE", ["L3-07"], False),
+        gs("GS-14", "Breaker", ["L3-08"], False),
+        gs("GS-15", "fresh FVG/CE", ["L3-09"], False),
     ]
     req = [g for g in good if g["necessary"]]
     if any(g["status"] == "FAIL" for g in req):

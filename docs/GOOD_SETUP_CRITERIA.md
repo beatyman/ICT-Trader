@@ -544,12 +544,12 @@ GS-06 FVG / OB / CE        -> L3-01 / L3-02
 GS-07 structural stop      -> L4-01
 GS-08 net RR >= 2.5        -> L4-03
 GS-09 killzone             -> L5-01 (N/A without session data)
-GS-10 HTF PDA              -> not automated
-GS-11 volume / RVOL        -> not automated
-GS-12 SMT                  -> L2-06 (N/A without second symbol)
-GS-13 OTE                  -> L3-06 (N/A)
-GS-14 Breaker              -> L3-03 (N/A)
-GS-15 fresh FVG / CE       -> L3-01 (fresh not scored)
+GS-10 HTF PDA              -> L2-08
+GS-11 volume / RVOL        -> L2-09
+GS-12 SMT                  -> L2-10 (N/A without second symbol)
+GS-13 OTE                  -> L3-07 (N/A without plan)
+GS-14 Breaker              -> L3-08 (N/A classifier)
+GS-15 fresh FVG / CE       -> L3-09
 ```
 
 `scripts/audit_ict_rules.py` 会输出：
