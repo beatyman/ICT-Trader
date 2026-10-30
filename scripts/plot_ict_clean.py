@@ -28,6 +28,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
@@ -100,6 +101,78 @@ def _pdh_pdl_pwh_pwl(df: pd.DataFrame) -> dict[str, float]:
         out["PWH"] = float(w["high"].iloc[-2])
         out["PWL"] = float(w["low"].iloc[-2])
     return out
+def runs(indices) -> list[tuple[int, int]]:
+    """Merge consecutive bar indices into [(start, end)] closed intervals."""
+    idx = sorted(set(int(i) for i in indices))
+    if not idx:
+        return []
+    out, start, prev = [], idx[0], idx[0]
+    for i in idx[1:]:
+        if i == prev + 1:
+            prev = i
+        else:
+            out.append((start, prev))
+            start = prev = i
+    out.append((start, prev))
+    return out
+
+
+def htf_to_ltf_index(df15: pd.DataFrame, df_htf: pd.DataFrame, tf: str = "1h") -> pd.Series:
+    """Map HTF bar closes onto 15m indices.
+
+    HTF ``date`` is the bar open time.  The bar is only usable after it closes,
+    so we advance to open + (tf-1min) and searchsorted into the 15m timeline.
+    """
+    delta = {
+        "1h": pd.Timedelta(minutes=59),
+        "4h": pd.Timedelta(hours=3, minutes=59),
+        "1d": pd.Timedelta(hours=23, minutes=59),
+    }[tf]
+    ltf_dates = df15["date"].values
+    close_times = (df_htf["date"] + delta).values
+    pos = np.searchsorted(ltf_dates, close_times, side="left")
+    return pd.Series(np.clip(pos, 0, len(df15) - 1), index=df_htf.index, dtype=int)
+
+
+def place_labels(ax, labels, x_data: int, atr: float) -> None:
+    """Right-gutter labels with vertical de-overlap and curved leader lines.
+
+    ``labels`` is a list of ``(price, text, color)``.  A label may move at most
+    ``atr * 3.0`` from its price line; the minimum vertical gap is ``atr * 0.8``.
+    """
+    if not labels:
+        return
+    min_gap = atr * 0.8
+    max_offset = atr * 3.0
+    placed = []
+    for lprice, txt, col in sorted(labels, key=lambda z: z[0], reverse=True):
+        yy = lprice
+        while any(abs(yy - q) < min_gap for q in placed):
+            yy -= min_gap
+        yy = max(lprice - max_offset, min(lprice + max_offset, yy))
+        placed.append(yy)
+        ax.annotate(
+            txt,
+            xy=(x_data, lprice),
+            xytext=(x_data + 8, yy),
+            textcoords="data",
+            fontsize=9,
+            color=col,
+            va="center",
+            ha="left",
+            arrowprops=dict(
+                arrowstyle="-|>",
+                connectionstyle="arc3,rad=0.1",
+                color=col,
+                lw=0.8,
+                shrinkA=0,
+                shrinkB=2,
+            ),
+            annotation_clip=False,
+            zorder=20,
+        )
+
+
 
 
 def render(args) -> Path:
@@ -270,15 +343,8 @@ def render(args) -> Path:
             idx = view.index[mask].tolist()
             if not idx:
                 continue
-            runs, run = [], [idx[0]]
-            for a, b in zip(idx, idx[1:]):
-                if b == a + 1:
-                    run.append(b)
-                else:
-                    runs.append(run); run = [b]
-            runs.append(run)
-            for r in runs:
-                ax.axvspan(r[0] - .5, r[-1] + .5, color=color, alpha=.10, zorder=0)
+            for a, b in runs(idx):
+                ax.axvspan(a - .5, b + .5, color=color, alpha=.10, zorder=0)
             ax.text(idx[0], 1.002, tag, transform=ax.get_xaxis_transform(),
                     fontsize=7, color="#546E7A", va="bottom")
 
@@ -393,23 +459,8 @@ def render(args) -> Path:
     ax.set_xlim(-1, n + 22)
     ax.set_ylim(low - pad, high + pad)
     if pending_labels:
-        fig.canvas.draw()
-        tr = ax.transData
-        y0pix = tr.transform((0, ax.get_ylim()[0]))[1]
-        y1pix = tr.transform((0, ax.get_ylim()[1]))[1]
-        gap_px = 40
-        placed_px = []
-        for lprice, txt, col in sorted(pending_labels, key=lambda z: z[0], reverse=True):
-            yp = tr.transform((0, lprice))[1]
-            while any(abs(yp - q) < gap_px for q in placed_px):
-                yp -= gap_px
-            yp = max(min(y0pix, y1pix) + 14, min(max(y0pix, y1pix) - 14, yp))
-            placed_px.append(yp)
-            yy = tr.inverted().transform((0, yp))[1]
-            ax.annotate(txt, xy=(n - 1, lprice), xytext=(n + 7, yy),
-                        textcoords="data", fontsize=9, color=col, va="center", ha="left",
-                        arrowprops=dict(arrowstyle="-", color=col, lw=.8, shrinkA=0, shrinkB=2),
-                        annotation_clip=False, zorder=20)
+        atr_val = float((view["high"] - view["low"]).rolling(14, min_periods=1).mean().iloc[-1]) or 1.0
+        place_labels(ax, pending_labels, n - 1, atr_val)
     ax.set_ylabel("Price", fontsize=10, labelpad=8)
     ax.grid(True, color="#e6e6e6", linewidth=.7)
     ax.set_axisbelow(True)
