@@ -1,0 +1,242 @@
+============================================================
+ICT + PA 交易逻辑图 · 语料提炼模板 v1.0
+============================================================
+用途：
+  把 ICT 语料中的交易链路压缩成一张可教学、可审核、
+  可投喂给绘图模型/设计师的信息图模板。
+
+语料锚点（本仓库 corpus/）：
+  altrady_course:
+    HTF structure → sweep of liquidity → shift in structure →
+    entry at a zone → target opposing liquidity.
+  volity_course:
+    sweep example: equal lows → spike through stops → close back
+    inside → CHoCH → retest OB → stop below sweep wick → target
+    opposite session liquidity.
+  altrady_course:
+    FVG = three-candle imbalance, not a session gap;
+    HTF FVG carries more weight than LTF FVG.
+  volity_course:
+    HTF OB/level first; refine entry on 5m/15m;
+    lower timeframe alone produces more failures.
+  ttp_course / 4xpip_course:
+    displacement → MSS → FVG/OB; long candles, short wicks.
+  tradervue_course:
+    entry, stop, target and RR must be visual, not implied.
+
+核心原则：
+  1. HTF 先定方向，LTF 只负责触发。
+  2. 先流动性，后结构，再入场模型。
+  3. 没有 sweep / MSS / CISD / POI 的图，不补画。
+  4. 所有标签必须有数据或规则依据；没有就标 N/A。
+  5. 示意图必须写明“示意，非投资建议”。
+
+============================================================
+【一、先填参数】
+============================================================
+SYMBOL              = {{SYMBOL}}
+MARKET              = {{crypto | us | hk | other}}
+EXECUTION_TF        = 15m
+HTF_STACK           = 1D / 4H / 1H
+WINDOW_DAYS         = 30
+BARS_TOTAL          = 24h 市场约 2880；US/HK RTH 约 500–550
+                      不得为了凑 2880 补假数据
+SESSION             = {{Asia | London | NY AM | NY PM | HK | US RTH}}
+NEWS_EVENTS         = {{NFP | CPI | FOMC | none}}
+HTF_BIAS            = {{bullish | bearish | neutral}}
+DOL                 = {{price / pool}}
+PLAN_DIRECTION      = {{long | short | none}}
+ENTRY / SL / TP1-3  = {{price}}
+RR                  = {{gross}} / {{net}}
+INVALIDATION        = {{price + reason}}
+
+============================================================
+【二、画布与布局】
+============================================================
+画布：
+  16:9 横版，建议 4000×2250 或更高，300dpi，白/浅灰底。
+  左侧 65–70%：15m 主图 + 成交量。
+  右侧 30–35%：HTF Bias 面板 + 2–3 个局部放大窗 + 图例。
+  底部：时间轴、交易日分隔、新闻标记、免责声明。
+
+主图：
+  压缩 K 线，保留阴阳与影线；K 线宽 ≥1px。
+  时间跨度 30 天；若为 US/HK，仅画 RTH，不能补隔夜。
+  横轴真实时间；纵轴真实价格；不得为了好看压缩价格轴。
+
+放大窗：
+  2–3 个，每个 20–40 根 15m：
+    A. 流动性扫荡 + 收回
+    B. MSS / displacement
+    C. FVG / OB / Breaker 回测入场
+  放大窗必须用引线指向主图原区域。
+
+HTF 背景：
+  D1 高低点、PDH/PDL、PWH/PWL、Asian Range。
+  4H OB/FVG 大色块，低饱和，不遮 K 线。
+  HTF 流动性目标用虚线延伸到右侧。
+
+============================================================
+【三、图层顺序（从底到顶）】
+============================================================
+L0  背景 / session 色块 / 新闻禁交易窗口
+L1  市场结构：HH/HL/LH/LL、BOS、CHoCH、MSS
+L2  流动性：PDH/PDL/PWH/PWL、EQH/EQL、Asian Range、
+    Liquidity Sweep、Liquidity Void
+L3  入场模型：FVG + CE、OB、Breaker、Displacement、
+    CISD、OTE、Judas Swing / Turtle Soup / Silver Bullet（可选）
+L4  交易计划：Entry、SL、TP1/2/3、RR、trailing、invalidation
+L5  HTF：Bias、HTF POI、HTF DOL、HTF→LTF 共振
+L6  标签 / 引线 / 图例 / 免责声明
+
+禁止：
+  先画箭头再找理由；
+  把普通 K 线标成 displacement；
+  把 session gap 标成 FVG；
+  没有 sweep 却画 sweep 标签。
+
+============================================================
+【四、必须出现的元素与标签】
+============================================================
+统一标签格式：
+  【信号名 | 周期 | 时间 | 关键值】
+  例：【Liquidity Sweep | 15m | 10:15 | 82,750】
+
+1) HTF
+  HTF Bias
+  D1 OB
+  4H FVG
+  HTF POI
+  PWH / PWL
+  PDH / PDL
+  Asian Range
+  HTF→LTF 共振
+
+2) 结构
+  HH / HL / LH / LL
+  BOS
+  CHoCH
+  MSS
+  trend / range 色带
+
+3) 流动性
+  Equal Highs
+  Equal Lows
+  Liquidity Sweep
+  Liquidity Void
+  BSL / SSL
+  session high / low
+
+4) 入场模型
+  FVG
+  CE 50%
+  Bullish OB
+  Bearish OB
+  Breaker
+  Displacement（标注 ATR 倍数）
+  CISD
+  OTE 0.62–0.79
+  Judas Swing / Turtle Soup / Silver Bullet（可选）
+
+5) 时段
+  London Killzone
+  NY AM Killzone
+  NY PM Killzone
+  Asia Session
+  News Filter
+
+6) 风控
+  Entry
+  SL
+  TP1 / TP2 / TP3
+  RR 1:2 / 1:3
+  Trailing SL path
+  Invalidation
+
+7) 可选
+  SMT
+  Volume / RVOL
+  Session Sweep
+  Mitigation Block
+
+============================================================
+【五、视觉规范】
+============================================================
+颜色：
+  bullish K 线    深绿 #0f7b4f
+  bearish K 线    深红 #b3261e
+  结构 / 中性      灰蓝 #607d8b
+  FVG             半透明黄 rgba(242,183,5,0.15)
+  OB              半透明橙 rgba(199,119,0,0.14)
+  Breaker         半透明紫 rgba(106,61,154,0.14)
+  Liquidity pool  青色虚线 #00838f
+  HTF zone        低饱和大色块，透明度 ≤0.15
+  Entry           亮绿实线
+  SL              红色实线
+  TP1/TP2/TP3     蓝色虚线，逐级变浅
+
+文字：
+  无衬线字体；标题 18–24pt，信号名 10–12pt，数值 9–10pt。
+  标签白底、细边框、圆角，避免压住 K 线实体。
+  引线细、直、带端点；禁止交叉和长距离绕线。
+  同一区域最多 3 个标签；超出则移到侧栏或放大窗。
+
+============================================================
+【六、防重叠规则】
+============================================================
+1. 每个标签先定锚点，再选四象限空位。
+2. 同一价格带只允许一个主标签，其余进图例。
+3. 放大窗内部只标 2–3 个关键元素，不重复主图全部标签。
+4. HTF Bias 放右侧固定面板，不放在 K 线上。
+5. Entry/SL/TP 标签统一放右侧价格轴外。
+6. 若标签仍然冲突，删掉次要标签，保留：
+   HTF Bias > Sweep > MSS > Entry > SL > TP > 其他。
+
+============================================================
+【七、数据诚实规则】
+============================================================
+- 真实分析图必须来自 CSV；不得手绘假 K 线。
+- 教学示意图必须标注“示意，非投资建议”。
+- 没有的结构不画；没有的 session 数据标 N/A。
+- SMT 必须有第二关联标的，否则 N/A。
+- HTF PDA 必须来自真实 1D/4H 数据，不能凭感觉画。
+- 计划必须给出 Entry / SL / TP / RR / invalidation；
+  缺一项就标“计划不完整”。
+
+============================================================
+【八、输出前自检】
+============================================================
+[ ] HTF Bias 是否在图中？
+[ ] 是否有 HTF POI 与 HTF DOL？
+[ ] 是否有 HTF→LTF 共振连线？
+[ ] sweep、MSS、FVG/OB、CISD 是否都有数据依据？
+[ ] Entry / SL / TP1-3 / RR / invalidation 是否完整？
+[ ] 风险区、盈利区是否只覆盖触发后？
+[ ] trailing path 是否画了？
+[ ] 标签是否重叠？最小字号是否 ≥10pt？
+[ ] 是否标明“示意，非投资建议”？
+[ ] 是否误把 gap 当 FVG、把 wick 当 sweep、把大 K 线当 displacement？
+
+============================================================
+【九、可直接投放的生成指令】
+============================================================
+请生成一张高分辨率 ICT + PA 交易逻辑教学信息图：
+
+- 主图 15m K 线，30 天窗口；24h 市场约 2880 根，
+  US/HK 只画 RTH 的真实根数，不补假数据；
+- 左侧主图 + 成交量，右侧 HTF Bias 面板 + 2–3 个局部放大窗 + 图例；
+- 主图叠加 D1/4H 的 HTF Bias、HTF POI、PDH/PDL/PWH/PWL、Asian Range；
+- 标注 BOS、CHoCH、MSS、HH/HL/LH/LL、EQH/EQL、Liquidity Sweep、
+  Liquidity Void、FVG + CE 50%、Bullish/Bearish OB、Breaker、
+  Displacement、CISD、OTE、Killzone、News Filter；
+- 画出 Entry、SL、TP1/TP2/TP3、RR、Trailing SL、Invalidation；
+- 用连接线标注 HTF→LTF 共振；
+- 所有标签【信号名 | 周期 | 时间 | 关键值】，清晰、分层、不重叠；
+- 白/浅灰底，专业教学信息图风格，4K 以上；
+- 图例注明“示意，非投资建议”。
+
+若用于图像生成模型，追加：
+“生成一张高分辨率专业交易教学信息图，所有标签清晰可读，
+避免文字重叠与乱码；若文字无法精确渲染，请以占位标签框呈现
+并保持布局结构。”
+============================================================
