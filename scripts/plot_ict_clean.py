@@ -210,7 +210,7 @@ def render(args) -> Path:
         hits = view.index[view["date"] == pd.Timestamp(dt)].tolist()
         return int(hits[0]) if hits else None
 
-    fig = plt.figure(figsize=(18, 10), dpi=180, facecolor="white")
+    fig = plt.figure(figsize=(16, 9), dpi=120, facecolor="white")  # 1920x1080 (16:9)
     gs = fig.add_gridspec(2, 1, height_ratios=[4.2, 1.0], hspace=.05,
                           left=.06, right=.80, top=.84, bottom=.07)
     ax = fig.add_subplot(gs[0])
@@ -482,7 +482,7 @@ def render(args) -> Path:
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, facecolor="white", bbox_inches="tight", pad_inches=.25)
+    fig.savefig(out, facecolor="white", bbox_inches=None)
     return out
 
 
