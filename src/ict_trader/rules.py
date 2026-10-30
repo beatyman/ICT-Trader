@@ -312,7 +312,8 @@ def decide_from_good(good: list[dict], plan: dict | None) -> tuple[str, list[dic
 def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
           market: str = "crypto", plan: dict | None = None,
           smt_df: pd.DataFrame | None = None, mode: str = "strict",
-          touch_atr_source: str = "htf", touch_semantics: str = "current") -> dict:
+          touch_atr_source: str = "htf", touch_semantics: str = "current",
+          htf_stub: dict | None = None) -> dict:
     """Run the L0-L5 checks and return a JSON-serialisable report."""
     if mode not in {"strict", "shadow"}:
         raise ValueError("mode must be strict or shadow")
@@ -566,6 +567,15 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                                 "4h": {"long": f_scores.get("long"), "short": f_scores.get("short"), "bar": f_scores.get("bar")}},
                          reason=("no direction" if direction is None else
                                  ("1D/4H not aligned" if not htf_ok else ""))))
+    if htf_stub is not None and direction is not None:
+        l5 = next((r for r in rules if r.rule_id == "L5-03"), None)
+        if l5 is not None:
+            score = int(htf_stub.get(direction, 0))
+            l5.status = "PASS" if score >= 2 else "FAIL"
+            l5.reason = "" if score >= 2 else "stub below 2/3"
+            l5.value = {"direction": direction, "stub": True,
+                        "long": int(htf_stub.get("long", 0)),
+                        "short": int(htf_stub.get("short", 0))}
     rules.append(_status("L5-04", "L5", "session sweep", None, blocking=False,
                          reason="no session pool data"))
     rules.append(_status("L5-05", "L5", "SMT filter", None, blocking=False,
@@ -680,5 +690,6 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         "blocking_failures": [g["id"] for g in hard_bad],
         "blockers": blocker_details,
         "quality_flags": quality_flags,
+        "htf_stub": htf_stub,
         "rules": [r.as_dict() for r in rules],
     }
