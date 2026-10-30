@@ -118,20 +118,43 @@ def _plan_net_rr(plan: dict | None) -> tuple[float | None, float | None]:
 
 
 
+
+def _delivery_state(direction: str, last_close: float, bottom: float, top: float,
+                    htf_cisd: bool, htf_atr: float) -> bool:
+    if direction == "long":
+        return bool(htf_cisd and last_close >= top + .5 * htf_atr)
+    return bool(htf_cisd and last_close <= bottom - .5 * htf_atr)
+
+
 def _htf_pda(df: pd.DataFrame, price: float, atr: float) -> dict | None:
-    """Return the nearest active 1H/4H FVG/OB containing price."""
+    """Return touch / delivery state for an active 1H/4H PDA."""
     for tf in ("1h", "4h"):
         h = _drop_incomplete_htf(df, resample_htf(df, tf), tf)
         if len(h) < 30:
             continue
         r = analyze(h, ICTConfig(mode="historical", show_sessions=False,
                                  show_htf_cisd=False, cisd_all=True, cisd_min_grade=0))
-        for f in [x for x in r.fvgs if x.active]:
-            if float(f.bottom) - .5 * atr <= price <= float(f.top) + .5 * atr:
-                return {"tf": tf, "kind": "FVG", "bottom": float(f.bottom), "top": float(f.top)}
-        for o in [x for x in r.order_blocks if x.active]:
-            if float(o.bottom) - .5 * atr <= price <= float(o.top) + .5 * atr:
-                return {"tf": tf, "kind": "OB", "bottom": float(o.bottom), "top": float(o.top)}
+        h_atr = _atr(h)
+        for kind, items in (("FVG", [x for x in r.fvgs if x.active]),
+                            ("OB", [x for x in r.order_blocks if x.active])):
+            for z in items:
+                bottom, top = float(z.bottom), float(z.top)
+                direction = "long" if z.direction == "bull" else "short"
+                touch = bottom - .25 * h_atr <= price <= top + .25 * h_atr
+                if not touch:
+                    continue
+                cisds = [c for c in r.cisds if c.end >= z.created
+                         and c.direction == z.direction]
+                htf_cisd = bool(cisds)
+                last_close = float(h["close"].iloc[-1])
+                delivered = _delivery_state(direction, last_close, bottom, top, htf_cisd, h_atr)
+                return {
+                    "tf": tf, "kind": kind, "bottom": bottom, "top": top,
+                    "touch": touch, "delivered": delivered,
+                    "direction": direction, "htf_cisd": htf_cisd,
+                    "last_bar": str(h["date"].iloc[-1]),
+                    "cisd_bar": str(h["date"].iloc[cisds[-1].end]) if cisds else None,
+                }
     return None
 
 
@@ -161,6 +184,66 @@ def _smt_check(df: pd.DataFrame, smt_df: pd.DataFrame | None) -> tuple[bool | No
     if len(al) == len(bl) == 2 and al[-1].price < al[-2].price and bl[-1].price >= bl[-2].price:
         return True, "bullish SMT: primary LL, secondary not LL"
     return False, "no aligned divergence"
+
+
+
+def _displacement_quality(df: pd.DataFrame, i: int, atr: float,
+                          swings, direction: str) -> dict:
+    row = df.iloc[i]
+    rng = float(row["high"] - row["low"])
+    body = abs(float(row["close"] - row["open"]))
+    body_ratio = body / rng if rng > 0 else 0.0
+    range_atr = rng / atr if atr > 0 else 0.0
+    if direction == "long":
+        prior = [s for s in swings if s.kind == "H" and s.index < i]
+        swing = prior[-1].price if prior else None
+        beyond = (float(row["close"]) - swing) / atr if swing is not None else -1
+    else:
+        prior = [s for s in swings if s.kind == "L" and s.index < i]
+        swing = prior[-1].price if prior else None
+        beyond = (swing - float(row["close"])) / atr if swing is not None else -1
+    follow = True
+    if i + 1 < len(df):
+        nxt = float(df.iloc[i + 1]["close"])
+        follow = (nxt >= float(row["close"]) - .5 * body) if direction == "long" else (nxt <= float(row["close"]) + .5 * body)
+    ok = body_ratio >= .60 and range_atr >= 1.0 and beyond >= .10 and follow
+    return {"ok": bool(ok), "body_ratio": round(body_ratio, 3),
+            "range_atr": round(range_atr, 3), "close_beyond_atr": round(float(beyond), 3),
+            "follow_through": bool(follow), "swing": swing}
+
+
+
+def _sequence_check(sweeps, events, cisds, entry_bar: int,
+                    max_mss_gap: int = 12, max_cisd_gap: int = 6) -> dict:
+    if not sweeps:
+        return {"valid": False, "reason": "missing sweep",
+                "sweep_bar": None, "mss_bar": None, "cisd_bar": None, "entry_bar": entry_bar}
+    sweep = max(sweeps, key=lambda s: s.sweep_bar)
+    if not events:
+        return {"valid": False, "reason": "no MSS/CHoCH events",
+                "sweep_bar": sweep.sweep_bar, "mss_bar": None, "cisd_bar": None, "entry_bar": entry_bar}
+    msses = [e for e in events if e.kind in {"MSS", "CHoCH"} and e.index >= sweep.sweep_bar]
+    if not msses:
+        return {"valid": False, "reason": "no MSS after sweep",
+                "sweep_bar": sweep.sweep_bar, "mss_bar": None, "cisd_bar": None, "entry_bar": entry_bar}
+    mss = min(msses, key=lambda e: e.index)
+    if mss.index - sweep.sweep_bar > max_mss_gap:
+        return {"valid": False, "reason": "MSS too far from sweep",
+                "sweep_bar": sweep.sweep_bar, "mss_bar": mss.index, "cisd_bar": None, "entry_bar": entry_bar}
+    if not cisds:
+        return {"valid": False, "reason": "no CISD",
+                "sweep_bar": sweep.sweep_bar, "mss_bar": mss.index, "cisd_bar": None, "entry_bar": entry_bar}
+    cds = [c for c in cisds if c.end >= mss.index]
+    if not cds:
+        return {"valid": False, "reason": "no CISD after MSS",
+                "sweep_bar": sweep.sweep_bar, "mss_bar": mss.index, "cisd_bar": None, "entry_bar": entry_bar}
+    c = min(cds, key=lambda x: x.end)
+    if c.end - mss.index > max_cisd_gap:
+        return {"valid": False, "reason": "CISD too far from MSS",
+                "sweep_bar": sweep.sweep_bar, "mss_bar": mss.index, "cisd_bar": c.end, "entry_bar": entry_bar}
+    return {"valid": True, "reason": "sweep -> MSS -> CISD",
+            "sweep_bar": sweep.sweep_bar, "mss_bar": mss.index,
+            "cisd_bar": c.end, "entry_bar": entry_bar}
 
 
 def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
@@ -221,10 +304,13 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                          blocking=False, value=trend,
                          reason="range" if trend == 0 else ""))
     recent_events = [e for e in res.events if e.index >= n - 50]
+    recent_sweeps = [s for s in res.sweeps if s.sweep_bar >= n - 20]
     bos = [e for e in recent_events if e.kind == "BOS"]
     choch = [e for e in recent_events if e.kind in {"CHoCH", "MSS"}]
     rules.append(_status("L1-03", "L1", "BOS", bool(bos), value=len(bos)))
-    rules.append(_status("L1-04", "L1", "CHoCH/MSS", bool(choch), value=len(choch)))
+    seq = _sequence_check(recent_sweeps, recent_events, res.cisds, entry_bar=n - 1)
+    rules.append(_status("L1-04", "L1", "CHoCH/MSS", seq["valid"], value=seq,
+                         reason=seq["reason"] if not seq["valid"] else ""))
     rules.append(_status("L1-05", "L1", "range veto", trend != 0 if trend else None,
                          blocking=False, value="range" if trend == 0 else "trend"))
 
@@ -239,7 +325,6 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     rules.append(_status("L2-02", "L2", "EQH/EQL", bool(pools), value=len(pools)))
     rules.append(_status("L2-03", "L2", "session range", None, blocking=False,
                          reason="no session range data"))
-    recent_sweeps = [s for s in res.sweeps if s.sweep_bar >= n - 20]
     rules.append(_status("L2-04", "L2", "liquidity sweep", bool(recent_sweeps),
                          blocking=True, value=len(recent_sweeps),
                          reason="no sweep within 20 bars" if not recent_sweeps else ""))
@@ -264,9 +349,9 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
 
     pda = _htf_pda(df, price, atr)
     rules.append(_status("L2-08", "L2", "HTF PDA delivery", pda is not None,
-                         blocking=False, value=pda, provisional=pda is not None,
+                         blocking=False, value=pda, provisional=False,
                          reason="price not in an active 1H/4H PDA" if pda is None else
-                                "touch only; delivery not implemented"))
+                                ("delivered" if pda.get("delivered") else "touch only")))
     rvol = float(df["volume"].iloc[-1] / df["volume"].tail(20).mean()) if "volume" in df else None
     rules.append(_status("L2-09", "L2", "volume / RVOL", None if rvol is None else rvol >= 1.5,
                          blocking=False, value=None if rvol is None else round(rvol, 3),
@@ -291,15 +376,11 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     cisds = [c for c in res.cisds if c.end >= n - 20]
     rules.append(_status("L3-04", "L3", "CISD", bool(cisds), blocking=True,
                          value=len(cisds), reason="no CISD within 20 bars" if not cisds else ""))
-    sequence_ok = False
-    if recent_sweeps and cisds:
-        last_sweep = max(recent_sweeps, key=lambda s: s.sweep_bar)
-        last_cisd = max(cisds, key=lambda c: c.end)
-        sequence_ok = last_cisd.end > last_sweep.sweep_bar
+    sequence_ok = bool(seq.get("valid"))
     entry_ok = bool(sequence_ok and (fvgs or obs))
     rules.append(_status("L3-05", "L3", "entry model", entry_ok, blocking=True,
                          value={"sweep": bool(recent_sweeps), "cisd": bool(cisds),
-                                "sequence": sequence_ok, "poi": bool(fvgs or obs)}))
+                                "sequence": seq, "poi": bool(fvgs or obs)}))
     rules.append(_status("L3-06", "L3", "OTE", None, blocking=False,
                          reason="optional; no dealing range in this audit"))
 
@@ -322,6 +403,14 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                          reason="breaker classifier not implemented"))
     fresh = [f for f in fvgs if getattr(f, "fresh", False)]
     rules.append(_status("L3-09", "L3", "fresh FVG/CE", bool(fresh), blocking=False, value={"count": len(fresh), "entry_ref": poi_ref}))
+    disp = None
+    if cisds:
+        last_c = max(cisds, key=lambda c: c.end)
+        disp = _displacement_quality(df, last_c.end, atr, res.swings,
+                                     "long" if last_c.direction == "bull" else "short")
+    rules.append(_status("L3-10", "L3", "displacement quality", False if disp is None else disp["ok"],
+                         blocking=False, value=disp,
+                         reason="no CISD" if disp is None else ("" if disp["ok"] else "displacement below threshold")))
 
     # ---- L4 ---------------------------------------------------------
     gross, net = _plan_net_rr(plan)
@@ -384,7 +473,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
             "provisional": [r.rule_id for r in rules if r.provisional],
             "would_block": strict_decision != old_decision,
         }
-        decision = old_decision
+        decision = strict_decision
     else:
         shadow = None
         decision = strict_decision
@@ -415,7 +504,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         gs("GS-01", "HTF alignment", ["L5-03"], True),
         gs("GS-02", "clear DOL", ["L2-07"], True),
         gs("GS-03", "liquidity sweep", ["L2-04"], True),
-        gs("GS-04", "displacement/CISD", ["L3-04"], True),
+        gs("GS-04", "displacement/CISD", ["L3-04", "L3-10"], True),
         gs("GS-05", "structure confirmation", ["L1-04"], True),
         gs("GS-06", "FVG/OB/CE entry", ["L3-01", "L3-02"], True, "either POI", any_of=True),
         gs("GS-07", "structural stop", ["L4-01"], True),
@@ -428,6 +517,10 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         gs("GS-14", "Breaker", ["L3-08"], False),
         gs("GS-15", "fresh FVG/CE", ["L3-09"], False),
     ]
+    if pda is not None:
+        for g in good:
+            if g["id"] == "GS-10":
+                g["note"] = "delivered" if pda.get("delivered") else "touch_only"
     req = [g for g in good if g["necessary"]]
     if any(g["status"] == "FAIL" for g in req):
         gs_decision = "FAIL"
