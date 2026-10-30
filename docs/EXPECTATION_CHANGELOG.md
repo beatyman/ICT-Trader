@@ -47,6 +47,17 @@ No evidence, no merge.
 - confirmed_by: architecture owner
 - regression_case: A2 only GS-06 FAIL; A3 only GS-08 FAIL
 
+## EC-20261030-05
+
+- change_id: EC-20261030-05
+- rule_id: GS-07 / L4-01
+- old_expected: conditional plan with entry/SL/TP -> L4-01 N/A
+- new_expected: evaluate given SL against structural stop; current plan SL 79,300 vs expected 77,206.65 -> FAIL
+- evidence: sweep 77,181 available, OB missing; delta 8.161 ATR
+- classification: implementation_error
+- confirmed_by: P1 regression owner
+- regression_case: BTCUSDT 2026-10-30 12:45 UTC, conditional short plan
+
 ## Template
 
 ```text
