@@ -1,0 +1,3 @@
+# generated offline forecasts and bytecode — never commit
+cache/*.csv
+__pycache__/

@@ -16,3 +16,5 @@ Thumbs.db
 scripts/install_verify_proxy.sh
 *clash*.yaml
 *mihomo*
+
+external/Kronos/
