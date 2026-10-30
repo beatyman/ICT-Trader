@@ -234,9 +234,55 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
 
     blocking_fail = [r for r in rules if r.blocking and r.status != "PASS"]
     decision = "TRADE" if plan and not blocking_fail else "NO_TRADE"
+
+    # ---- GS chain ----------------------------------------------------
+    by_id = {r.rule_id: r for r in rules}
+
+    def gs(gid, name, sources, necessary, note=""):
+        statuses = [by_id[s].status for s in sources if s in by_id]
+        if not statuses:
+            st = "N/A"
+        elif "FAIL" in statuses:
+            st = "FAIL"
+        elif all(x == "PASS" for x in statuses):
+            st = "PASS"
+        else:
+            st = "N/A"
+        return {"id": gid, "name": name, "status": st, "necessary": necessary,
+                "sources": sources, "note": note}
+
+    good = [
+        gs("GS-01", "HTF alignment", ["L5-03"], True),
+        gs("GS-02", "clear DOL", ["L2-07"], True),
+        gs("GS-03", "liquidity sweep", ["L2-04"], True),
+        gs("GS-04", "displacement/CISD", ["L3-04"], True),
+        gs("GS-05", "structure confirmation", ["L1-04"], True),
+        gs("GS-06", "FVG/OB/CE entry", ["L3-01", "L3-02"], True, "either POI"),
+        gs("GS-07", "structural stop", ["L4-01"], True),
+        gs("GS-08", "net RR >= 2.5", ["L4-03"], True),
+        gs("GS-09", "killzone/session", ["L5-01"], False),
+        gs("GS-10", "HTF PDA delivery", [], False, "not automated"),
+        gs("GS-11", "volume/RVOL", [], False, "not automated"),
+        gs("GS-12", "SMT", ["L2-06"], False),
+        gs("GS-13", "OTE", ["L3-06"], False),
+        gs("GS-14", "Breaker", ["L3-03"], False),
+        gs("GS-15", "fresh FVG/CE", ["L3-01"], False, "fresh flag not scored"),
+    ]
+    req = [g for g in good if g["necessary"]]
+    if any(g["status"] == "FAIL" for g in req):
+        gs_decision = "FAIL"
+    elif any(g["status"] == "N/A" for g in req):
+        gs_decision = "INCOMPLETE"
+    else:
+        gs_decision = "PASS"
+    good_report = {"decision": gs_decision, "criteria": good,
+                   "failed": [g["id"] for g in req if g["status"] == "FAIL"],
+                   "incomplete": [g["id"] for g in req if g["status"] == "N/A"]}
     return {
         "decision": decision,
+        "good_setup": good_report,
         "last_time": str(last["date"]),
+
         "last_close": price,
         "atr": round(atr, 6),
         "blocking_failures": [r.rule_id for r in blocking_fail],

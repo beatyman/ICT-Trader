@@ -34,12 +34,41 @@ The JSON has:
 
 ```text
 decision
+good_setup
+  decision: PASS / FAIL / INCOMPLETE
+  criteria[]: GS-01..GS-15
+  failed[]
+  incomplete[]
 last_time
 last_close
 atr
 blocking_failures
 rules[]  ->  rule_id, layer, name, status, blocking, value, reason
 ```
+
+`good_setup` is the corpus-derived chain:
+
+```text
+GS-01 HTF alignment
+GS-02 clear DOL
+GS-03 liquidity sweep
+GS-04 displacement / CISD
+GS-05 structure confirmation
+GS-06 FVG / OB / CE entry
+GS-07 structural stop
+GS-08 net RR >= 2.5
+
+enhancing:
+GS-09 killzone
+GS-10 HTF PDA delivery
+GS-11 volume / RVOL
+GS-12 SMT
+GS-13 OTE
+GS-14 Breaker
+GS-15 fresh FVG / CE
+```
+
+`FAIL` if any necessary GS fails; `INCOMPLETE` if a necessary input is N/A.
 
 Status:
 

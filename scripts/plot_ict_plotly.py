@@ -284,6 +284,7 @@ def main() -> None:
             f"CONFLUENCE  |  AUDIT: {audit.get('decision','?')}",
             f"Sweep {st('L2-04')}   HTF {st('L5-03')}   Volume N/A   Session {st('L2-03')}",
             f"DOL {st('L2-07')}   SMT {st('L2-06')}   Trigger {st('L3-05')}   RR {st('L4-03')}",
+            f"GS: {audit.get('good_setup', {}).get('decision', 'N/A')}   " + "   ".join(audit.get('good_setup', {}).get('failed', []) or []) ,
             f"Blockers: {', '.join(audit.get('blocking_failures', [])) or 'none'}",
         ]
         fig.add_annotation(

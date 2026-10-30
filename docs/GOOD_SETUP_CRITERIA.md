@@ -527,3 +527,40 @@ GS-15 fresh FVG：可算，但“first”定义有争议
 ## 10. 一句话结论
 
 > **语料中的“好 setup”不是某个形态，而是一条完整链路：HTF 不相反 → 有对立 DOL → 真实 sweep → displacement → MSS/CISD → FVG/OB/CE 回踩 → 结构止损 → 净 RR ≥ 2.5。Killzone、HTF PDA、volume、SMT、OTE、Breaker 是加分项，不是替代核心的捷径。**
+
+---
+
+## 11. 已集成到代码
+
+`src/ict_trader/rules.py` 输出 `good_setup`：
+
+```text
+GS-01 HTF alignment        -> L5-03
+GS-02 clear DOL            -> L2-07
+GS-03 liquidity sweep      -> L2-04
+GS-04 displacement / CISD  -> L3-04
+GS-05 structure            -> L1-04
+GS-06 FVG / OB / CE        -> L3-01 / L3-02
+GS-07 structural stop      -> L4-01
+GS-08 net RR >= 2.5        -> L4-03
+GS-09 killzone             -> L5-01 (N/A without session data)
+GS-10 HTF PDA              -> not automated
+GS-11 volume / RVOL        -> not automated
+GS-12 SMT                  -> L2-06 (N/A without second symbol)
+GS-13 OTE                  -> L3-06 (N/A)
+GS-14 Breaker              -> L3-03 (N/A)
+GS-15 fresh FVG / CE       -> L3-01 (fresh not scored)
+```
+
+`scripts/audit_ict_rules.py` 会输出：
+
+```json
+"good_setup": {
+  "decision": "FAIL",
+  "failed": ["GS-01", "GS-03", "GS-07", "GS-08"],
+  "incomplete": []
+}
+```
+
+`ict-trader plan` 在生成 setup 后自动跑审计；任何 blocking fail 都会把计划降为 `NO_TRADE`。
+
