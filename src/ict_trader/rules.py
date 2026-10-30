@@ -510,17 +510,22 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     gross, net = _plan_net_rr(plan)
     stop_value = None
     stop_ok = None
+    stop_reason = "no plan"
     if plan:
         sw = max(recent_sweeps, key=lambda x: x.sweep_bar) if recent_sweeps else None
-        ob = obs[0] if obs else None
-        if sw is not None and ob is not None:
-            expected = structural_stop(plan["direction"], sw.sweep_price,
-                                       float(ob.bottom if plan["direction"] == "long" else ob.top), atr)
+        if sw is not None:
+            ob = obs[0] if obs else None
+            ob_edge = float(ob.bottom if plan["direction"] == "long" else ob.top) if ob else float(sw.sweep_price)
+            expected = structural_stop(plan["direction"], sw.sweep_price, ob_edge, atr)
             stop_ok = abs(float(plan["sl"]) - expected) <= .5 * atr
             stop_value = {"expected": round(expected, 4), "plan_sl": float(plan["sl"]),
-                          "delta_atr": round(abs(float(plan["sl"]) - expected) / atr, 3)}
+                          "delta_atr": round(abs(float(plan["sl"]) - expected) / atr, 3),
+                          "sweep": True, "ob": ob is not None}
+            stop_reason = "" if stop_ok else "plan SL outside structural stop"
+        else:
+            stop_reason = "no sweep for structural stop"
     rules.append(_status("L4-01", "L4", "stop", stop_ok, blocking=False,
-                         value=stop_value, reason="no plan/sweep/OB" if stop_ok is None else ""))
+                         value=stop_value, reason=stop_reason))
     rules.append(_status("L4-02", "L4", "target", None if not plan else abs(plan["tp"] - plan["entry"]) > 0,
                          blocking=False, value=None if not plan else plan["tp"]))
     rules.append(_status("L4-03", "L4", "net RR", None if net is None else net >= 2.5,
