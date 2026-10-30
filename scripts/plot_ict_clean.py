@@ -357,16 +357,20 @@ def render(args) -> Path:
     ax.set_xlim(-1, n + 22)
     ax.set_ylim(low - pad, high + pad)
     if pending_labels:
-        y0, y1 = ax.get_ylim()
-        gap = (y1 - y0) * .075
-        placed = []
-        for price, txt, col in sorted(pending_labels, key=lambda z: z[0], reverse=True):
-            yy = price
-            while any(abs(yy - q) < gap for q in placed):
-                yy -= gap
-            yy = max(y0 + gap * .5, min(y1 - gap * .5, yy))
-            placed.append(yy)
-            ax.annotate(txt, xy=(n - 1, price), xytext=(n + 7, yy),
+        fig.canvas.draw()
+        tr = ax.transData
+        y0pix = tr.transform((0, ax.get_ylim()[0]))[1]
+        y1pix = tr.transform((0, ax.get_ylim()[1]))[1]
+        gap_px = 40
+        placed_px = []
+        for lprice, txt, col in sorted(pending_labels, key=lambda z: z[0], reverse=True):
+            yp = tr.transform((0, lprice))[1]
+            while any(abs(yp - q) < gap_px for q in placed_px):
+                yp -= gap_px
+            yp = max(min(y0pix, y1pix) + 14, min(max(y0pix, y1pix) - 14, yp))
+            placed_px.append(yp)
+            yy = tr.inverted().transform((0, yp))[1]
+            ax.annotate(txt, xy=(n - 1, lprice), xytext=(n + 7, yy),
                         textcoords="data", fontsize=9, color=col, va="center", ha="left",
                         arrowprops=dict(arrowstyle="-", color=col, lw=.8, shrinkA=0, shrinkB=2),
                         annotation_clip=False, zorder=20)
