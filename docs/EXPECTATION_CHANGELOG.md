@@ -25,6 +25,17 @@ No evidence, no merge.
 - confirmed_by: P0 regression owner
 - regression_case: BTCUSDT 2026-10-30 12:45 UTC, S-01 tolerance case
 
+## EC-20261030-03
+
+- change_id: EC-20261030-03
+- rule_id: L2-07 / DOL
+- old_expected: any unswept pool on plan side could be DOL
+- new_expected: ignore pools with `known_at >= n - 20`; short DOL becomes 76,444
+- evidence: 77,181 known_at 1495 is the current swing extreme, not an untested draw; expected 76,444 SSL
+- classification: expectation_error
+- confirmed_by: P1 regression owner
+- regression_case: BTCUSDT 2026-10-30 12:45 UTC, short conditional plan
+
 ## Template
 
 ```text

@@ -126,7 +126,7 @@ def _delivery_state(direction: str, last_close: float, bottom: float, top: float
     return bool(htf_cisd and last_close <= bottom - .5 * htf_atr)
 
 
-def _htf_pda(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str = "htf") -> dict | None:
+def _htf_pda(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str = "htf", touch_semantics: str = "current") -> dict | None:
     """Return the nearest relevant HTF PDA touch/delivery state."""
     best = None
     best_key = None
@@ -145,14 +145,30 @@ def _htf_pda(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str =
                 touch_atr = h_atr if touch_atr_source == "htf" else atr
                 start_i = max(0, int(z.created))
                 bars = h.iloc[start_i:]
-                touched = bars[(bars["low"] <= top + .25 * touch_atr) &
-                               (bars["high"] >= bottom - .25 * touch_atr)]
-                if touched.empty:
+                hist = bars[(bars["low"] <= top + .25 * touch_atr) &
+                            (bars["high"] >= bottom - .25 * touch_atr)]
+                current_touch = bottom - .25 * touch_atr <= price <= top + .25 * touch_atr
+                last15 = df.iloc[-1]
+                overlap_touch = bool(last15["low"] <= top + .25 * touch_atr and
+                                     last15["high"] >= bottom - .25 * touch_atr)
+                if touch_semantics == "historical":
+                    touch = not hist.empty
+                    touch_idx = int(hist.index[0]) if touch else None
+                elif touch_semantics == "overlap":
+                    touch = overlap_touch
+                    touch_idx = int(h.index[-1]) if touch else None
+                else:
+                    touch = current_touch
+                    touch_idx = int(h.index[-1]) if touch else None
+                if not touch:
                     continue
-                touch_idx = int(touched.index[0])
-                cisds = [c for c in r.cisds if c.end >= touch_idx
+                hist_idx = int(hist.index[0]) if not hist.empty else touch_idx
+                cisds = [c for c in r.cisds if c.end >= hist_idx
                          and c.direction == z.direction]
+                opposite = [c for c in r.cisds if c.end >= hist_idx
+                            and c.direction != z.direction]
                 htf_cisd = bool(cisds)
+                reverse_cisd = bool(opposite) and not htf_cisd
                 last_close = float(h["close"].iloc[-1])
                 delivered = _delivery_state(direction, last_close, bottom, top, htf_cisd, h_atr)
                 dist = max(bottom - price, price - top, 0.0)
@@ -161,9 +177,14 @@ def _htf_pda(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str =
                     best_key = key
                     best = {
                         "tf": tf, "kind": kind, "bottom": bottom, "top": top,
-                        "touch": True, "delivered": delivered,
+                        "touch": touch, "delivered": delivered,
+                        "touch_semantics": touch_semantics,
+                        "current_touch": current_touch,
+                        "historical_touch": not hist.empty,
+                        "overlap_touch": overlap_touch,
                         "touch_bar": str(h["date"].iloc[touch_idx]),
                         "direction": direction, "htf_cisd": htf_cisd,
+                        "reverse_cisd": reverse_cisd,
                         "last_bar": str(h["date"].iloc[-1]),
                         "touch_atr_source": touch_atr_source,
                         "cisd_bar": str(h["date"].iloc[cisds[-1].end]) if cisds else None,
@@ -261,7 +282,7 @@ def _sequence_check(sweeps, events, cisds, entry_bar: int | None,
 def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
           market: str = "crypto", plan: dict | None = None,
           smt_df: pd.DataFrame | None = None, mode: str = "strict",
-          touch_atr_source: str = "htf") -> dict:
+          touch_atr_source: str = "htf", touch_semantics: str = "current") -> dict:
     """Run the L0-L5 checks and return a JSON-serialisable report."""
     if mode not in {"strict", "shadow"}:
         raise ValueError("mode must be strict or shadow")
@@ -380,11 +401,12 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                                     "below": [round(k.price, 4) for k in below[:3]]},
                              reason="no plan direction"))
 
-    pda = _htf_pda(df, price, atr, touch_atr_source=touch_atr_source)
-    rules.append(_status("L2-08", "L2", "HTF PDA delivery", pda is not None,
+    pda = _htf_pda(df, price, atr, touch_atr_source=touch_atr_source, touch_semantics=touch_semantics)
+    rules.append(_status("L2-08", "L2", "HTF PDA delivery", pda is not None and not pda.get("reverse_cisd", False),
                          blocking=False, value=pda, provisional=False,
                          reason="price not in an active 1H/4H PDA" if pda is None else
-                                ("delivered" if pda.get("delivered") else "touch only")))
+                                ("reverse CISD" if pda.get("reverse_cisd") else
+                                 ("delivered" if pda.get("delivered") else "touch only"))))
     rvol = float(df["volume"].iloc[-1] / df["volume"].tail(20).mean()) if "volume" in df else None
     rules.append(_status("L2-09", "L2", "volume / RVOL", None if rvol is None else rvol >= 1.5,
                          blocking=False, value=None if rvol is None else round(rvol, 3),
@@ -564,7 +586,12 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     if pda is not None:
         for g in good:
             if g["id"] == "GS-10":
-                g["note"] = "delivered" if pda.get("delivered") else "touch_only"
+                g["note"] = "reverse_cisd" if pda.get("reverse_cisd") else ("delivered" if pda.get("delivered") else "touch_only")
+                g["touch"] = pda.get("touch")
+                g["delivered"] = pda.get("delivered")
+                g["htf_cisd"] = pda.get("htf_cisd")
+                g["touch_semantics"] = pda.get("touch_semantics")
+                g["cisd_bar"] = pda.get("cisd_bar")
     req = [g for g in good if g["necessary"]]
     if any(g["status"] == "FAIL" for g in req):
         gs_decision = "FAIL"

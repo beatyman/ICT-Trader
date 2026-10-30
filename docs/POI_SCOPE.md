@@ -44,6 +44,37 @@ new: 3 FVG / 0 OB / 3 fresh
 GS-06 uses either FVG or OB; it still passes when one relevant POI exists.
 
 
+## Touch semantics
+
+Three possible meanings:
+
+```text
+current:    current price inside zone ± tolerance
+historical: any bar after creation touched the zone
+overlap:    current 15m bar range overlaps the zone ± tolerance
+```
+
+Default:
+
+```text
+touch_semantics = current
+```
+
+Reason: L2-08 asks whether price is at the PDA now. "Historically touched"
+is a separate mitigation field, not the current entry condition.
+
+Current review:
+
+```text
+current + htf: touch=true
+current + ltf: touch=false
+historical:    touch=true
+overlap:       touch=true
+```
+
+`historical` is why a naive implementation can make L2-08 PASS on almost any
+old PDA. It is not the default.
+
 ## Touch ATR source
 
 Default: `touch_atr_source = htf`.
