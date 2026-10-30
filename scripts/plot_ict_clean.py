@@ -279,6 +279,7 @@ def render(args) -> Path:
                 fontsize=7, color="#455A64", va="bottom", ha="right")
 
     # ---- plan -------------------------------------------------------
+    pending_labels = []
     if plan:
         ti = view.index[view["date"] == pd.Timestamp(plan["trigger_time"])].tolist()
         if not ti:
@@ -306,7 +307,7 @@ def render(args) -> Path:
                 color="#1b8a4b", lw=1.2, ls=(0, (4, 3)), zorder=7)
         gross, net = _net_rr(plan["direction"], plan["entry"], plan["sl"], plan["tp"],
                              args.commission_bps, args.slippage_bps, args.sell_tax_bps)
-        plan_labels = [
+        pending_labels = [
             (plan["entry"], f"{plan['direction'].upper()} Entry {plan['entry']:.2f} | conditional", "#1565c0"),
             (plan["sl"], f"{plan['direction'].upper()} SL {plan['sl']:.2f}", "#c62828"),
             (plan["tp"], f"{plan['direction'].upper()} TP {plan['tp']:.2f} | net {net:.2f}R", "#1b8a4b"),
@@ -318,24 +319,11 @@ def render(args) -> Path:
             ax.plot([ti, x_end], [a_entry, a_entry], color=ac, lw=1.1, ls=":", zorder=7)
             ax.plot([ti, x_end], [a_sl, a_sl], color="#ef9a9a", lw=1.0, ls=":", zorder=6)
             ax.plot([ti, x_end], [a_tp, a_tp], color=ac, lw=1.0, ls=":", zorder=6)
-            plan_labels += [
+            pending_labels += [
                 (a_entry, f"{args.alt_direction.upper()} Entry {a_entry:.2f} | scenario", ac),
                 (a_sl, f"{args.alt_direction.upper()} SL {a_sl:.2f}", "#ef9a9a"),
                 (a_tp, f"{args.alt_direction.upper()} TP {a_tp:.2f}", ac),
             ]
-        # right-gutter labels with leader lines and vertical de-overlap
-        ymin0, ymax0 = ax.get_ylim()
-        sorted_labels = sorted(plan_labels, key=lambda z: z[0], reverse=True)
-        placed, min_gap = [], (ymax0 - ymin0) * .042
-        for p0, txt, col in sorted_labels:
-            yy = p0
-            while any(abs(yy - q) < min_gap for q in placed):
-                yy -= min_gap
-            placed.append(yy)
-            ax.annotate(txt, xy=(x_end, p0), xytext=(x_end + 1.6, yy),
-                        textcoords="data", fontsize=9, color=col, va="center", ha="left",
-                        arrowprops=dict(arrowstyle="-", color=col, lw=.8, shrinkA=0, shrinkB=2),
-                        annotation_clip=False, zorder=12)
         summary = (f"{label} — NOT TRIGGERED\n"
                    f"Source: {plan.get('source','')}\n"
                    f"Entry {plan['entry']:.4g}  SL {plan['sl']:.4g}  TP {plan['tp']:.4g}\n"
@@ -368,6 +356,20 @@ def render(args) -> Path:
     pad = max((high - low) * .06, 1e-6)
     ax.set_xlim(-1, n + 22)
     ax.set_ylim(low - pad, high + pad)
+    if pending_labels:
+        y0, y1 = ax.get_ylim()
+        gap = (y1 - y0) * .075
+        placed = []
+        for price, txt, col in sorted(pending_labels, key=lambda z: z[0], reverse=True):
+            yy = price
+            while any(abs(yy - q) < gap for q in placed):
+                yy -= gap
+            yy = max(y0 + gap * .5, min(y1 - gap * .5, yy))
+            placed.append(yy)
+            ax.annotate(txt, xy=(n - 1, price), xytext=(n + 7, yy),
+                        textcoords="data", fontsize=9, color=col, va="center", ha="left",
+                        arrowprops=dict(arrowstyle="-", color=col, lw=.8, shrinkA=0, shrinkB=2),
+                        annotation_clip=False, zorder=20)
     ax.set_ylabel("Price", fontsize=10, labelpad=8)
     ax.grid(True, color="#e6e6e6", linewidth=.7)
     ax.set_axisbelow(True)
