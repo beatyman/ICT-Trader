@@ -18,6 +18,30 @@ scripts/plot_ict_clean.py    static PNG only, not the analysis standard
 scripts/plot_ict_signal.py   legacy Plotly renderer
 ```
 
+## Confluence gate
+
+A chart may show a **conditional** plan, but a trade is only valid when all
+applicable checks pass.  Each check must be marked `PASS`, `FAIL` or `N/A`;
+`N/A` is never treated as a pass.
+
+```text
+1. Liquidity sweep      price took a prior high/low, then reclaimed
+2. HTF PDA delivery    1H/4H FVG or OB is being delivered into
+3. Volume              sweep/displacement bar >= 1.5x 20-bar average
+4. Session sweep       sweep occurs in the active Asia/London/NY session
+5. Clear targets       unswept DOL exists; net RR >= 2.5
+6. SMT                 correlated asset divergence, only with a second CSV
+7. Trigger             15m CISD / displacement confirms the direction
+```
+
+Rules:
+
+- do not draw a missing FVG/OB/sweep;
+- do not claim SMT without a correlated series;
+- do not claim session sweep when the data has no session/premarket bars;
+- if any required check is `FAIL`, the decision remains `NO_TRADE`;
+- `N/A` blocks a trade unless the user explicitly accepts the missing input.
+
 ## Required window
 
 ```text

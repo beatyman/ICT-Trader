@@ -184,6 +184,20 @@ Do not turn a `NO_TRADE` into a discretionary buy.
 
 ### 3b. Charting contract
 
+Before drawing, mark the confluence gate.  `N/A` is not a pass.
+
+```text
+Liquidity sweep      PASS / FAIL / N/A
+HTF PDA delivery     PASS / FAIL / N/A
+Volume               PASS / FAIL / N/A
+Session sweep        PASS / FAIL / N/A
+Clear targets        PASS / FAIL / N/A
+SMT                  PASS / FAIL / N/A
+Trigger (CISD)       PASS / FAIL / N/A
+```
+
+Failure of any required check means `NO_TRADE`.
+
 When the user asks for a chart, use:
 
 ```bash
