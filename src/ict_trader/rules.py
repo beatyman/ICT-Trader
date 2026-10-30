@@ -126,10 +126,9 @@ def _delivery_state(direction: str, last_close: float, bottom: float, top: float
     return bool(htf_cisd and last_close <= bottom - .5 * htf_atr)
 
 
-def _htf_pda(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str = "htf", touch_semantics: str = "current") -> dict | None:
-    """Return the nearest relevant HTF PDA touch/delivery state."""
-    best = None
-    best_key = None
+def _htf_pdas(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str = "htf", touch_semantics: str = "current") -> list[dict]:
+    """Return all active HTF PDAs with touch/delivery state."""
+    out = []
     for rank, tf in enumerate(("1h", "4h")):
         h = _drop_incomplete_htf(df, resample_htf(df, tf), tf)
         if len(h) < 30:
@@ -174,10 +173,7 @@ def _htf_pda(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str =
                 delivery_dist = ((last_close - top) / h_atr if direction == "long"
                                  else (bottom - last_close) / h_atr) if h_atr > 0 else 0.0
                 dist = max(bottom - price, price - top, 0.0)
-                key = (rank, dist)
-                if best_key is None or key < best_key:
-                    best_key = key
-                    best = {
+                out.append({
                         "tf": tf, "kind": kind, "bottom": bottom, "top": top,
                         "touch": touch, "delivered": delivered,
                         "delivery_distance_atr": round(float(delivery_dist), 3),
@@ -191,8 +187,17 @@ def _htf_pda(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str =
                         "last_bar": str(h["date"].iloc[-1]),
                         "touch_atr_source": touch_atr_source,
                         "cisd_bar": str(h["date"].iloc[cisds[-1].end]) if cisds else None,
-                    }
-    return best
+                        "distance": dist, "tf_rank": rank,
+                    })
+    return out
+
+
+def _htf_pda(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str = "htf", touch_semantics: str = "current") -> dict | None:
+    """Deprecated single-PDA view; prefer _htf_pdas + aggregation."""
+    pds = _htf_pdas(df, price, atr, touch_atr_source, touch_semantics)
+    if not pds:
+        return None
+    return min(pds, key=lambda x: (x["tf_rank"], x["distance"]))
 
 def _smt_check(df: pd.DataFrame, smt_df: pd.DataFrame | None) -> tuple[bool | None, str]:
     if smt_df is None or "date" not in smt_df.columns:
@@ -418,7 +423,16 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                                     "below": [round(k.price, 4) for k in below[:3]]},
                              reason="no plan direction"))
 
-    pda = _htf_pda(df, price, atr, touch_atr_source=touch_atr_source, touch_semantics=touch_semantics)
+    pdas = _htf_pdas(df, price, atr, touch_atr_source, touch_semantics)
+    delivered_pda = next((x for x in pdas if x["delivered"]), None)
+    reverse_pda = next((x for x in pdas if x["reverse_cisd"] and not x["delivered"]), None)
+    touch_pda = next((x for x in pdas if x["touch"]), None)
+    pda = delivered_pda or reverse_pda or touch_pda
+    if pda is not None:
+        pda = dict(pda)
+        pda["pdas"] = pdas
+        pda["aggregate"] = ("delivered" if delivered_pda else
+                            "reverse_cisd" if reverse_pda else "touch")
     rules.append(_status("L2-08", "L2", "HTF PDA delivery", pda is not None and not pda.get("reverse_cisd", False),
                          blocking=False, value=pda, provisional=False,
                          reason="price not in an active 1H/4H PDA" if pda is None else
