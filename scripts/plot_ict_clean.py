@@ -105,6 +105,23 @@ def _pdh_pdl_pwh_pwl(df: pd.DataFrame) -> dict[str, float]:
         out["PWH"] = float(w["high"].iloc[-2])
         out["PWL"] = float(w["low"].iloc[-2])
     return out
+def _fmt_px(x: float) -> str:
+    """Adaptive price formatting for large and sub-unit prices (e.g. 0.0245)."""
+    x = float(x)
+    if x == 0:
+        return "0"
+    a = abs(x)
+    if a >= 1000:
+        return f"{x:,.2f}"
+    if a >= 10:
+        return f"{x:.2f}"
+    if a >= 1:
+        return f"{x:.3f}"
+    if a >= 0.01:
+        return f"{x:.5f}"
+    return f"{x:.6g}"
+
+
 def runs(indices) -> list[tuple[int, int]]:
     """Merge consecutive bar indices into [(start, end)] closed intervals."""
     idx = sorted(set(int(i) for i in indices))
@@ -371,15 +388,15 @@ def render(args) -> Path:
     for name, lv in ctx_levels.items():
         if yl <= lv <= yh:
             ax.axhline(lv, color="#00838F", lw=1.2, ls=(0, (6, 3)), alpha=.75, zorder=3)
-            ax.text(n - 1, lv, f"{name} {lv:.2f}", fontsize=8,
+            ax.text(n - 1, lv, f"{name} {_fmt_px(lv)}", fontsize=8,
                     color="#00838F", ha="right", va="bottom", zorder=4)
         elif lv > yh:
-            ax.annotate(f"↑ {name} {lv:.2f} (Out of view)", xy=(1.006, .975 - above_i * .035),
+            ax.annotate(f"↑ {name} {_fmt_px(lv)} (Out of view)", xy=(1.006, .975 - above_i * .035),
                         xycoords="axes fraction", fontsize=8, color="#00838F",
                         ha="left", va="top", annotation_clip=False, zorder=20)
             above_i += 1
         else:
-            ax.annotate(f"↓ {name} {lv:.2f} (Out of view)", xy=(1.006, .025 + below_i * .035),
+            ax.annotate(f"↓ {name} {_fmt_px(lv)} (Out of view)", xy=(1.006, .025 + below_i * .035),
                         xycoords="axes fraction", fontsize=8, color="#00838F",
                         ha="left", va="bottom", annotation_clip=False, zorder=20)
             below_i += 1
@@ -400,10 +417,10 @@ def render(args) -> Path:
                                x_end - ti, plan["tp"] - plan["entry"],
                                facecolor="#1b8a4b", alpha=.07, linewidth=0, zorder=0))
         ax.text(ti + (x_end - ti) * .45, (plan["entry"] + plan["sl"]) / 2,
-                f"Risk {abs(plan['entry']-plan['sl']):.2f} pts", fontsize=7.5,
+                f"Risk {_fmt_px(abs(plan['entry']-plan['sl']))} pts", fontsize=7.5,
                 color="#b71c1c", va="center", zorder=11)
         ax.text(ti + (x_end - ti) * .45, (plan["entry"] + plan["tp"]) / 2,
-                f"Reward {abs(plan['entry']-plan['tp']):.2f} pts", fontsize=7.5,
+                f"Reward {_fmt_px(abs(plan['entry']-plan['tp']))} pts", fontsize=7.5,
                 color="#1b5e20", va="center", zorder=11)
         ax.plot([ti, x_end], [plan["entry"], plan["entry"]],
                 color="#1565c0", lw=2.2, zorder=8)
@@ -414,9 +431,9 @@ def render(args) -> Path:
         gross, net = _net_rr(plan["direction"], plan["entry"], plan["sl"], plan["tp"],
                              args.commission_bps, args.slippage_bps, args.sell_tax_bps)
         pending_labels = [
-            (plan["entry"], f"{plan['direction'].upper()} Entry {plan['entry']:.2f} | conditional", "#1565c0"),
-            (plan["sl"], f"{plan['direction'].upper()} SL {plan['sl']:.2f}", "#c62828"),
-            (plan["tp"], f"{plan['direction'].upper()} TP {plan['tp']:.2f} | net {net:.2f}R", "#1b8a4b"),
+            (plan["entry"], f"{plan['direction'].upper()} Entry {_fmt_px(plan['entry'])} | conditional", "#1565c0"),
+            (plan["sl"], f"{plan['direction'].upper()} SL {_fmt_px(plan['sl'])}", "#c62828"),
+            (plan["tp"], f"{plan['direction'].upper()} TP {_fmt_px(plan['tp'])} | net {net:.2f}R", "#1b8a4b"),
         ]
         label = "CONDITIONAL" if plan.get("conditional") else "PLAN"
         if args.alt_entry and args.alt_direction:
@@ -426,13 +443,13 @@ def render(args) -> Path:
             ax.plot([ti, x_end], [a_sl, a_sl], color="#ef9a9a", lw=1.0, ls=":", zorder=6)
             ax.plot([ti, x_end], [a_tp, a_tp], color=ac, lw=1.0, ls=":", zorder=6)
             pending_labels += [
-                (a_entry, f"{args.alt_direction.upper()} Entry {a_entry:.2f} | scenario", ac),
-                (a_sl, f"{args.alt_direction.upper()} SL {a_sl:.2f}", "#ef9a9a"),
-                (a_tp, f"{args.alt_direction.upper()} TP {a_tp:.2f}", ac),
+                (a_entry, f"{args.alt_direction.upper()} Entry {_fmt_px(a_entry)} | scenario", ac),
+                (a_sl, f"{args.alt_direction.upper()} SL {_fmt_px(a_sl)}", "#ef9a9a"),
+                (a_tp, f"{args.alt_direction.upper()} TP {_fmt_px(a_tp)}", ac),
             ]
         summary = (f"{label} — NOT TRIGGERED\n"
                    f"Source: {plan.get('source','')}\n"
-                   f"Entry {plan['entry']:.4g}  SL {plan['sl']:.4g}  TP {plan['tp']:.4g}\n"
+                   f"Entry {_fmt_px(plan['entry'])}  SL {_fmt_px(plan['sl'])}  TP {_fmt_px(plan['tp'])}\n"
                    f"Gross RR {gross:.2f}  Net RR {net:.2f}")
         status = f"{plan['direction'].upper()} {label} | gross RR {gross:.2f} | net RR {net:.2f}"
     else:
@@ -449,13 +466,13 @@ def render(args) -> Path:
     def _fmt_logic(direction, entry, sl, tp, net):
         d = direction.upper()
         if d == "SHORT":
-            trig = f"反抽 {entry:.2f} 失败 + 向下 CISD"
-            inv = f"收盘站上 {sl:.2f}"
+            trig = f"反抽 {_fmt_px(entry)} 失败 + 向下 CISD"
+            inv = f"收盘站上 {_fmt_px(sl)}"
         else:
-            trig = f"回踩 {entry:.2f} 反弹 + 向上 CISD"
-            inv = f"收盘跌破 {sl:.2f}"
+            trig = f"回踩 {_fmt_px(entry)} 反弹 + 向上 CISD"
+            inv = f"收盘跌破 {_fmt_px(sl)}"
         tag = "开空" if d == "SHORT" else "开多"
-        logic_lines.append(f"{tag} {d}: {entry:.2f} / SL {sl:.2f} / TP {tp:.2f} | net {net:+.2f}R")
+        logic_lines.append(f"{tag} {d}: {_fmt_px(entry)} / SL {_fmt_px(sl)} / TP {_fmt_px(tp)} | net {net:+.2f}R")
         logic_lines.append(f"    触发: {trig}")
         logic_lines.append(f"    失效: {inv}")
     if plan:
