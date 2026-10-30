@@ -82,6 +82,7 @@ def main() -> None:
     ap.add_argument("--market", choices=["crypto", "us", "hk", "other"], default="crypto")
     ap.add_argument("--theme", choices=["light", "dark"], default="light")
     ap.add_argument("--plan-json", default=None)
+    ap.add_argument("--audit-json", default=None)
     ap.add_argument("--direction", choices=["long", "short"], default=None)
     ap.add_argument("--entry", type=float, default=None)
     ap.add_argument("--sl", type=float, default=None)
@@ -109,6 +110,8 @@ def main() -> None:
         "rr_bg": "rgba(255,255,255,0.88)" if light else "rgba(0,0,0,0.55)",
         "rr_font": "#111111" if light else "white",
         "watermark": "rgba(0,0,0,0.10)" if light else "rgba(255,255,255,0.18)",
+        "panel_bg": "rgba(255,255,255,0.94)" if light else "rgba(0,0,0,0.78)",
+        "panel_border": "rgba(0,0,0,0.18)" if light else "rgba(255,255,255,0.25)",
     }
 
     df = load_csv(args.csv)
@@ -265,6 +268,30 @@ def main() -> None:
         fig.add_annotation(x=0.5, y=0.55, xref="paper", yref="paper",
                            text="NO TRADE", showarrow=False,
                            font=dict(size=40, color=theme["watermark"]))
+
+    audit = None
+    if args.audit_json:
+        audit = json.loads(Path(args.audit_json).read_text(encoding="utf-8"))
+    elif args.plan_json:
+        _po = json.loads(Path(args.plan_json).read_text(encoding="utf-8"))
+        audit = _po.get("rule_audit")
+
+    if audit:
+        rs = {r.get("rule_id"): r.get("status") for r in audit.get("rules", [])}
+        def st(i):
+            return rs.get(i, "N/A")
+        lines = [
+            f"CONFLUENCE  |  AUDIT: {audit.get('decision','?')}",
+            f"Sweep {st('L2-04')}   HTF {st('L5-03')}   Volume N/A   Session {st('L2-03')}",
+            f"DOL {st('L2-07')}   SMT {st('L2-06')}   Trigger {st('L3-05')}   RR {st('L4-03')}",
+            f"Blockers: {', '.join(audit.get('blocking_failures', [])) or 'none'}",
+        ]
+        fig.add_annotation(
+            x=0.012, y=0.985, xref="paper", yref="paper",
+            text="<br>".join(lines), align="left", showarrow=False,
+            bgcolor=theme["panel_bg"], bordercolor=theme["panel_border"],
+            borderwidth=1, borderpad=5, font=dict(size=8, color=theme["font"]),
+        )
 
     fig.update_layout(
         template=theme["template"],

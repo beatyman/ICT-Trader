@@ -11,6 +11,7 @@ import pandas as pd
 
 from .concepts import ICTConfig, analyze, atr as atr_series, load_csv, plot, signals_frame
 from .journal import COLUMNS, process_summary
+from .rules import audit as audit_rules
 from .setup import SetupConfig, build_setup, run_one
 from .strategy import net_rr
 from .walk_forward import purged_walk_forward
@@ -221,6 +222,19 @@ def cmd_plan(args) -> None:
             "signal_time": str(df["date"].iloc[latest.end]),
             "entry_distance_atr": entry_distance_atr,
         }
+        audit_plan = {
+            "direction": "long" if latest.direction == "bull" else "short",
+            "entry": latest.level,
+            "sl": latest.sl,
+            "tp": target,
+        }
+        report = audit_rules(df, daily=daily, market=args.market, plan=audit_plan)
+        card["rule_audit"] = report
+        if report["decision"] != "TRADE":
+            card["decision"] = "NO_TRADE"
+            card["rejected"] = "rule_audit_failed"
+            card["reason"] = "rule_audit_failed: " + ",".join(report["blocking_failures"])
+            card["setup"] = None
     _write_json(args.json_out, card)
     print(json.dumps(card, ensure_ascii=False, indent=2))
 
@@ -290,7 +304,7 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
         p.add_argument("--csv", required=True)
         p.add_argument("--daily-csv", default=None)
         p.add_argument("--symbol", default="UNKNOWN")
-    p.add_argument("--market", choices=["cn", "hk", "crypto", "other"], default="cn")
+    p.add_argument("--market", choices=["cn", "hk", "us", "crypto", "other"], default="cn")
     p.add_argument("--min-grade", type=int, default=3)
     p.add_argument("--min-confluence", type=int, default=2)
     p.add_argument("--min-1d-score", type=int, default=3)

@@ -185,7 +185,7 @@ def _tf_frame(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str
     if tf == "1D":
         if market == "crypto":
             return _htf(df, "1D", market)
-        close_hour = 16 if market == "hk" else 15
+        close_hour = 16 if market in {"hk", "us"} else 15
         return _daily_htf(df, daily, close_hour) if daily is not None else _htf(df, "1D", market)
     return _htf(df, tf, market)
 
@@ -196,7 +196,7 @@ def _raw_htf(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str)
             return None
         h = daily.copy()
         h["date"] = (pd.to_datetime(h["date"]).dt.normalize()
-                     + pd.Timedelta(hours=16 if market == "hk" else 15))
+                     + pd.Timedelta(hours=16 if market in {"hk", "us"} else 15))
         return _drop_incomplete_htf(df, h.sort_values("date").reset_index(drop=True))
     if tf == "4h" and market == "cn":
         return _drop_incomplete_htf(df, resample_cn_4h(df))
