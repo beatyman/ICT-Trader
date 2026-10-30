@@ -102,6 +102,14 @@ def _htf_scores(df: pd.DataFrame, tf: str, eq_atr: float = 0.05) -> dict:
     return _score_row(add_indicators(h).iloc[-1], _atr(h), eq_atr)
 
 
+
+def structural_stop(direction: str, sweep_extreme: float, ob_edge: float,
+                    atr: float, pad_atr: float = .10) -> float:
+    if direction == "long":
+        return min(float(sweep_extreme), float(ob_edge)) - pad_atr * atr
+    return max(float(sweep_extreme), float(ob_edge)) + pad_atr * atr
+
+
 def _plan_net_rr(plan: dict | None) -> tuple[float | None, float | None]:
     if not plan:
         return None, None
@@ -500,8 +508,19 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
 
     # ---- L4 ---------------------------------------------------------
     gross, net = _plan_net_rr(plan)
-    rules.append(_status("L4-01", "L4", "stop", None if not plan else abs(plan["entry"] - plan["sl"]) >= .3 * atr,
-                         blocking=False, value=None if not plan else abs(plan["entry"] - plan["sl"])))
+    stop_value = None
+    stop_ok = None
+    if plan:
+        sw = max(recent_sweeps, key=lambda x: x.sweep_bar) if recent_sweeps else None
+        ob = obs[0] if obs else None
+        if sw is not None and ob is not None:
+            expected = structural_stop(plan["direction"], sw.sweep_price,
+                                       float(ob.bottom if plan["direction"] == "long" else ob.top), atr)
+            stop_ok = abs(float(plan["sl"]) - expected) <= .5 * atr
+            stop_value = {"expected": round(expected, 4), "plan_sl": float(plan["sl"]),
+                          "delta_atr": round(abs(float(plan["sl"]) - expected) / atr, 3)}
+    rules.append(_status("L4-01", "L4", "stop", stop_ok, blocking=False,
+                         value=stop_value, reason="no plan/sweep/OB" if stop_ok is None else ""))
     rules.append(_status("L4-02", "L4", "target", None if not plan else abs(plan["tp"] - plan["entry"]) > 0,
                          blocking=False, value=None if not plan else plan["tp"]))
     rules.append(_status("L4-03", "L4", "net RR", None if net is None else net >= 2.5,
