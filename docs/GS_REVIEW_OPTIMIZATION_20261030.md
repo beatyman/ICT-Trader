@@ -121,7 +121,7 @@ FAIL：云上 + TK> + MACD> 对 short → short 0/3
 ```text
 1D short 2/3
 1H short 3/3
-4H short 3/3
+4H short 2/3（Tenkan = Kijun，严格 < 不成立；预期 3/3 是错的）
 L5-03 由 FAIL → PASS（仅 short 方向）
 ```
 
@@ -745,7 +745,7 @@ O-03 → O-04
 
 | 规则 | 修复前 | 修复后 | 说明 |
 |---|---|---|---|
-| L5-03 | FAIL（1D0/1H1/4H1） | PASS（short 1D2/1H3/4H3） | O-01 + O-02 |
+| L5-03 | FAIL（1D0/1H1/4H1） | PASS（short 1D2/1H3/4H2） | O-01 + O-02；4H TK=Kijun |
 | GS-01 | FAIL | PASS | 方向性评分 |
 | L3-01 | 263 FVG | 1 相关 FVG | O-03 |
 | L3-02 | 8 OB | 0 相关 OB | O-03 |

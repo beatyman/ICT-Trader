@@ -47,23 +47,41 @@ def _status(rule_id, layer, name, ok: bool | None, *, blocking=False,
     return RuleResult(rule_id, layer, name, status, blocking, value, reason)
 
 
-def _htf_score(df: pd.DataFrame, tf: str) -> tuple[int, dict]:
-    h = resample_htf(df, tf)
-    if len(h) and h["date"].iloc[-1] > df["date"].iloc[-1]:
-        h = h.iloc[:-1]
-    h = add_indicators(h)
-    r = h.iloc[-1]
+_TF_DELTA = {"1h": pd.Timedelta(hours=1), "4h": pd.Timedelta(hours=4), "1d": pd.Timedelta(days=1)}
+
+
+def _drop_incomplete_htf(df: pd.DataFrame, h: pd.DataFrame, tf: str) -> pd.DataFrame:
+    """Drop the last HTF bar unless its period has fully closed."""
+    if not len(h) or tf not in _TF_DELTA:
+        return h
+    if df["date"].iloc[-1] < h["date"].iloc[-1] + _TF_DELTA[tf]:
+        return h.iloc[:-1]
+    return h
+
+
+def _score_row(r) -> dict:
     cloud_lo = min(float(r.span_a), float(r.span_b))
     cloud_hi = max(float(r.span_a), float(r.span_b))
-    checks = {
-        "above_cloud": bool(r.close > cloud_hi) if r.close > cloud_hi else
-                       (bool(r.close < cloud_lo) if r.close < cloud_lo else False),
+    return {
+        "long": int(r.close > cloud_hi) + int(r.tenkan > r.kijun) + int(r.macd > r.macd_signal),
+        "short": int(r.close < cloud_lo) + int(r.tenkan < r.kijun) + int(r.macd < r.macd_signal),
         "cloud_side": "bull" if r.close > cloud_hi else ("bear" if r.close < cloud_lo else "inside"),
-        "tk": bool(r.tenkan > r.kijun),
-        "macd": bool(r.macd > r.macd_signal),
+        "bar": str(r.date),
+        "close": float(r.close),
+        "cloud_lo": cloud_lo,
+        "cloud_hi": cloud_hi,
+        "tenkan": float(r.tenkan),
+        "kijun": float(r.kijun),
+        "macd": float(r.macd),
+        "signal": float(r.macd_signal),
     }
-    score = int(checks["cloud_side"] != "inside") + int(checks["tk"]) + int(checks["macd"])
-    return score, checks
+
+
+def _htf_scores(df: pd.DataFrame, tf: str) -> dict:
+    h = _drop_incomplete_htf(df, resample_htf(df, tf), tf)
+    if len(h) < 2:
+        return {"long": 0, "short": 0, "bar": None, "error": "insufficient_htf"}
+    return _score_row(add_indicators(h).iloc[-1])
 
 
 def _plan_net_rr(plan: dict | None) -> tuple[float | None, float | None]:
@@ -85,9 +103,7 @@ def _plan_net_rr(plan: dict | None) -> tuple[float | None, float | None]:
 def _htf_pda(df: pd.DataFrame, price: float, atr: float) -> dict | None:
     """Return the nearest active 1H/4H FVG/OB containing price."""
     for tf in ("1h", "4h"):
-        h = resample_htf(df, tf)
-        if len(h) and h["date"].iloc[-1] > df["date"].iloc[-1]:
-            h = h.iloc[:-1]
+        h = _drop_incomplete_htf(df, resample_htf(df, tf), tf)
         if len(h) < 30:
             continue
         r = analyze(h, ICTConfig(mode="historical", show_sessions=False,
@@ -239,10 +255,16 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                          value=smt_reason, reason=smt_reason if smt_ok is not True else ""))
 
     # ---- L3 ---------------------------------------------------------
-    fvgs = [f for f in res.fvgs if f.active]
-    obs = [o for o in res.order_blocks if o.active]
-    rules.append(_status("L3-01", "L3", "FVG", bool(fvgs), value=len(fvgs)))
-    rules.append(_status("L3-02", "L3", "OB", bool(obs), value=len(obs)))
+    # POI scope: only arrays relevant to the current entry (or current price).
+    poi_ref = float(plan["entry"]) if plan else price
+    poi_lo, poi_hi = poi_ref - .5 * atr, poi_ref + .5 * atr
+    poi_time_lo = max(0, n - 60)
+    fvgs = [f for f in res.fvgs if f.active and f.created >= poi_time_lo
+            and float(f.top) >= poi_lo and float(f.bottom) <= poi_hi]
+    obs = [o for o in res.order_blocks if o.active and o.created >= poi_time_lo
+           and float(o.top) >= poi_lo and float(o.bottom) <= poi_hi]
+    rules.append(_status("L3-01", "L3", "FVG", bool(fvgs), value={"count": len(fvgs), "entry_ref": poi_ref}))
+    rules.append(_status("L3-02", "L3", "OB", bool(obs), value={"count": len(obs), "entry_ref": poi_ref}))
     rules.append(_status("L3-03", "L3", "Breaker", None, blocking=False,
                          reason="breaker classification not implemented"))
     cisds = [c for c in res.cisds if c.end >= n - 20]
@@ -277,8 +299,8 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                          reason=ote_reason if ote is None else ("outside OTE" if not (0.62 <= ote <= 0.79) else "")))
     rules.append(_status("L3-08", "L3", "Breaker", None, blocking=False,
                          reason="breaker classifier not implemented"))
-    fresh = [f for f in res.fvgs if f.active and getattr(f, "fresh", False)]
-    rules.append(_status("L3-09", "L3", "fresh FVG/CE", bool(fresh), blocking=False, value=len(fresh)))
+    fresh = [f for f in fvgs if getattr(f, "fresh", False)]
+    rules.append(_status("L3-09", "L3", "fresh FVG/CE", bool(fresh), blocking=False, value={"count": len(fresh), "entry_ref": poi_ref}))
 
     # ---- L4 ---------------------------------------------------------
     gross, net = _plan_net_rr(plan)
@@ -298,15 +320,32 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                          reason="session/killzone input required"))
     rules.append(_status("L5-02", "L5", "news filter", None, blocking=False,
                          reason="no news calendar"))
-    d_score, d_checks = (_htf_score(df, "1d") if daily is None else
-                         (lambda d: (sum([d.close > max(d.span_a, d.span_b),
-                                          d.tenkan > d.kijun, d.macd > d.macd_signal]), {}))(add_indicators(daily).iloc[-1]))
-    h_score, h_checks = _htf_score(df, "1h")
-    f_score, f_checks = _htf_score(df, "4h")
-    htf_ok = d_score >= 2 and f_score >= 2
+    if daily is not None and len(daily) >= 2:
+        d_scores = _score_row(add_indicators(daily).iloc[-1])
+    else:
+        d_scores = _htf_scores(df, "1d")
+    h_scores = _htf_scores(df, "1h")
+    f_scores = _htf_scores(df, "4h")
+    if plan:
+        direction = plan["direction"]
+    elif trend > 0:
+        direction = "long"
+    elif trend < 0:
+        direction = "short"
+    else:
+        direction = None
+    if direction is None:
+        htf_ok = None
+    else:
+        key = direction
+        htf_ok = d_scores.get(key, 0) >= 2 and f_scores.get(key, 0) >= 2
     rules.append(_status("L5-03", "L5", "HTF alignment", htf_ok, blocking=True,
-                         value={"1d": d_score, "1h": h_score, "4h": f_score},
-                         reason="1D/4H not aligned" if not htf_ok else ""))
+                         value={"direction": direction,
+                                "1d": {"long": d_scores.get("long"), "short": d_scores.get("short"), "bar": d_scores.get("bar")},
+                                "1h": {"long": h_scores.get("long"), "short": h_scores.get("short"), "bar": h_scores.get("bar")},
+                                "4h": {"long": f_scores.get("long"), "short": f_scores.get("short"), "bar": f_scores.get("bar")}},
+                         reason=("no direction" if direction is None else
+                                 ("1D/4H not aligned" if not htf_ok else ""))))
     rules.append(_status("L5-04", "L5", "session sweep", None, blocking=False,
                          reason="no session pool data"))
     rules.append(_status("L5-05", "L5", "SMT filter", None, blocking=False,
@@ -318,10 +357,12 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     # ---- GS chain ----------------------------------------------------
     by_id = {r.rule_id: r for r in rules}
 
-    def gs(gid, name, sources, necessary, note=""):
+    def gs(gid, name, sources, necessary, note="", any_of=False):
         statuses = [by_id[s].status for s in sources if s in by_id]
         if not statuses:
             st = "N/A"
+        elif any_of:
+            st = "PASS" if "PASS" in statuses else ("FAIL" if all(x == "FAIL" for x in statuses) else "N/A")
         elif "FAIL" in statuses:
             st = "FAIL"
         elif all(x == "PASS" for x in statuses):
@@ -337,7 +378,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         gs("GS-03", "liquidity sweep", ["L2-04"], True),
         gs("GS-04", "displacement/CISD", ["L3-04"], True),
         gs("GS-05", "structure confirmation", ["L1-04"], True),
-        gs("GS-06", "FVG/OB/CE entry", ["L3-01", "L3-02"], True, "either POI"),
+        gs("GS-06", "FVG/OB/CE entry", ["L3-01", "L3-02"], True, "either POI", any_of=True),
         gs("GS-07", "structural stop", ["L4-01"], True),
         gs("GS-08", "net RR >= 2.5", ["L4-03"], True),
         gs("GS-09", "killzone/session", ["L5-01"], False),
