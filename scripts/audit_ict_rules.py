@@ -47,6 +47,7 @@ def main() -> None:
     ap.add_argument("--plan-json", default=None)
     ap.add_argument("--smt-csv", default=None)
     ap.add_argument("--rule-mode", choices=["strict", "shadow"], default="strict")
+    ap.add_argument("--touch-atr-source", choices=["htf", "ltf"], default="htf")
     ap.add_argument("--json-out", default="output/ict/rule_audit.json")
     args = ap.parse_args()
 
@@ -54,7 +55,8 @@ def main() -> None:
     daily = load_csv(args.daily_csv) if args.daily_csv else None
     smt = load_csv(args.smt_csv) if args.smt_csv else None
     report = audit(df, daily=daily, market=args.market,
-                   plan=_load_plan(args.plan_json), smt_df=smt, mode=args.rule_mode)
+                   plan=_load_plan(args.plan_json), smt_df=smt, mode=args.rule_mode,
+                   touch_atr_source=args.touch_atr_source)
 
     out = Path(args.json_out)
     out.parent.mkdir(parents=True, exist_ok=True)

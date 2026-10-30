@@ -42,3 +42,27 @@ new: 3 FVG / 0 OB / 3 fresh
 ```
 
 GS-06 uses either FVG or OB; it still passes when one relevant POI exists.
+
+
+## Touch ATR source
+
+Default: `touch_atr_source = htf`.
+
+```text
+htf: touch / delivery tolerance uses the HTF ATR
+ltf: uses the execution-timeframe ATR
+```
+
+Reason: an HTF PDA is an HTF object; its touch tolerance should scale with
+HTF volatility. `--touch-atr-source htf|ltf` is exposed in the audit CLI.
+
+## DOL freshness
+
+`L2-07` ignores a pool created inside the last 20 bars:
+
+```text
+known_at < n - 20
+```
+
+Otherwise the current swing extreme would be selected as a draw, which is
+already the price being traded.

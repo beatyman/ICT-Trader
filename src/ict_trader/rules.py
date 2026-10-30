@@ -126,9 +126,11 @@ def _delivery_state(direction: str, last_close: float, bottom: float, top: float
     return bool(htf_cisd and last_close <= bottom - .5 * htf_atr)
 
 
-def _htf_pda(df: pd.DataFrame, price: float, atr: float) -> dict | None:
-    """Return touch / delivery state for an active 1H/4H PDA."""
-    for tf in ("1h", "4h"):
+def _htf_pda(df: pd.DataFrame, price: float, atr: float, touch_atr_source: str = "htf") -> dict | None:
+    """Return the nearest relevant HTF PDA touch/delivery state."""
+    best = None
+    best_key = None
+    for rank, tf in enumerate(("1h", "4h")):
         h = _drop_incomplete_htf(df, resample_htf(df, tf), tf)
         if len(h) < 30:
             continue
@@ -140,23 +142,33 @@ def _htf_pda(df: pd.DataFrame, price: float, atr: float) -> dict | None:
             for z in items:
                 bottom, top = float(z.bottom), float(z.top)
                 direction = "long" if z.direction == "bull" else "short"
-                touch = bottom - .25 * h_atr <= price <= top + .25 * h_atr
-                if not touch:
+                touch_atr = h_atr if touch_atr_source == "htf" else atr
+                start_i = max(0, int(z.created))
+                bars = h.iloc[start_i:]
+                touched = bars[(bars["low"] <= top + .25 * touch_atr) &
+                               (bars["high"] >= bottom - .25 * touch_atr)]
+                if touched.empty:
                     continue
-                cisds = [c for c in r.cisds if c.end >= z.created
+                touch_idx = int(touched.index[0])
+                cisds = [c for c in r.cisds if c.end >= touch_idx
                          and c.direction == z.direction]
                 htf_cisd = bool(cisds)
                 last_close = float(h["close"].iloc[-1])
                 delivered = _delivery_state(direction, last_close, bottom, top, htf_cisd, h_atr)
-                return {
-                    "tf": tf, "kind": kind, "bottom": bottom, "top": top,
-                    "touch": touch, "delivered": delivered,
-                    "direction": direction, "htf_cisd": htf_cisd,
-                    "last_bar": str(h["date"].iloc[-1]),
-                    "cisd_bar": str(h["date"].iloc[cisds[-1].end]) if cisds else None,
-                }
-    return None
-
+                dist = max(bottom - price, price - top, 0.0)
+                key = (rank, dist)
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best = {
+                        "tf": tf, "kind": kind, "bottom": bottom, "top": top,
+                        "touch": True, "delivered": delivered,
+                        "touch_bar": str(h["date"].iloc[touch_idx]),
+                        "direction": direction, "htf_cisd": htf_cisd,
+                        "last_bar": str(h["date"].iloc[-1]),
+                        "touch_atr_source": touch_atr_source,
+                        "cisd_bar": str(h["date"].iloc[cisds[-1].end]) if cisds else None,
+                    }
+    return best
 
 def _smt_check(df: pd.DataFrame, smt_df: pd.DataFrame | None) -> tuple[bool | None, str]:
     if smt_df is None or "date" not in smt_df.columns:
@@ -213,7 +225,7 @@ def _displacement_quality(df: pd.DataFrame, i: int, atr: float,
 
 
 
-def _sequence_check(sweeps, events, cisds, entry_bar: int,
+def _sequence_check(sweeps, events, cisds, entry_bar: int | None,
                     max_mss_gap: int = 12, max_cisd_gap: int = 6) -> dict:
     if not sweeps:
         return {"valid": False, "reason": "missing sweep",
@@ -248,7 +260,8 @@ def _sequence_check(sweeps, events, cisds, entry_bar: int,
 
 def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
           market: str = "crypto", plan: dict | None = None,
-          smt_df: pd.DataFrame | None = None, mode: str = "strict") -> dict:
+          smt_df: pd.DataFrame | None = None, mode: str = "strict",
+          touch_atr_source: str = "htf") -> dict:
     """Run the L0-L5 checks and return a JSON-serialisable report."""
     if mode not in {"strict", "shadow"}:
         raise ValueError("mode must be strict or shadow")
@@ -308,7 +321,14 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     bos = [e for e in recent_events if e.kind == "BOS"]
     choch = [e for e in recent_events if e.kind in {"CHoCH", "MSS"}]
     rules.append(_status("L1-03", "L1", "BOS", bool(bos), value=len(bos)))
-    seq = _sequence_check(recent_sweeps, recent_events, res.cisds, entry_bar=n - 1)
+    entry_bar = None
+    if plan and plan.get("plan_status", "conditional") == "triggered":
+        if "trigger_bar" in plan:
+            entry_bar = int(plan["trigger_bar"])
+        elif "trigger_time" in plan:
+            hits = df.index[df["date"] == pd.Timestamp(plan["trigger_time"])].tolist()
+            entry_bar = int(hits[0]) if hits else None
+    seq = _sequence_check(recent_sweeps, recent_events, res.cisds, entry_bar=entry_bar)
     rules.append(_status("L1-04", "L1", "CHoCH/MSS", seq["valid"], value=seq,
                          reason=seq["reason"] if not seq["valid"] else ""))
     rules.append(_status("L1-05", "L1", "range veto", trend != 0 if trend else None,
@@ -342,12 +362,25 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                and (k.broken_at is None or k.broken_at > n - 1)]
     above = sorted([k for k in visible if k.price > price], key=lambda k: k.price)
     below = sorted([k for k in visible if k.price < price], key=lambda k: -k.price)
-    rules.append(_status("L2-07", "L2", "DOL", bool(above or below),
-                         blocking=True, value={"above": [round(k.price, 4) for k in above[:3]],
-                                               "below": [round(k.price, 4) for k in below[:3]]},
-                         reason="no unswept opposite pool" if not (above or below) else ""))
+    if plan:
+        # Do not use a pool created inside the last 20 bars as DOL: it is the
+        # current swing extreme, not an untested draw.
+        dol_side = [k for k in (above if plan["direction"] == "long" else below)
+                    if k.known_at < n - 20]
+        dol = dol_side[0] if dol_side else None
+        rules.append(_status("L2-07", "L2", "DOL", dol is not None,
+                             blocking=True,
+                             value={"direction": plan["direction"],
+                                    "dol": None if dol is None else round(dol.price, 4),
+                                    "name": None if dol is None else dol.name},
+                             reason="no unswept pool on plan side" if dol is None else ""))
+    else:
+        rules.append(_status("L2-07", "L2", "DOL", None, blocking=True,
+                             value={"above": [round(k.price, 4) for k in above[:3]],
+                                    "below": [round(k.price, 4) for k in below[:3]]},
+                             reason="no plan direction"))
 
-    pda = _htf_pda(df, price, atr)
+    pda = _htf_pda(df, price, atr, touch_atr_source=touch_atr_source)
     rules.append(_status("L2-08", "L2", "HTF PDA delivery", pda is not None,
                          blocking=False, value=pda, provisional=False,
                          reason="price not in an active 1H/4H PDA" if pda is None else
@@ -461,6 +494,17 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     rules.append(_status("L5-05", "L5", "SMT filter", None, blocking=False,
                          reason="no second symbol"))
 
+    plan_info = None
+    if plan:
+        dist = abs(float(plan["entry"]) - price)
+        dist_atr = dist / atr if atr > 0 else None
+        dist_pct = dist / price if price else None
+        plan_info = {
+            "plan_status": plan.get("plan_status", "conditional"),
+            "distance_to_entry_atr": None if dist_atr is None else round(dist_atr, 3),
+            "distance_to_entry_pct": None if dist_pct is None else round(dist_pct * 100, 3),
+            "fill_probability_flag": "low" if (dist_atr is not None and (dist_atr > 1.0 or dist_pct > .015)) else "normal",
+        }
     blocking_fail = [r for r in rules if r.blocking and (r.status != "PASS" or r.provisional)]
     strict_decision = "TRADE" if plan and not blocking_fail else "NO_TRADE"
 
@@ -537,6 +581,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         "rule_mode": mode,
         "shadow": shadow,
         "good_setup": good_report,
+        "plan": plan_info,
         "last_time": str(last["date"]),
 
         "last_close": price,
