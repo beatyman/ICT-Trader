@@ -60,6 +60,8 @@ def _resolve_plan(args, df, result):
             "conditional": bool(args.conditional),
             "source": "explicit",
         }
+    if getattr(args, "no_auto_plan", False):
+        return None
     atr = float((df["high"] - df["low"]).rolling(14, min_periods=1).mean().iloc[-1])
     return _auto_plan(df, result, atr, min_gross_rr=2.5)
 
@@ -87,6 +89,12 @@ def main() -> None:
     ap.add_argument("--entry", type=float, default=None)
     ap.add_argument("--sl", type=float, default=None)
     ap.add_argument("--tp", type=float, default=None)
+    ap.add_argument("--no-auto-plan", action="store_true",
+                    help="do not synthesize a plan; only draw explicit/scenario levels")
+    ap.add_argument("--scenario-tp", action="append", default=[], metavar="LABEL:PRICE:DIR",
+                    help="draw a scenario target, e.g. '情景A:2174.08:short'")
+    ap.add_argument("--dol", action="append", default=[], metavar="PRICE:LABEL",
+                    help="draw a DOL line, e.g. '2174.08:SSL'")
     ap.add_argument("--trigger-time", default=None)
     ap.add_argument("--conditional", action="store_true", help="label an explicit plan as conditional")
     ap.add_argument("--commission-bps", type=float, default=5.0)
@@ -269,6 +277,58 @@ def main() -> None:
                            text="NO TRADE", showarrow=False,
                            font=dict(size=40, color=theme["watermark"]))
 
+    # ---- scenario TP / DOL (independent of plan) ---------------------
+    def _atr14(frame: pd.DataFrame) -> float:
+        tr = pd.concat([frame["high"] - frame["low"],
+                        (frame["high"] - frame["close"].shift()).abs(),
+                        (frame["low"] - frame["close"].shift()).abs()], axis=1).max(axis=1)
+        v = float(tr.rolling(14, min_periods=1).mean().iloc[-1])
+        return v if v > 0 else 1.0
+
+    atr = _atr14(df)
+    cur = float(df["close"].iloc[-1])
+    extra_prices: list[float] = []
+    yshift_i = 0
+    for spec in args.scenario_tp:
+        try:
+            label, price_s, direction = spec.split(":", 2)
+            price = float(price_s)
+        except ValueError:
+            raise SystemExit(f"bad --scenario-tp: {spec}")
+        color = "#00a86b" if direction == "long" else "#d32f2f"
+        dist = (price - cur) / atr
+        extra_prices.append(price)
+        fig.add_hline(y=price, line=dict(color=color, width=1.2, dash="dash"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+                                 line=dict(color=color, width=1.2, dash="dash"),
+                                 name=f"TP({label}) {price:,.2f}"), row=1, col=1)
+        fig.add_annotation(x=1.005, xref="paper", y=price, yref="y",
+                           text=f"TP({label}) | {price:,.2f} | 未触发 | {dist:+.2f} ATR",
+                           showarrow=False, xanchor="left", yshift=yshift_i,
+                           font=dict(size=10, color=color), row=1, col=1)
+        yshift_i += 12
+    for spec in args.dol:
+        try:
+            price_s, label = spec.split(":", 1)
+            price = float(price_s)
+        except ValueError:
+            raise SystemExit(f"bad --dol: {spec}")
+        dist = (price - cur) / atr
+        extra_prices.append(price)
+        fig.add_hline(y=price, line=dict(color="#0097a7", width=1, dash="dot"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+                                 line=dict(color="#0097a7", width=1, dash="dot"),
+                                 name=f"DOL({label}) {price:,.2f}"), row=1, col=1)
+        fig.add_annotation(x=1.005, xref="paper", y=price, yref="y",
+                           text=f"DOL({label}) | {price:,.2f} | 未扫 | {dist:+.2f} ATR",
+                           showarrow=False, xanchor="left", yshift=yshift_i,
+                           font=dict(size=10, color="#0097a7"), row=1, col=1)
+        yshift_i += 12
+    if extra_prices:
+        lo = min([float(df["low"].min())] + extra_prices) - .5 * atr
+        hi = max([float(df["high"].max())] + extra_prices) + .5 * atr
+        fig.update_yaxes(range=[lo, hi], row=1, col=1)
+
     audit = None
     if args.audit_json:
         audit = json.loads(Path(args.audit_json).read_text(encoding="utf-8"))
@@ -300,7 +360,7 @@ def main() -> None:
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         margin=dict(l=40, r=90, t=60, b=30),
-        showlegend=False,
+        showlegend=True, legend=dict(orientation="h", y=-0.08, x=0, font=dict(size=9)),
         plot_bgcolor=theme["paper"],
         paper_bgcolor=theme["paper"],
         font=dict(color=theme["font"]),
