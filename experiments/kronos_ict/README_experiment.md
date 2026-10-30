@@ -84,9 +84,39 @@ cd ../external/Kronos && pip install -e .
 Kronos 可能学到数据噪声，不要用同一段数据调阈值又验证
 ```
 
-## 结论（待跑）
+## 首次实跑（BTC，真 Kronos-small，GPU 3090）
 
 ```text
-（跑完回测后填写，例如：
-模式 A 过滤了 30% 的假信号，胜率 +Xpp，但总盈利 -Y%；结论是否值得上线）
+环境：192.168.50.81，3×RTX 3090，torch 2.6.0+cu124，Clash 代理 127.0.0.1:7890
+数据：BTCUSDT 15m 1000 根，最后收盘 2026-10-30 21:15，close 76892
+
+Kronos 输出（as_of 21:15，horizon 12×15m，n_samples=32）：
+  predicted_direction = long
+  expected_return     = +0.62%
+  confidence          = 0.969（31/32 采样路径同向）
+  predicted_high      = 77504
+  predicted_low       = 76722
+
+ICT 计划（audit）：direction short，swept=True，conditional
+  entry 77866 / sl 78110 / tp 76632
+
+结合结果（injector）：
+  strict   -> REJECTED_KRONOS      （Kronos 方向与 short 相反）
+  judas    -> REJECTED_KRONOS_TRAP （sweep 后预测反向 = 疑似假突破陷阱）
+  momentum -> REJECTED_KRONOS
+  target   -> REJECTED_KRONOS
+```
+
+结论：ICT 想做空，真 Kronos 预测未来 3 小时上涨（96.9%），过滤器拦截了这次做空。
+这正是「软硬结合」的目标场景——避免在 sweep 后追空被假反转套住。
+
+## 复现命令
+
+```bash
+# 在 GPU 机上
+cd /root/ict && source venv_kronos/bin/activate
+export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890
+python run_latest.py                     # 单点最新预测
+python run_forecast.py --csv btc_15m.csv --out cache_btc_kronos.csv \
+  --repo /root/ict/Kronos --device cuda:0 --n-samples 8 --step 48
 ```

@@ -103,6 +103,12 @@ class KronosAdapter:
             self._load()
         return self._call_kronos(window, as_of)
 
+    def predict_latest(self, df_15m: pd.DataFrame) -> KronosForecast:
+        """Forecast as of the last closed bar (single point)."""
+        df = df_15m.reset_index(drop=True)
+        window = df.iloc[-self.context_len :].reset_index(drop=True)
+        return self._predict_window(window, df["date"].iloc[-1])
+
     # ------------------------------------------------------------------ #
     def _call_kronos(self, window: pd.DataFrame, as_of) -> KronosForecast:
         import numpy as np
@@ -111,7 +117,8 @@ class KronosAdapter:
         x_ts = pd.to_datetime(window["date"]).reset_index(drop=True)
         last_ts = x_ts.iloc[-1]
         freq = pd.infer_freq(x_ts) or "15min"
-        y_ts = pd.date_range(start=last_ts, periods=self.horizon + 1, freq=freq)[1:]
+        # Kronos `calc_time_stamps` needs a Series (uses .dt), not a DatetimeIndex.
+        y_ts = pd.Series(pd.date_range(start=last_ts, periods=self.horizon + 1, freq=freq)[1:]).reset_index(drop=True)
 
         cur_close = float(window["close"].iloc[-1])
         closes, highs, lows = [], [], []
