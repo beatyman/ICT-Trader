@@ -709,7 +709,88 @@ max drawdown < 15%
 
 ---
 
-## 6. 与仓库脚本的对应
+## 7. 代码化与 Skill 状态
+
+规则已落为代码和 Skill，但不是“34 条全部自动判定”。当前状态如下。
+
+### 已实现
+
+```text
+L0-01 数据完整性
+L0-02 市场时段
+L0-05 历史长度
+L1-01 Swing
+L1-02 趋势/区间
+L1-03 BOS
+L1-04 CHoCH/MSS
+L1-05 区间状态
+L2-01 PDH/PDL
+L2-02 EQH/EQL
+L2-04 Sweep
+L2-07 DOL
+L3-01 FVG
+L3-02 OB
+L3-04 CISD
+L3-05 入场序列
+L4-01 止损
+L4-02 目标
+L4-03 净 RR
+L5-03 HTF 一致性
+```
+
+### 仍为 N/A（缺输入或未分类）
+
+```text
+L0-03 新闻日历
+L0-04 点差
+L2-03 Session range
+L2-05 Breakout/Sweep 的完整边界分类
+L2-06 SMT
+L3-03 Breaker
+L3-06 OTE
+L4-04 时间止损
+L4-05 组合仓位
+L4-06 隔夜/执行
+L5-01 Killzone
+L5-02 新闻过滤
+L5-04 Session sweep
+L5-05 SMT 过滤
+```
+
+`N/A` 永远不算通过。
+
+### 代码
+
+```text
+src/ict_trader/rules.py        规则引擎
+scripts/audit_ict_rules.py     CLI
+skills/ict-rule-audit/SKILL.md Skill
+```
+
+### 命令
+
+```bash
+python scripts/audit_ict_rules.py \
+  --csv data/15m.csv \
+  --daily-csv data/daily.csv \
+  --market us \
+  --plan-json output/ict/plan.json \
+  --json-out output/ict/rule_audit.json
+```
+
+输出：
+
+```text
+decision
+blocking_failures
+rules[] -> PASS / FAIL / N/A
+```
+
+只有 `decision=TRADE` 且没有任何 blocking fail 时，才可以继续画计划图。
+
+---
+
+## 8. 与仓库脚本的对应
 
 ```text
 FVG / OB / sweep / CISD / key levels
