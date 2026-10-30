@@ -163,7 +163,7 @@ def render(args) -> Path:
     view_start = view["date"].iloc[0]
     y_lo = float(view["low"].min()) - 1.0
     y_hi = float(view["high"].max()) + 1.0
-    for f in [f for f in result.fvgs if f.active][-2:]:
+    for f in ([f for f in result.fvgs if f.active][-2:] if args.show_fvg else []):
         if f.bottom > y_hi or f.top < y_lo:
             continue
         if analysis["date"].iloc[f.created] < view_start:
@@ -180,7 +180,7 @@ def render(args) -> Path:
                                facecolor="#f9a825", alpha=.14, edgecolor="#f9a825",
                                linewidth=1.0, linestyle="--", zorder=1))
         ax.text(x0, float(f.top), "FVG", fontsize=8, color="#8d6e00", clip_on=True)
-    for ob in [o for o in result.order_blocks if o.active][-2:]:
+    for ob in ([o for o in result.order_blocks if o.active][-2:] if args.show_ob else []):
         if ob.bottom > y_hi or ob.top < y_lo:
             continue
         if analysis["date"].iloc[ob.created] < view_start:
@@ -199,17 +199,84 @@ def render(args) -> Path:
         ax.text(x0, float(ob.top), "OB", fontsize=8, color="#0d47a1", clip_on=True)
 
     # ---- sweeps -----------------------------------------------------
-    for s in result.sweeps[-8:]:
-        if not (0 <= s.sweep_bar < len(analysis)):
-            continue
-        j = view_index(analysis["date"].iloc[s.sweep_bar])
-        if j is not None:
-            col = "#1b8a4b" if s.direction == "bull" else "#c62828"
-            ax.scatter([j], [s.sweep_price], marker="x", s=65, color=col,
-                       linewidth=1.5, zorder=9)
-            ax.annotate(f"Sweep {s.name} {s.sweep_price:.2f}", (j, s.sweep_price),
-                        xytext=(6, 10 if s.direction == "bear" else -14),
-                        textcoords="offset points", fontsize=7.5, color=col, zorder=10)
+    if args.show_sweeps:
+        recent = result.sweeps[-2:]
+        for s in recent:
+            if not (0 <= s.sweep_bar < len(analysis)):
+                continue
+            j = view_index(analysis["date"].iloc[s.sweep_bar])
+            if j is not None:
+                col = "#1b8a4b" if s.direction == "bull" else "#c62828"
+                marker = "v" if s.direction == "bull" else "^"
+                ax.scatter([j], [s.sweep_price], marker=marker, s=80, color=col,
+                           linewidth=1.2, zorder=9)
+                ax.annotate(f"Sweep {s.name} {s.sweep_price:.2f}", (j, s.sweep_price),
+                            xytext=(7, -16 if s.direction == "bull" else 14),
+                            textcoords="offset points", fontsize=7.5, color=col, zorder=10)
+
+    # ---- market structure ------------------------------------------
+    if args.show_structure:
+        swing_idx = [(i, sw) for i, sw in enumerate(result.swings)
+                     if 0 <= sw.index < len(analysis)]
+        last_sw = swing_idx[-10:]
+        for pos, (_, sw) in enumerate(last_sw):
+            j = view_index(analysis["date"].iloc[sw.index])
+            if j is None:
+                continue
+            prev = [x for x in last_sw[:pos] if x[1].kind == sw.kind]
+            tag = ""
+            if prev:
+                p0 = prev[-1][1].price
+                if sw.kind == "H":
+                    tag = "HH" if sw.price > p0 else "LH"
+                else:
+                    tag = "LL" if sw.price < p0 else "HL"
+            col = "#c62828" if sw.kind == "H" else "#1b8a4b"
+            ax.scatter([j], [sw.price], marker="v" if sw.kind == "H" else "^",
+                       s=28, color=col, zorder=5)
+            if tag:
+                ax.text(j, sw.price + (2 if sw.kind == "H" else -2), tag,
+                        fontsize=7, color=col, ha="center", zorder=6)
+        for ev in [e for e in result.events if 0 <= e.index < len(analysis)][-6:]:
+            j = view_index(analysis["date"].iloc[ev.index])
+            if j is None:
+                continue
+            col = "#546E7A" if ev.kind == "BOS" else "#E64A19"
+            ax.plot([j, n - 1], [ev.price, ev.price], color=col, lw=1.0,
+                    ls=(0, (2, 2)), zorder=3)
+            ax.text(j + .3, ev.price, ev.kind, fontsize=7, color=col, zorder=6)
+
+    # ---- killzones ---------------------------------------------------
+    if args.show_killzones:
+        for hour0, hour1, color, tag in [(2, 5, "#90CAF9", "London"),
+                                          (7, 10, "#FFCC80", "NY AM")]:
+            mask = (view["date"].dt.hour >= hour0) & (view["date"].dt.hour < hour1)
+            idx = view.index[mask].tolist()
+            if not idx:
+                continue
+            runs, run = [], [idx[0]]
+            for a, b in zip(idx, idx[1:]):
+                if b == a + 1:
+                    run.append(b)
+                else:
+                    runs.append(run); run = [b]
+            runs.append(run)
+            for r in runs:
+                ax.axvspan(r[0] - .5, r[-1] + .5, color=color, alpha=.10, zorder=0)
+            ax.text(idx[0], 1.002, tag, transform=ax.get_xaxis_transform(),
+                    fontsize=7, color="#546E7A", va="bottom")
+
+    # ---- dealing range / equilibrium --------------------------------
+    if args.show_eq:
+        hi, lo = float(view["high"].max()), float(view["low"].min())
+        eq = (hi + lo) / 2
+        ax.axhspan(eq, hi, color="#EF9A9A", alpha=.035, zorder=0)
+        ax.axhspan(lo, eq, color="#A5D6A7", alpha=.035, zorder=0)
+        ax.axhline(hi, color="#90A4AE", lw=.8, ls="--", zorder=2)
+        ax.axhline(lo, color="#90A4AE", lw=.8, ls="--", zorder=2)
+        ax.axhline(eq, color="#607D8B", lw=1.0, ls="-.", zorder=2)
+        ax.text(1, eq, "EQ 50%", transform=ax.get_yaxis_transform(),
+                fontsize=7, color="#455A64", va="bottom", ha="right")
 
     # ---- plan -------------------------------------------------------
     if plan:
@@ -350,6 +417,12 @@ def main() -> None:
     ap.add_argument("--alt-sl", type=float, default=None)
     ap.add_argument("--alt-tp", type=float, default=None)
     ap.add_argument("--conditional", action="store_true")
+    ap.add_argument("--show-fvg", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--show-ob", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--show-sweeps", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--show-structure", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--show-killzones", action=argparse.BooleanOptionalAction, default=False)
+    ap.add_argument("--show-eq", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--commission-bps", type=float, default=5.0)
     ap.add_argument("--slippage-bps", type=float, default=2.0)
     ap.add_argument("--sell-tax-bps", type=float, default=0.0)
