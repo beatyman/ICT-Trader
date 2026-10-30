@@ -86,6 +86,22 @@ def _resolve_plan(args, view, result) -> dict | None:
     return _auto_plan(view, result, atr, min_gross_rr=2.5)
 
 
+def _pdh_pdl_pwh_pwl(df: pd.DataFrame) -> dict[str, float]:
+    """Previous completed day/week high-low from full history."""
+    d = (df.set_index("date").resample("1D")
+         .agg({"high": "max", "low": "min"}).dropna())
+    w = (df.set_index("date").resample("W-FRI")
+         .agg({"high": "max", "low": "min"}).dropna())
+    out: dict[str, float] = {}
+    if len(d) >= 2:
+        out["PDH"] = float(d["high"].iloc[-2])
+        out["PDL"] = float(d["low"].iloc[-2])
+    if len(w) >= 2:
+        out["PWH"] = float(w["high"].iloc[-2])
+        out["PWL"] = float(w["low"].iloc[-2])
+    return out
+
+
 def render(args) -> Path:
     df = load_csv(args.csv)
     if len(df) < 30:
@@ -277,6 +293,26 @@ def render(args) -> Path:
         ax.axhline(eq, color="#607D8B", lw=1.0, ls="-.", zorder=2)
         ax.text(1, eq, "EQ 50%", transform=ax.get_yaxis_transform(),
                 fontsize=7, color="#455A64", va="bottom", ha="right")
+
+    # ---- previous day/week liquidity (full history) -----------------
+    ctx_levels = _pdh_pdl_pwh_pwl(hist)
+    yl, yh = float(view["low"].min()), float(view["high"].max())
+    above_i = below_i = 0
+    for name, lv in ctx_levels.items():
+        if yl <= lv <= yh:
+            ax.axhline(lv, color="#00838F", lw=1.2, ls=(0, (6, 3)), alpha=.75, zorder=3)
+            ax.text(n - 1, lv, f"{name} {lv:.2f}", fontsize=8,
+                    color="#00838F", ha="right", va="bottom", zorder=4)
+        elif lv > yh:
+            ax.annotate(f"↑ {name} {lv:.2f} (Out of view)", xy=(1.006, .975 - above_i * .035),
+                        xycoords="axes fraction", fontsize=8, color="#00838F",
+                        ha="left", va="top", annotation_clip=False, zorder=20)
+            above_i += 1
+        else:
+            ax.annotate(f"↓ {name} {lv:.2f} (Out of view)", xy=(1.006, .025 + below_i * .035),
+                        xycoords="axes fraction", fontsize=8, color="#00838F",
+                        ha="left", va="bottom", annotation_clip=False, zorder=20)
+            below_i += 1
 
     # ---- plan -------------------------------------------------------
     pending_labels = []
