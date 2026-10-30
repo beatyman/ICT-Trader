@@ -112,7 +112,8 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         session_ok = True
     elif market in {"us", "hk"}:
         h = last["date"].hour
-        session_ok = 9 <= h < 16
+        # 09:45..16:00 bars; the 16:00 bar is the 15:45-16:00 close bar.
+        session_ok = 9 <= h <= 16
     rules.append(_status("L0-02", "L0", "market session", session_ok,
                          blocking=True, value=str(last["date"]),
                          reason="outside cash session" if session_ok is False else "session data unavailable" if session_ok is None else ""))

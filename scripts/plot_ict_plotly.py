@@ -57,7 +57,8 @@ def _resolve_plan(args, df, result):
             "sl": float(args.sl),
             "tp": float(args.tp),
             "trigger_time": pd.Timestamp(args.trigger_time),
-            "conditional": False,
+            "conditional": bool(args.conditional),
+            "source": "explicit",
         }
     atr = float((df["high"] - df["low"]).rolling(14, min_periods=1).mean().iloc[-1])
     return _auto_plan(df, result, atr, min_gross_rr=2.5)
@@ -86,6 +87,7 @@ def main() -> None:
     ap.add_argument("--sl", type=float, default=None)
     ap.add_argument("--tp", type=float, default=None)
     ap.add_argument("--trigger-time", default=None)
+    ap.add_argument("--conditional", action="store_true", help="label an explicit plan as conditional")
     ap.add_argument("--commission-bps", type=float, default=5.0)
     ap.add_argument("--slippage-bps", type=float, default=2.0)
     ap.add_argument("--sell-tax-bps", type=float, default=0.0)
@@ -252,10 +254,11 @@ def main() -> None:
             showarrow=False, align="right",
             bgcolor=theme["rr_bg"], font=dict(size=13, color=theme["rr_font"]),
         )
+        label = "PLAN"
+        if plan.get("conditional"):
+            label = "CONDITIONAL" if plan.get("source") == "explicit" else "AUTO CONDITIONAL"
         title_state = (
-            f"{plan['direction'].upper()} PLAN | gross RR {gross:.2f} | net RR {net:.2f}"
-            if not plan.get("conditional") else
-            f"AUTO CONDITIONAL | gross RR {gross:.2f} | net RR {net:.2f}"
+            f"{plan['direction'].upper()} {label} | gross RR {gross:.2f} | net RR {net:.2f}"
         )
     else:
         title_state = "NO TRADE"
