@@ -239,8 +239,8 @@ scripts/plot_ict_plotly.py
 ```
 
 That script is the fixed ICT chart standard: 30-day 15m window, price + volume
-dual panel, shared x-axis, dark theme, real structures only, and a plan labelled
-`PLAN` or `AUTO CONDITIONAL`.
+dual panel, shared x-axis, white background by default, real structures only,
+and a plan labelled `PLAN` or `AUTO CONDITIONAL`.
 
 `scripts/plot_ict_clean.py` and `scripts/plot_ict_signal.py` are deprecated for
 analysis charts. If the layout is unsuitable, change the canonical script first,

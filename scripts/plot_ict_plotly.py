@@ -79,6 +79,7 @@ def main() -> None:
     ap.add_argument("--timeframe", default="15m")
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--market", choices=["crypto", "us", "hk", "other"], default="crypto")
+    ap.add_argument("--theme", choices=["light", "dark"], default="light")
     ap.add_argument("--plan-json", default=None)
     ap.add_argument("--direction", choices=["long", "short"], default=None)
     ap.add_argument("--entry", type=float, default=None)
@@ -90,6 +91,23 @@ def main() -> None:
     ap.add_argument("--sell-tax-bps", type=float, default=0.0)
     ap.add_argument("--out", default="ict_signal.html")
     args = ap.parse_args()
+    light = args.theme == "light"
+    theme = {
+        "template": "plotly_white" if light else "plotly_dark",
+        "paper": "#ffffff" if light else "#1e1e1e",
+        "font": "#222222" if light else "#e0e0e0",
+        "muted": "#555555" if light else "#bdbdbd",
+        "grid": "rgba(0,0,0,0.06)" if light else "rgba(255,255,255,0.05)",
+        "fvg_label": "#8d6e00" if light else "#fdd835",
+        "ob_label": "#4a148c" if light else "#ce93d8",
+        "sweep": "#c62828" if light else "#ffab91",
+        "sweep_bg": "rgba(255,255,255,0.85)" if light else "rgba(0,0,0,0.35)",
+        "cisd": "rgba(0,0,0,0.45)" if light else "rgba(255,255,255,0.45)",
+        "cisd_label": "#444444" if light else "#e0e0e0",
+        "rr_bg": "rgba(255,255,255,0.88)" if light else "rgba(0,0,0,0.55)",
+        "rr_font": "#111111" if light else "white",
+        "watermark": "rgba(0,0,0,0.10)" if light else "rgba(255,255,255,0.18)",
+    }
 
     df = load_csv(args.csv)
     if "volume" not in df.columns:
@@ -140,7 +158,7 @@ def main() -> None:
         fig.add_hline(
             y=float(k.price), line=dict(color="#9e9e9e", width=1, dash="dot"),
             annotation_text=f"{k.name} {k.price:.4g}", annotation_position="right",
-            annotation_font=dict(size=10, color="#bdbdbd"), row=1, col=1,
+            annotation_font=dict(size=10, color=theme["muted"]), row=1, col=1,
         )
 
     # ---- FVG / OB ---------------------------------------------------
@@ -159,7 +177,7 @@ def main() -> None:
             line=dict(color="rgba(255,235,59,0.8)", width=1), row=1, col=1,
         )
         fig.add_annotation(x=x0, y=float(f.top), text="FVG", showarrow=False,
-                           font=dict(size=9, color="#fdd835"), row=1, col=1)
+                           font=dict(size=9, color=theme["fvg_label"]), row=1, col=1)
     for ob in [o for o in result.order_blocks if o.active][-2:]:
         if ob.top < y_lo or ob.bottom > y_hi:
             continue
@@ -170,7 +188,7 @@ def main() -> None:
             fillcolor="rgba(138,43,226,0.15)", line_width=0, row=1, col=1,
         )
         fig.add_annotation(x=x0, y=float(ob.top), text="OB", showarrow=False,
-                           font=dict(size=9, color="#ce93d8"), row=1, col=1)
+                           font=dict(size=9, color=theme["ob_label"]), row=1, col=1)
 
     # ---- sweeps -----------------------------------------------------
     for s in result.sweeps[-4:]:
@@ -179,8 +197,8 @@ def main() -> None:
         fig.add_annotation(
             x=df["date"].iloc[s.sweep_bar], y=float(s.sweep_price),
             text="Sweep", showarrow=True, arrowhead=2, ax=0, ay=-28,
-            font=dict(size=9, color="#ffab91"), arrowcolor="#ffab91",
-            bgcolor="rgba(0,0,0,0.35)", row=1, col=1,
+            font=dict(size=9, color=theme["sweep"]), arrowcolor=theme["sweep"],
+            bgcolor=theme["sweep_bg"], row=1, col=1,
         )
 
     # ---- market structure ------------------------------------------
@@ -201,11 +219,11 @@ def main() -> None:
     # ---- CISD -------------------------------------------------------
     for c in result.cisds[-1:]:
         if 0 <= c.end < n:
-            fig.add_vline(x=df["date"].iloc[c.end], line=dict(color="rgba(255,255,255,0.45)",
+            fig.add_vline(x=df["date"].iloc[c.end], line=dict(color=theme["cisd"],
                           width=1, dash="dash"), row=1, col=1)
             fig.add_annotation(x=df["date"].iloc[c.end], y=float(c.level),
                                text=f"CISD {c.direction}", showarrow=False,
-                               font=dict(size=9, color="#e0e0e0"), row=1, col=1)
+                               font=dict(size=9, color=theme["cisd_label"]), row=1, col=1)
 
     # ---- plan -------------------------------------------------------
     if plan:
@@ -232,7 +250,7 @@ def main() -> None:
             x=0.98, y=0.98, xref="paper", yref="paper",
             text=f"<b>RR: {gross:.2f} | Net RR: {net:.2f}</b>",
             showarrow=False, align="right",
-            bgcolor="rgba(0,0,0,0.55)", font=dict(size=13, color="white"),
+            bgcolor=theme["rr_bg"], font=dict(size=13, color=theme["rr_font"]),
         )
         title_state = (
             f"{plan['direction'].upper()} PLAN | gross RR {gross:.2f} | net RR {net:.2f}"
@@ -243,22 +261,23 @@ def main() -> None:
         title_state = "NO TRADE"
         fig.add_annotation(x=0.5, y=0.55, xref="paper", yref="paper",
                            text="NO TRADE", showarrow=False,
-                           font=dict(size=40, color="rgba(255,255,255,0.18)"))
+                           font=dict(size=40, color=theme["watermark"]))
 
     fig.update_layout(
-        template="plotly_dark",
+        template=theme["template"],
         title=f"{args.symbol}  {args.timeframe}  |  30d  |  last {df['date'].iloc[-1]}  |  {title_state}",
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         margin=dict(l=40, r=90, t=60, b=30),
         showlegend=False,
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="#1e1e1e",
+        plot_bgcolor=theme["paper"],
+        paper_bgcolor=theme["paper"],
+        font=dict(color=theme["font"]),
         height=900,
     )
     fig.update_xaxes(showgrid=False, zeroline=False, rangeslider_visible=False,
                      rangebreaks=_rangebreaks(args.market))
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
+    fig.update_yaxes(showgrid=True, gridcolor=theme["grid"],
                      zeroline=False, row=1, col=1)
     fig.update_yaxes(title_text="Volume", showgrid=False, zeroline=False, row=2, col=1)
 

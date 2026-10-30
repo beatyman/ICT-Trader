@@ -78,7 +78,7 @@ For US/HK cash equities the window usually contains about 500–550 bars, not
 ## Visual rules
 
 ```text
-dark theme
+white background by default (--theme dark optional)
 row 1: candles + structures + plan (75%)
 row 2: volume (25%)
 shared x-axis

@@ -60,7 +60,7 @@ to reach 2880.
 row 1 (75%): candlestick + ICT structures + trade plan
 row 2 (25%): volume bars
 shared, aligned x-axis
-dark theme
+white background by default (--theme dark optional)
 rangeslider off
 weekends / overnight hidden for cash markets
 ```
