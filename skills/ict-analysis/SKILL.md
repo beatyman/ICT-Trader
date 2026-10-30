@@ -184,69 +184,96 @@ Do not turn a `NO_TRADE` into a discretionary buy.
 
 ### 3b. Charting contract
 
-Before drawing, mark the confluence gate.  `N/A` is not a pass.
+This repository has one fixed analysis chart mode.
+
+Canonical renderer:
 
 ```text
-Liquidity sweep      PASS / FAIL / N/A
-HTF PDA delivery     PASS / FAIL / N/A
-Volume               PASS / FAIL / N/A
-Session sweep        PASS / FAIL / N/A
-Clear targets        PASS / FAIL / N/A
-SMT                  PASS / FAIL / N/A
-Trigger (CISD)       PASS / FAIL / N/A
+scripts/plot_ict_clean.py
 ```
 
-Failure of any required check means `NO_TRADE`.
+Do not hand-write a different matplotlib/Plotly chart in the answer. If the
+layout must change, change `plot_ict_clean.py` first, then regenerate.
 
-When the user asks for a chart, use:
+`scripts/plot_ict_plotly.py` is the interactive/secondary view only. It is not
+the analysis deliverable.
+
+#### Fixed visual contract
+
+```text
+single chart, 16:9, 300 dpi PNG
+15m candles, last 2-3 days, 150-220 bars
+volume panel below the price panel
+white background
+right-side label gutter
+Entry / SL / TP on both directions when present
+Risk / Reward semi-transparent zones
+leader lines, labels never on top of candles
+Killzone / EQ / FVG / OB / structure / sweep layer toggles
+```
+
+Layer z-order:
+
+```text
+10 labels
+9  plan
+8  DOL
+7  sweep
+6  candles
+5  structure
+4  liquidity
+3  swing markers
+2  FVG / OB
+1  EQ / premium-discount
+0  killzone / true-day background
+```
+
+#### Fixed command
 
 ```bash
-python scripts/plot_ict_plotly.py \
-  --csv data/15m.csv \
-  --symbol SYMBOL \
-  --timeframe 15m \
-  --days 30 \
-  --market us \
-  --out output/ict/SYMBOL_chart.html
+python scripts/plot_ict_clean.py   --csv data/15m.csv   --symbol SYMBOL   --timeframe 15m   --start "YYYY-MM-DD HH:MM"   --end "YYYY-MM-DD HH:MM"   --last-bars 220   --direction short   --entry 0 --sl 0 --tp 0   --trigger-time "YYYY-MM-DD HH:MM"   --conditional   --alt-direction long   --alt-entry 0 --alt-sl 0 --alt-tp 0   --show-fvg --show-ob --show-sweeps --show-structure   --show-killzones --show-eq   --out output/ict/SYMBOL_analysis.png
 ```
 
-Add `--plan-json output/ict/plan.json` to use the engine plan, or pass
-`--direction/--entry/--sl/--tp/--trigger-time` for an explicit plan.
+For a `TRADE` plan, omit `--conditional`. For a conditional plan, always pass
+`--conditional`; the title and summary must say `CONDITIONAL — NOT TRIGGERED`.
 
-**A trade plan is drawn by default.**  It must be labelled
-`AUTO CONDITIONAL` and is derived from real structure, in this order:
+#### Fixed analysis output
+
+Use [`templates/analysis_report.md`](templates/analysis_report.md).
+
+Every analysis answer must contain, in this order:
 
 ```text
-last CISD within 40 bars
-else nearest active FVG/OB
-else nearest key level in the 15m trend direction
+0. decision + direct reason + one executable conclusion
+1. data snapshot: source, last closed bar, close, ATR, previous ATR if changed
+2. HTF: 1D / 1H / 4H bar time, close, long/short score, cloud/TK/MACD
+3. sweep quality: pool, sweep bar, penetration, reclaim, next closes
+4. structure: L1-04, L3-04, L3-05, L3-10, L2-08 with PASS/FAIL
+5. key levels: price, type, known_at, swept/unswept, distance in ATR
+6. short plan: entry/SL/TP, structural basis, gross RR, net RR, trigger, invalidation
+7. long scenario: same fields; if net RR < 2.5, mark NOT EXECUTABLE
+8. chart path
+9. rule-audit findings and N/A fields
 ```
 
-Rules:
+Do not output a chart without the numeric sections. Do not output numbers that
+are not in the plan/audit JSON or in the CSV.
 
-- never call an auto plan confirmed;
-- if the source CISD is older than 20 bars, mark it `(stale)`;
-- if the user supplies `direction/entry/sl/tp/trigger_time`, that explicit plan
-  overrides auto;
-- every Entry/SL/TP must come from the CSV or a real detected level;
-- show gross RR and net RR, including commission/slippage/sell tax.
+#### Chart self-check
 
-**One renderer only.** Do not hand-write a different matplotlib/Plotly chart in
-the answer. Use:
+Before returning the image:
 
 ```text
-scripts/plot_ict_plotly.py
+Entry/SL/TP visible?
+Risk/Reward zones visible?
+right labels use leader lines and do not overlap?
+candles visible, not compressed by x-axis?
+chart values match the text?
+NO_TRADE watermarked, not hidden?
 ```
 
-That script is the fixed ICT chart standard: 30-day 15m window, price + volume
-dual panel, shared x-axis, white background by default, real structures only,
-and a plan labelled `PLAN` or `AUTO CONDITIONAL`.
+Any failure means fix the renderer, not the explanation.
 
-`scripts/plot_ict_clean.py` and `scripts/plot_ict_signal.py` are deprecated for
-analysis charts. If the layout is unsuitable, change the canonical script first,
-then regenerate.
-
-See [ICT_CHART_STANDARD.md](../../docs/ICT_CHART_STANDARD.md) for the full
 contract and self-check.
 
 

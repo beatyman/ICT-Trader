@@ -250,15 +250,27 @@ def main() -> None:
                       fillcolor="rgba(255,0,0,0.10)", line_width=0, row=1, col=1)
         fig.add_shape(type="rect", x0=trigger, x1=x1, y0=plan["entry"], y1=plan["tp"],
                       fillcolor="rgba(0,255,0,0.10)", line_width=0, row=1, col=1)
-        fig.add_hline(y=plan["entry"], line=dict(color="#00bfff", width=2),
-                      annotation_text=f"Entry: {plan['entry']:.4g}",
-                      annotation_position="top left", row=1, col=1)
-        fig.add_hline(y=plan["sl"], line=dict(color="#ff4d4d", width=1.5, dash="dash"),
-                      annotation_text=f"SL: {plan['sl']:.4g}",
-                      annotation_position="bottom left", row=1, col=1)
-        fig.add_hline(y=plan["tp"], line=dict(color="#00e676", width=1.5, dash="dash"),
-                      annotation_text=f"TP: {plan['tp']:.4g}",
-                      annotation_position="top left", row=1, col=1)
+        _tr = pd.concat([df["high"] - df["low"],
+                         (df["high"] - df["close"].shift()).abs(),
+                         (df["low"] - df["close"].shift()).abs()], axis=1).max(axis=1)
+        patr = float(_tr.rolling(14, min_periods=1).mean().iloc[-1]) or 1.0
+        xs = [0.40, 0.52, 0.64]
+        cur0 = float(df["close"].iloc[-1])
+        status = "conditional" if plan.get("conditional") else "triggered"
+        fig.add_hline(y=plan["entry"], line=dict(color="#00bfff", width=2), row=1, col=1)
+        fig.add_hline(y=plan["sl"], line=dict(color="#ff4d4d", width=1.5, dash="dash"), row=1, col=1)
+        fig.add_hline(y=plan["tp"], line=dict(color="#00e676", width=1.5, dash="dash"), row=1, col=1)
+        for _i, (txt, yy, col) in enumerate([
+            (f"Entry {plan['entry']:,.2f} | {status} | {(plan['entry']-cur0)/patr:+.2f} ATR",
+             plan["entry"] - 0.45 * patr if plan["direction"] == "short" else plan["entry"] + 0.45 * patr, "#0077b6"),
+            (f"SL {plan['sl']:,.2f} | {(plan['sl']-cur0)/patr:+.2f} ATR",
+             plan["sl"] + 0.45 * patr, "#d32f2f"),
+            (f"TP {plan['tp']:,.2f} | net {net:.2f}R | {(plan['tp']-cur0)/patr:+.2f} ATR",
+             plan["tp"] + 0.45 * patr if plan["direction"] == "short" else plan["tp"] - 0.45 * patr, "#008a5e"),
+        ]):
+            fig.add_trace(go.Scatter(x=[df["date"].iloc[int(len(df) * xs[_i])]], y=[yy], mode="text", text=[txt],
+                                     textposition="middle center", textfont=dict(size=10, color=col),
+                                     showlegend=False), row=1, col=1)
         fig.add_annotation(
             x=0.98, y=0.98, xref="paper", yref="paper",
             text=f"<b>RR: {gross:.2f} | Net RR: {net:.2f}</b>",

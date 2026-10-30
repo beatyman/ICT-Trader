@@ -5,133 +5,115 @@ This is the fixed chart contract for ICT analysis in this repository.
 ## Canonical renderer
 
 ```text
-scripts/plot_ict_plotly.py
+scripts/plot_ict_clean.py
 ```
 
-No other chart is produced ad hoc.  If the layout must change, change this
-script first, then regenerate.
-
-Deprecated / secondary:
+It produces the analysis deliverable:
 
 ```text
-scripts/plot_ict_clean.py    static PNG only, not the analysis standard
-scripts/plot_ict_signal.py   legacy Plotly renderer
+single 16:9 PNG, 300 dpi
+last 2-3 days of 15m candles
+volume panel
+right-side label gutter with leader lines
+dual-direction Entry / SL / TP
+Risk / Reward zones
+layer toggles for FVG / OB / structure / sweep / killzone / EQ
 ```
 
-## Confluence gate
+Do not produce an ad-hoc chart. Change `plot_ict_clean.py` first, then
+regenerate.
 
-A chart may show a **conditional** plan, but a trade is only valid when all
-applicable checks pass.  Each check must be marked `PASS`, `FAIL` or `N/A`;
-`N/A` is never treated as a pass.
+Secondary:
 
 ```text
-1. Liquidity sweep      price took a prior high/low, then reclaimed
-2. HTF PDA delivery    1H/4H FVG or OB is being delivered into
-3. Volume              sweep/displacement bar >= 1.5x 20-bar average
-4. Session sweep       sweep occurs in the active Asia/London/NY session
-5. Clear targets       unswept DOL exists; net RR >= 2.5
-6. SMT                 correlated asset divergence, only with a second CSV
-7. Trigger             15m CISD / displacement confirms the direction
+scripts/plot_ict_plotly.py   interactive HTML, not the analysis deliverable
+scripts/plot_ict_signal.py   legacy renderer
 ```
 
-Rules:
-
-- do not draw a missing FVG/OB/sweep;
-- do not claim SMT without a correlated series;
-- do not claim session sweep when the data has no session/premarket bars;
-- if any required check is `FAIL`, the decision remains `NO_TRADE`;
-- `N/A` blocks a trade unless the user explicitly accepts the missing input.
-
-## Required window
+## Fixed layer order
 
 ```text
-15m
-latest 30 calendar days
-all real bars available in that window
+10 labels
+9  plan
+8  DOL
+7  sweep
+6  candles
+5  structure
+4  liquidity
+3  swing markers
+2  FVG / OB
+1  EQ / premium-discount
+0  killzone / true-day background
 ```
 
-For 24h markets that is about 2880 bars.  For US/HK cash equities it is about
-500–550 bars because only RTH exists.  The script never pads or fabricates bars
-to reach 2880.
-
-## Required layout
+## Fixed window
 
 ```text
-row 1 (75%): candlestick + ICT structures + trade plan
-row 2 (25%): volume bars
-shared, aligned x-axis
-white background by default (--theme dark optional)
-rangeslider off
-weekends / overnight hidden for cash markets
+15m candles
+last 2-3 trading days
+150-220 bars
 ```
 
-## Required structures
+For US/HK cash markets, do not include overnight synthetic bars. For crypto,
+use the real 24h bars.
 
-Draw only when present in the data:
+## Required elements
 
 ```text
-PDH / PDL / EQH / EQL
-Liquidity sweep
-OB / Breaker
-FVG + CE
-BOS / CHoCH / MSS
-CISD
+K-line + volume
+FVG / OB (active only)
+BSL / SSL
+Sweep marker
+Swing HH/HL/LH/LL
+BOS / MSS
+Killzone background when enabled
+EQ 50% when enabled
+Entry / SL / TP for both directions when defined
+Risk / Reward zones
+right-gutter labels with leader lines
 ```
 
-Absent structures are omitted, never invented.
-
-## Required plan
+## Plan source
 
 ```text
-Entry / SL / TP
-risk zone from trigger to latest bar
-reward zone from trigger to latest bar
-RR and Net RR box
+--plan-json only if decision=TRADE
+--direction/--entry/--sl/--tp/--trigger-time for explicit plan
 ```
 
-Plan source priority:
+A conditional plan must pass `--conditional`.
 
-```text
---plan-json (only decision=TRADE)
---direction / --entry / --sl / --tp / --trigger-time
-AUTO CONDITIONAL from real structure (labelled)
-```
+`NO_TRADE` is not a reason to omit TP. If a scenario TP exists, draw it and
+label it `scenario`.
 
 ## Standard command
 
 ```bash
-ict-trader plan \
+python scripts/plot_ict_clean.py \
   --csv data/15m.csv \
-  --daily-csv data/daily.csv \
-  --market hk \
-  --symbol HK.09988 \
-  --stack 1d_1h_15m \
-  --json-out output/ict/plan.json
-
-python scripts/plot_ict_plotly.py \
-  --csv data/15m.csv \
-  --symbol HK.09988 \
+  --symbol SYMBOL \
   --timeframe 15m \
-  --days 30 \
-  --market hk \
-  --plan-json output/ict/plan.json \
-  --out output/ict/hk09988.html
+  --start "YYYY-MM-DD HH:MM" \
+  --end "YYYY-MM-DD HH:MM" \
+  --last-bars 220 \
+  --direction short \
+  --entry 0 --sl 0 --tp 0 \
+  --trigger-time "YYYY-MM-DD HH:MM" \
+  --conditional \
+  --alt-direction long \
+  --alt-entry 0 --alt-sl 0 --alt-tp 0 \
+  --show-fvg --show-ob --show-sweeps --show-structure \
+  --show-killzones --show-eq \
+  --out output/ict/SYMBOL_analysis.png
 ```
-
-If `decision=NO_TRADE`, the chart draws a labelled `AUTO CONDITIONAL` plan.
-It is a chart annotation, not a trade recommendation.
 
 ## Self-check
 
 ```text
-[ ] 30-day 15m window, real bars only
-[ ] two rows, shared x-axis, volume below
-[ ] rangeslider off
-[ ] no border on FVG/OB boxes
-[ ] sweep uses arrows, not circles
-[ ] CISD vertical line only where detected
-[ ] risk/reward zones start at trigger and end at latest bar
-[ ] RR and Net RR shown
-[ ] no future data used for Entry/SL/TP
-[ ] absent structure not drawn
+candles visible
+Entry / SL / TP visible
+Risk / Reward zones visible
+labels in the right gutter
+no label overlap
+chart values equal text values
+NO_TRADE / CONDITIONAL status visible
 ```

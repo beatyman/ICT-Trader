@@ -556,7 +556,10 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     rules.append(_status("L5-02", "L5", "news filter", None, blocking=False,
                          reason="no news calendar"))
     if daily is not None and len(daily) >= 2:
-        d_scores = _score_row(add_indicators(daily).iloc[-1], _atr(daily))
+        daily_closed = daily
+        if pd.Timestamp(daily["date"].iloc[-1]).date() >= pd.Timestamp(df["date"].iloc[-1]).date():
+            daily_closed = daily.iloc[:-1]
+        d_scores = _score_row(add_indicators(daily_closed).iloc[-1], _atr(daily_closed))
     else:
         d_scores = _htf_scores(df, "1d")
     h_scores = _htf_scores(df, "1h")
