@@ -88,13 +88,32 @@ class KronosAdapter:
 
         rows: list[dict] = []
         end = len(df) - self.horizon
-        for i in range(self.context_len, end, step):
-            window = df.iloc[i - self.context_len : i].reset_index(drop=True)
-            rows.append(self._predict_window(window, df["date"].iloc[i - 1]).as_row())
+        out_path = Path(out_csv)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        out = pd.DataFrame(rows)
-        out.to_csv(out_csv, index=False)
-        return out
+        # resume: skip forecast points already written
+        existing: set[str] = set()
+        if out_path.exists():
+            try:
+                existing = set(pd.read_csv(out_path)["as_of"].astype(str))
+            except Exception:
+                existing = set()
+
+        header_written = bool(existing)
+        for i in range(self.context_len, end, step):
+            as_of = str(df["date"].iloc[i - 1])
+            if as_of in existing:
+                continue
+            window = df.iloc[i - self.context_len : i].reset_index(drop=True)
+            row = self._predict_window(window, df["date"].iloc[i - 1]).as_row()
+            rows.append(row)
+            # incremental write so partial progress survives a crash
+            pd.DataFrame([row]).to_csv(
+                out_path, index=False, mode="a", header=not header_written,
+            )
+            header_written = True
+
+        return pd.DataFrame(rows)
 
     def _predict_window(self, window: pd.DataFrame, as_of) -> KronosForecast:
         if self._mock:
@@ -122,6 +141,11 @@ class KronosAdapter:
 
         cur_close = float(window["close"].iloc[-1])
         closes, highs, lows = [], [], []
+        try:
+            import torch
+            _clear_cache = torch.cuda.empty_cache
+        except Exception:  # noqa: BLE001
+            _clear_cache = lambda: None
         for _ in range(self.n_samples):
             pred = self._predictor.predict(
                 df=x_df,
@@ -136,6 +160,7 @@ class KronosAdapter:
             closes.append(pred["close"].to_numpy())
             highs.append(pred["high"].to_numpy())
             lows.append(pred["low"].to_numpy())
+        _clear_cache()  # release accumulated CUDA cache across points
 
         closes = np.stack(closes)          # (n_samples, horizon)
         highs = np.stack(highs)
