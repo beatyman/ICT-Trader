@@ -288,6 +288,7 @@ def main() -> None:
     atr = _atr14(df)
     cur = float(df["close"].iloc[-1])
     extra_prices: list[float] = []
+    scenario_prices: list[float] = []
     yshift_i = 0
     for spec in args.scenario_tp:
         try:
@@ -298,14 +299,15 @@ def main() -> None:
         color = "#00a86b" if direction == "long" else "#d32f2f"
         dist = (price - cur) / atr
         extra_prices.append(price)
-        fig.add_hline(y=price, line=dict(color=color, width=1.2, dash="dash"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+        scenario_prices.append(price)
+        fig.add_trace(go.Scatter(x=[df["date"].iloc[0], df["date"].iloc[-1]],
+                                 y=[price, price], mode="lines",
                                  line=dict(color=color, width=1.2, dash="dash"),
                                  name=f"TP({label}) {price:,.2f}"), row=1, col=1)
-        fig.add_annotation(x=1.005, xref="paper", y=price, yref="y",
-                           text=f"TP({label}) | {price:,.2f} | 未触发 | {dist:+.2f} ATR",
-                           showarrow=False, xanchor="left", yshift=yshift_i,
-                           font=dict(size=10, color=color), row=1, col=1)
+        fig.add_trace(go.Scatter(x=[df["date"].iloc[int(len(df) * 0.62)]], y=[price - .18 * atr], mode="text",
+                                 text=[f"TP({label}) {price:,.2f} | {dist:+.2f} ATR"],
+                                 textposition="bottom center",
+                                 textfont=dict(size=10, color=color), showlegend=False), row=1, col=1)
         yshift_i += 12
     for spec in args.dol:
         try:
@@ -314,20 +316,22 @@ def main() -> None:
         except ValueError:
             raise SystemExit(f"bad --dol: {spec}")
         dist = (price - cur) / atr
+        if any(abs(price - sp) < .01 for sp in scenario_prices):
+            continue
         extra_prices.append(price)
-        fig.add_hline(y=price, line=dict(color="#0097a7", width=1, dash="dot"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+        fig.add_trace(go.Scatter(x=[df["date"].iloc[0], df["date"].iloc[-1]],
+                                 y=[price, price], mode="lines",
                                  line=dict(color="#0097a7", width=1, dash="dot"),
                                  name=f"DOL({label}) {price:,.2f}"), row=1, col=1)
-        fig.add_annotation(x=1.005, xref="paper", y=price, yref="y",
-                           text=f"DOL({label}) | {price:,.2f} | 未扫 | {dist:+.2f} ATR",
-                           showarrow=False, xanchor="left", yshift=yshift_i,
-                           font=dict(size=10, color="#0097a7"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=[df["date"].iloc[int(len(df) * 0.62)]], y=[price - .18 * atr], mode="text",
+                                 text=[f"DOL({label}) {price:,.2f} | {dist:+.2f} ATR"],
+                                 textposition="bottom center",
+                                 textfont=dict(size=10, color="#0097a7"), showlegend=False), row=1, col=1)
         yshift_i += 12
     if extra_prices:
         lo = min([float(df["low"].min())] + extra_prices) - .5 * atr
         hi = max([float(df["high"].max())] + extra_prices) + .5 * atr
-        fig.update_yaxes(range=[lo, hi], row=1, col=1)
+        pass  # y-range test
 
     audit = None
     if args.audit_json:
@@ -359,15 +363,17 @@ def main() -> None:
         title=f"{args.symbol}  {args.timeframe}  |  30d  |  last {df['date'].iloc[-1]}  |  {title_state}",
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
-        margin=dict(l=40, r=90, t=60, b=30),
+        margin=dict(l=40, r=240, t=60, b=30),
         showlegend=True, legend=dict(orientation="h", y=-0.08, x=0, font=dict(size=9)),
         plot_bgcolor=theme["paper"],
         paper_bgcolor=theme["paper"],
         font=dict(color=theme["font"]),
         height=900,
     )
-    fig.update_xaxes(showgrid=False, zeroline=False, rangeslider_visible=False,
+    fig.update_xaxes(type="date", showgrid=False, zeroline=False, rangeslider_visible=False,
                      rangebreaks=_rangebreaks(args.market))
+    fig.update_xaxes(range=[df["date"].min(), df["date"].max()], row=1, col=1)
+    fig.update_xaxes(range=[df["date"].min(), df["date"].max()], row=2, col=1)
     fig.update_yaxes(showgrid=True, gridcolor=theme["grid"],
                      zeroline=False, row=1, col=1)
     fig.update_yaxes(title_text="Volume", showgrid=False, zeroline=False, row=2, col=1)
