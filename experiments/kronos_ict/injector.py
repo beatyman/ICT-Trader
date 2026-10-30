@@ -99,23 +99,24 @@ def filter_plan_with_kronos(
         )
         return out
 
-    # 5) Mode C — target fine-tuning: cap TP at Kronos predicted extreme.
+    # 5) Mode C — target fine-tuning: cap TP at Kronos predicted extreme
+    #    (long -> predicted_high ceiling; short -> predicted_low floor).
     if mode == "target":
         tp = float(out.get("tp", 0.0))
         entry = float(out.get("entry", 0.0))
-        k_extreme = entry + k_dd  # k_dd is signed worst excursion
         if plan_dir == "long":
-            # Kronos path suggests an earlier ceiling than ICT DOL
-            if k_extreme < tp and k_extreme > entry:
-                out["tp"] = round(k_extreme, 8)
+            k_hi = float(kronos_forecast.get("predicted_high", tp))
+            if entry < k_hi < tp:
+                out["tp"] = round(k_hi, 8)
                 out["filter_reason"] = (
-                    f"tp capped to kronos extreme {out['tp']} (< ICT DOL {tp})"
+                    f"tp capped to kronos high {out['tp']} (< ICT DOL {tp})"
                 )
         else:
-            if k_extreme > tp and k_extreme < entry:
-                out["tp"] = round(k_extreme, 8)
+            k_lo = float(kronos_forecast.get("predicted_low", tp))
+            if tp < k_lo < entry:
+                out["tp"] = round(k_lo, 8)
                 out["filter_reason"] = (
-                    f"tp raised to kronos extreme {out['tp']} (< ICT DOL {tp})"
+                    f"tp raised to kronos low {out['tp']} (< ICT DOL {tp})"
                 )
 
     # default: same direction + confident, keep whatever ICT said.
