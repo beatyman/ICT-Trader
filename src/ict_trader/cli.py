@@ -228,7 +228,7 @@ def cmd_plan(args) -> None:
             "sl": latest.sl,
             "tp": target,
         }
-        report = audit_rules(df, daily=daily, market=args.market, plan=audit_plan)
+        report = audit_rules(df, daily=daily, market=args.market, plan=audit_plan, mode=getattr(args, "rule_mode", "strict"))
         card["rule_audit"] = report
         if report["decision"] != "TRADE":
             card["decision"] = "NO_TRADE"
@@ -348,6 +348,8 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="trailing distance in entry-bar ATR (0=off)")
     p.add_argument("--max-daily-loss-r", type=float, default=0.0,
                    help="stop new entries after this daily closed R loss (0=off)")
+    p.add_argument("--rule-mode", choices=["strict", "shadow"], default="strict",
+                   help="strict blocks; shadow records diff but keeps old decision")
     p.add_argument("--session-gate", choices=["none", "auto", "asian", "london", "london_close", "ny_am", "ny_pm", "silver_bullet", "cn", "hk"],
                    default="none", help="optional trading-session gate")
     p.add_argument("--pd-gate", action="store_true",

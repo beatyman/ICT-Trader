@@ -24,6 +24,7 @@ class RuleResult:
     blocking: bool
     value: Any = None
     reason: str = ""
+    provisional: bool = False
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -39,12 +40,12 @@ def _atr(df: pd.DataFrame, n: int = 14) -> float:
 
 
 def _status(rule_id, layer, name, ok: bool | None, *, blocking=False,
-            value=None, reason="") -> RuleResult:
+            value=None, reason="", provisional=False) -> RuleResult:
     if ok is None:
         status = "N/A"
     else:
         status = "PASS" if ok else "FAIL"
-    return RuleResult(rule_id, layer, name, status, blocking, value, reason)
+    return RuleResult(rule_id, layer, name, status, blocking, value, reason, provisional)
 
 
 _TF_DELTA = {"1h": pd.Timedelta(hours=1), "4h": pd.Timedelta(hours=4), "1d": pd.Timedelta(days=1)}
@@ -59,13 +60,30 @@ def _drop_incomplete_htf(df: pd.DataFrame, h: pd.DataFrame, tf: str) -> pd.DataF
     return h
 
 
-def _score_row(r) -> dict:
+def _cmp_state(a: float, b: float, tol: float) -> str:
+    d = a - b
+    if d > tol:
+        return "bull"
+    if d < -tol:
+        return "bear"
+    return "neutral"
+
+
+def _score_row(r, atr: float, eq_atr: float = 0.05) -> dict:
     cloud_lo = min(float(r.span_a), float(r.span_b))
     cloud_hi = max(float(r.span_a), float(r.span_b))
+    tol = max(eq_atr * atr, 1e-12)
+    tk_state = _cmp_state(float(r.tenkan), float(r.kijun), tol)
+    macd_state = _cmp_state(float(r.macd), float(r.macd_signal), tol)
+    cloud_side = "bull" if r.close > cloud_hi else ("bear" if r.close < cloud_lo else "inside")
     return {
-        "long": int(r.close > cloud_hi) + int(r.tenkan > r.kijun) + int(r.macd > r.macd_signal),
-        "short": int(r.close < cloud_lo) + int(r.tenkan < r.kijun) + int(r.macd < r.macd_signal),
-        "cloud_side": "bull" if r.close > cloud_hi else ("bear" if r.close < cloud_lo else "inside"),
+        "long": int(cloud_side == "bull") + int(tk_state == "bull") + int(macd_state == "bull"),
+        "short": int(cloud_side == "bear") + int(tk_state == "bear") + int(macd_state == "bear"),
+        "cloud_side": cloud_side,
+        "tk_state": tk_state,
+        "macd_state": macd_state,
+        "eq_atr": eq_atr,
+        "eq_abs": tol,
         "bar": str(r.date),
         "close": float(r.close),
         "cloud_lo": cloud_lo,
@@ -77,11 +95,11 @@ def _score_row(r) -> dict:
     }
 
 
-def _htf_scores(df: pd.DataFrame, tf: str) -> dict:
+def _htf_scores(df: pd.DataFrame, tf: str, eq_atr: float = 0.05) -> dict:
     h = _drop_incomplete_htf(df, resample_htf(df, tf), tf)
     if len(h) < 2:
         return {"long": 0, "short": 0, "bar": None, "error": "insufficient_htf"}
-    return _score_row(add_indicators(h).iloc[-1])
+    return _score_row(add_indicators(h).iloc[-1], _atr(h), eq_atr)
 
 
 def _plan_net_rr(plan: dict | None) -> tuple[float | None, float | None]:
@@ -147,8 +165,10 @@ def _smt_check(df: pd.DataFrame, smt_df: pd.DataFrame | None) -> tuple[bool | No
 
 def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
           market: str = "crypto", plan: dict | None = None,
-          smt_df: pd.DataFrame | None = None) -> dict:
+          smt_df: pd.DataFrame | None = None, mode: str = "strict") -> dict:
     """Run the L0-L5 checks and return a JSON-serialisable report."""
+    if mode not in {"strict", "shadow"}:
+        raise ValueError("mode must be strict or shadow")
     rules: list[RuleResult] = []
     n = len(df)
     last = df.iloc[-1]
@@ -244,8 +264,9 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
 
     pda = _htf_pda(df, price, atr)
     rules.append(_status("L2-08", "L2", "HTF PDA delivery", pda is not None,
-                         blocking=False, value=pda,
-                         reason="price not in an active 1H/4H PDA" if pda is None else ""))
+                         blocking=False, value=pda, provisional=pda is not None,
+                         reason="price not in an active 1H/4H PDA" if pda is None else
+                                "touch only; delivery not implemented"))
     rvol = float(df["volume"].iloc[-1] / df["volume"].tail(20).mean()) if "volume" in df else None
     rules.append(_status("L2-09", "L2", "volume / RVOL", None if rvol is None else rvol >= 1.5,
                          blocking=False, value=None if rvol is None else round(rvol, 3),
@@ -321,7 +342,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     rules.append(_status("L5-02", "L5", "news filter", None, blocking=False,
                          reason="no news calendar"))
     if daily is not None and len(daily) >= 2:
-        d_scores = _score_row(add_indicators(daily).iloc[-1])
+        d_scores = _score_row(add_indicators(daily).iloc[-1], _atr(daily))
     else:
         d_scores = _htf_scores(df, "1d")
     h_scores = _htf_scores(df, "1h")
@@ -351,14 +372,30 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     rules.append(_status("L5-05", "L5", "SMT filter", None, blocking=False,
                          reason="no second symbol"))
 
-    blocking_fail = [r for r in rules if r.blocking and r.status != "PASS"]
-    decision = "TRADE" if plan and not blocking_fail else "NO_TRADE"
+    blocking_fail = [r for r in rules if r.blocking and (r.status != "PASS" or r.provisional)]
+    strict_decision = "TRADE" if plan and not blocking_fail else "NO_TRADE"
+
+    if mode == "shadow":
+        old_decision = "TRADE" if plan else "NO_TRADE"
+        shadow = {
+            "old_decision": old_decision,
+            "new_decision": strict_decision,
+            "diff": [r.rule_id for r in blocking_fail],
+            "provisional": [r.rule_id for r in rules if r.provisional],
+            "would_block": strict_decision != old_decision,
+        }
+        decision = old_decision
+    else:
+        shadow = None
+        decision = strict_decision
 
     # ---- GS chain ----------------------------------------------------
     by_id = {r.rule_id: r for r in rules}
 
     def gs(gid, name, sources, necessary, note="", any_of=False):
-        statuses = [by_id[s].status for s in sources if s in by_id]
+        objs = [by_id[s] for s in sources if s in by_id]
+        statuses = [r.status for r in objs]
+        provisional = any(r.status == "PASS" and r.provisional for r in objs)
         if not statuses:
             st = "N/A"
         elif any_of:
@@ -369,8 +406,10 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
             st = "PASS"
         else:
             st = "N/A"
+        if necessary and provisional and st == "PASS":
+            st = "N/A"
         return {"id": gid, "name": name, "status": st, "necessary": necessary,
-                "sources": sources, "note": note}
+                "sources": sources, "note": note, "provisional": provisional}
 
     good = [
         gs("GS-01", "HTF alignment", ["L5-03"], True),
@@ -401,6 +440,9 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                    "incomplete": [g["id"] for g in req if g["status"] == "N/A"]}
     return {
         "decision": decision,
+        "strict_decision": strict_decision,
+        "rule_mode": mode,
+        "shadow": shadow,
         "good_setup": good_report,
         "last_time": str(last["date"]),
 
