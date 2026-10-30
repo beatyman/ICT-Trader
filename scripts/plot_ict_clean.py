@@ -80,7 +80,7 @@ def _resolve_plan(args, view, result) -> dict | None:
             "tp": float(args.tp),
             "trigger_time": args.trigger_time,
             "source": "explicit",
-            "conditional": False,
+            "conditional": bool(args.conditional),
         }
     atr = float((view["high"] - view["low"]).rolling(14, min_periods=1).mean().iloc[-1])
     return _auto_plan(view, result, atr, min_gross_rr=2.5)
@@ -123,7 +123,7 @@ def render(args) -> Path:
 
     fig = plt.figure(figsize=(18, 10), dpi=180, facecolor="white")
     gs = fig.add_gridspec(2, 1, height_ratios=[4.2, 1.0], hspace=.05,
-                          left=.06, right=.965, top=.84, bottom=.07)
+                          left=.06, right=.80, top=.84, bottom=.07)
     ax = fig.add_subplot(gs[0])
     axv = fig.add_subplot(gs[1], sharex=ax)
 
@@ -145,7 +145,12 @@ def render(args) -> Path:
     ]
     above = sorted([k for k in visible if k.price > price], key=lambda k: k.price)[:3]
     below = sorted([k for k in visible if k.price < price], key=lambda k: -k.price)[:3]
-    handles = []
+    handles = [
+        Line2D([0], [0], color="#1b8a4b", lw=3, label="K-Line"),
+        Rectangle((0, 0), 1, 1, facecolor="#f9a825", alpha=.3, label="FVG / OB"),
+        Line2D([0], [0], marker="x", color="#455A64", lw=0, label="Sweep"),
+        Line2D([0], [0], color="#1565c0", lw=2, label="SHORT Plan"),
+    ]
     for k in above + below:
         color = "#1565c0" if k.kind == "H" else "#c62828"
         ax.axhline(float(k.price), color=color, linestyle=(0, (5, 3)),
@@ -202,6 +207,9 @@ def render(args) -> Path:
             col = "#1b8a4b" if s.direction == "bull" else "#c62828"
             ax.scatter([j], [s.sweep_price], marker="x", s=65, color=col,
                        linewidth=1.5, zorder=9)
+            ax.annotate(f"Sweep {s.name} {s.sweep_price:.2f}", (j, s.sweep_price),
+                        xytext=(6, 10 if s.direction == "bear" else -14),
+                        textcoords="offset points", fontsize=7.5, color=col, zorder=10)
 
     # ---- plan -------------------------------------------------------
     if plan:
@@ -217,21 +225,50 @@ def render(args) -> Path:
         ax.add_patch(Rectangle((ti, plan["entry"]),
                                x_end - ti, plan["tp"] - plan["entry"],
                                facecolor="#1b8a4b", alpha=.07, linewidth=0, zorder=0))
+        ax.text(ti + (x_end - ti) * .45, (plan["entry"] + plan["sl"]) / 2,
+                f"Risk {abs(plan['entry']-plan['sl']):.2f} pts", fontsize=7.5,
+                color="#b71c1c", va="center", zorder=11)
+        ax.text(ti + (x_end - ti) * .45, (plan["entry"] + plan["tp"]) / 2,
+                f"Reward {abs(plan['entry']-plan['tp']):.2f} pts", fontsize=7.5,
+                color="#1b5e20", va="center", zorder=11)
         ax.plot([ti, x_end], [plan["entry"], plan["entry"]],
                 color="#1565c0", lw=2.2, zorder=8)
         ax.plot([ti, x_end], [plan["sl"], plan["sl"]],
                 color="#c62828", lw=1.2, ls=(0, (4, 3)), zorder=7)
         ax.plot([ti, x_end], [plan["tp"], plan["tp"]],
                 color="#1b8a4b", lw=1.2, ls=(0, (4, 3)), zorder=7)
-        ax.text(x_end + .4, plan["entry"], f"{plan['direction'].upper()} {plan['entry']:.4g}",
-                fontsize=9, color="#1565c0", va="center", ha="left", fontweight="bold")
-        ax.text(x_end + .4, plan["sl"], f"SL {plan['sl']:.4g}", fontsize=9,
-                color="#c62828", va="center", ha="left")
-        ax.text(x_end + .4, plan["tp"], f"TP {plan['tp']:.4g}", fontsize=9,
-                color="#1b8a4b", va="center", ha="left")
         gross, net = _net_rr(plan["direction"], plan["entry"], plan["sl"], plan["tp"],
                              args.commission_bps, args.slippage_bps, args.sell_tax_bps)
-        label = "AUTO CONDITIONAL" if plan.get("conditional") else "PLAN"
+        plan_labels = [
+            (plan["entry"], f"{plan['direction'].upper()} Entry {plan['entry']:.2f} | conditional", "#1565c0"),
+            (plan["sl"], f"{plan['direction'].upper()} SL {plan['sl']:.2f}", "#c62828"),
+            (plan["tp"], f"{plan['direction'].upper()} TP {plan['tp']:.2f} | net {net:.2f}R", "#1b8a4b"),
+        ]
+        label = "CONDITIONAL" if plan.get("conditional") else "PLAN"
+        if args.alt_entry and args.alt_direction:
+            a_entry, a_sl, a_tp = float(args.alt_entry), float(args.alt_sl), float(args.alt_tp)
+            ac = "#8BC34A" if args.alt_direction == "long" else "#EF9A9A"
+            ax.plot([ti, x_end], [a_entry, a_entry], color=ac, lw=1.1, ls=":", zorder=7)
+            ax.plot([ti, x_end], [a_sl, a_sl], color="#ef9a9a", lw=1.0, ls=":", zorder=6)
+            ax.plot([ti, x_end], [a_tp, a_tp], color=ac, lw=1.0, ls=":", zorder=6)
+            plan_labels += [
+                (a_entry, f"{args.alt_direction.upper()} Entry {a_entry:.2f} | scenario", ac),
+                (a_sl, f"{args.alt_direction.upper()} SL {a_sl:.2f}", "#ef9a9a"),
+                (a_tp, f"{args.alt_direction.upper()} TP {a_tp:.2f}", ac),
+            ]
+        # right-gutter labels with leader lines and vertical de-overlap
+        ymin0, ymax0 = ax.get_ylim()
+        sorted_labels = sorted(plan_labels, key=lambda z: z[0], reverse=True)
+        placed, min_gap = [], (ymax0 - ymin0) * .042
+        for p0, txt, col in sorted_labels:
+            yy = p0
+            while any(abs(yy - q) < min_gap for q in placed):
+                yy -= min_gap
+            placed.append(yy)
+            ax.annotate(txt, xy=(x_end, p0), xytext=(x_end + 1.6, yy),
+                        textcoords="data", fontsize=9, color=col, va="center", ha="left",
+                        arrowprops=dict(arrowstyle="-", color=col, lw=.8, shrinkA=0, shrinkB=2),
+                        annotation_clip=False, zorder=12)
         summary = (f"{label} — NOT TRIGGERED\n"
                    f"Source: {plan.get('source','')}\n"
                    f"Entry {plan['entry']:.4g}  SL {plan['sl']:.4g}  TP {plan['tp']:.4g}\n"
@@ -245,15 +282,24 @@ def render(args) -> Path:
             fontsize=8.6, color="#222222",
             bbox=dict(boxstyle="round,pad=.4", fc="white", ec="#9e9e9e", lw=1.0, alpha=.98),
             zorder=20)
+    if args.alt_entry:
+        handles.append(Line2D([0], [0], color="#8BC34A", lw=1.2, ls=":",
+                              label=f"{args.alt_direction.upper()} SCENARIO"))
     if not plan:
         ax.text(.012, .80, "NO TRADE", transform=ax.transAxes, va="top", ha="left",
                 fontsize=15, fontweight="bold", color="#b00020", zorder=20)
 
+    if handles:
+        ax.legend(handles=handles[:10], loc="lower left", bbox_to_anchor=(0, 1.01),
+                  ncol=4, frameon=False, fontsize=7.5)
     # ---- layout -----------------------------------------------------
-    low = min(float(view["low"].min()), plan["tp"] if plan else 1e18, plan["sl"] if plan else 1e18)
-    high = max(float(view["high"].max()), plan["tp"] if plan else -1e18, plan["sl"] if plan else -1e18)
+    extra = [plan["tp"], plan["sl"]] if plan else []
+    if args.alt_entry:
+        extra += [float(args.alt_tp), float(args.alt_sl)]
+    low = min([float(view["low"].min())] + extra)
+    high = max([float(view["high"].max())] + extra)
     pad = max((high - low) * .06, 1e-6)
-    ax.set_xlim(-1, n + 13)
+    ax.set_xlim(-1, n + 22)
     ax.set_ylim(low - pad, high + pad)
     ax.set_ylabel("Price", fontsize=10, labelpad=8)
     ax.grid(True, color="#e6e6e6", linewidth=.7)
@@ -262,7 +308,7 @@ def render(args) -> Path:
     axv.grid(True, axis="y", color="#e6e6e6", linewidth=.6)
     axv.set_axisbelow(True)
     axv.set_ylabel("Volume", fontsize=9, labelpad=8)
-    axv.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{x/1e6:.1f}M"))
+    axv.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{x/1e6:.1f}M" if abs(x) >= 1e6 else f"{x/1e3:.0f}K"))
     axv.tick_params(labelsize=8)
     ticks = list(range(0, n, max(1, n // 8)))
     axv.set_xticks(ticks)
@@ -299,6 +345,11 @@ def main() -> None:
     ap.add_argument("--sl", type=float, default=None)
     ap.add_argument("--tp", type=float, default=None)
     ap.add_argument("--trigger-time", default=None)
+    ap.add_argument("--alt-direction", choices=["long", "short"], default=None)
+    ap.add_argument("--alt-entry", type=float, default=None)
+    ap.add_argument("--alt-sl", type=float, default=None)
+    ap.add_argument("--alt-tp", type=float, default=None)
+    ap.add_argument("--conditional", action="store_true")
     ap.add_argument("--commission-bps", type=float, default=5.0)
     ap.add_argument("--slippage-bps", type=float, default=2.0)
     ap.add_argument("--sell-tax-bps", type=float, default=0.0)
