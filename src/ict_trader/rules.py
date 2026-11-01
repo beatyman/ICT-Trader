@@ -95,6 +95,21 @@ def _score_row(r, atr: float, eq_atr: float = 0.05) -> dict:
     }
 
 
+# Fixed warm-up window for the recursive MACD EMA.  The EMA value on the last
+# HTF bar otherwise depends on how much history was fed in, which made 1H/4H
+# scores shift (and the L5-03 direction flip) between a 1000-bar and a
+# full-year execution frame.  Trimming to a fixed window seeds the EMA at the
+# same point regardless of total length, so the recent-bar score is stable.
+_WARM_BARS = 200
+
+
+def _warm_score(h: pd.DataFrame, eq_atr: float = 0.05) -> dict:
+    """Score the last HTF bar on a fixed warm-up window (window-invariant)."""
+    if len(h) > _WARM_BARS:
+        h = h.iloc[-_WARM_BARS:]
+    return _score_row(add_indicators(h).iloc[-1], _atr(h), eq_atr)
+
+
 def _htf_scores(df: pd.DataFrame, tf: str, eq_atr: float = 0.05) -> dict:
     h = resample_htf(df, tf)
     # If the caller already passed daily bars, the last daily bar is complete
@@ -105,7 +120,7 @@ def _htf_scores(df: pd.DataFrame, tf: str, eq_atr: float = 0.05) -> dict:
         h = _drop_incomplete_htf(df, h, tf)
     if len(h) < 2:
         return {"long": 0, "short": 0, "bar": None, "error": "insufficient_htf"}
-    return _score_row(add_indicators(h).iloc[-1], _atr(h), eq_atr)
+    return _warm_score(h, eq_atr)
 
 
 
@@ -559,7 +574,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         daily_closed = daily
         if pd.Timestamp(daily["date"].iloc[-1]).date() >= pd.Timestamp(df["date"].iloc[-1]).date():
             daily_closed = daily.iloc[:-1]
-        d_scores = _score_row(add_indicators(daily_closed).iloc[-1], _atr(daily_closed))
+        d_scores = _warm_score(daily_closed)
     else:
         d_scores = _htf_scores(df, "1d")
     h_scores = _htf_scores(df, "1h")
