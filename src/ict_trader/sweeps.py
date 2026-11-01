@@ -89,7 +89,8 @@ def detect_key_levels(
             known_at=int(getattr(l, "right", l.created)), source="pool",
         ))
 
-    # merge levels of the same side within tolerance; keep the earliest known one
+    # Merge levels of the same side within tolerance.  A newer swing at the same
+    # price re-arms the pool, so the merged level keeps the LATEST known_at.
     levels.sort(key=lambda x: (x.kind, x.price, x.known_at))
     merged: list[KeyLevel] = []
     for lv in levels:
@@ -102,7 +103,12 @@ def detect_key_levels(
             merged.append(lv)
         else:
             hit.touches += 1
-            if lv.known_at < hit.known_at:
+            # Re-filled liquidity: a newer swing at the same price re-arms the
+            # pool.  Keep the LATEST known_at so a level re-formed recently is
+            # swept again in the recent window, instead of being consumed by an
+            # early sweep deep in the history.  This makes the recent-bar sweep
+            # detection independent of the total history length fed in.
+            if lv.known_at > hit.known_at:
                 hit.known_at = lv.known_at
     return merged
 
