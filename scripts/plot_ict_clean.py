@@ -324,6 +324,36 @@ def render(args) -> Path:
                             xytext=(7, -16 if s.direction == "bull" else 14),
                             textcoords="offset points", fontsize=7.5, color=col, zorder=10)
 
+    # ---- AMD (Power of 3) ------------------------------------------
+    if args.show_amd and result.sweeps:
+        s = result.sweeps[-1]
+        if 0 <= s.sweep_bar < len(analysis):
+            j = view_index(analysis["date"].iloc[s.sweep_bar])
+            if j is not None:
+                # Accumulation: consolidation range before the sweep
+                acc_len = 20
+                a0 = max(0, j - acc_len)
+                acc_hi = float(view["high"].iloc[a0:j].max())
+                acc_lo = float(view["low"].iloc[a0:j].min())
+                ax.add_patch(Rectangle((a0, acc_lo), j - a0, acc_hi - acc_lo,
+                                       facecolor="#90A4AE", alpha=.08,
+                                       edgecolor="#78909C", linewidth=1.0,
+                                       linestyle="--", zorder=1))
+                ax.text(a0 + (j - a0) / 2, acc_hi, "Accumulation", fontsize=7.5,
+                        color="#546E7A", va="bottom", ha="center", zorder=6)
+                # Manipulation: the sweep bar
+                ax.axvspan(j - .5, j + .5, color="#F44336", alpha=.15, zorder=0)
+                ax.annotate("Manipulation", (j, s.sweep_price),
+                            xytext=(j + 1, s.sweep_price),
+                            fontsize=7.5, color="#C62828", zorder=6,
+                            ha="left", va="center",
+                            annotation_clip=False)
+                # Distribution: sweep -> latest bar
+                ax.axvspan(j, n - 1, color="#26A69A", alpha=.06, zorder=0)
+                dist_lo = float(view["low"].iloc[j:].min())
+                ax.text((j + n - 1) / 2, dist_lo, "Distribution", fontsize=7.5,
+                        color="#1B5E20", va="top", ha="center", zorder=6)
+
     # ---- market structure ------------------------------------------
     if args.show_structure:
         swing_idx = [(i, sw) for i, sw in enumerate(result.swings)
@@ -564,6 +594,8 @@ def main() -> None:
     ap.add_argument("--show-structure", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--show-killzones", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--show-eq", action=argparse.BooleanOptionalAction, default=False)
+    ap.add_argument("--show-amd", action=argparse.BooleanOptionalAction, default=False,
+                    help="draw Accumulation / Manipulation / Distribution (Power of 3) zones")
     ap.add_argument("--commission-bps", type=float, default=5.0)
     ap.add_argument("--slippage-bps", type=float, default=2.0)
     ap.add_argument("--sell-tax-bps", type=float, default=0.0)
