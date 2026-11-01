@@ -95,7 +95,10 @@ def _auto_plan(view: pd.DataFrame, result, atr: float, min_gross_rr: float = 2.5
         direction = "long" if c.direction == "bull" else "short"
         entry = float(c.level)
         sl = float(c.sl)
-        source = f"last CISD {view['date'].iloc[c.end]}"
+        try:
+            source = f"last CISD {view['date'].iloc[c.end]}"
+        except IndexError:
+            source = f"last CISD @ bar {c.end}"
         if last - c.end > 20:
             source += " (stale)"
     else:

@@ -387,6 +387,31 @@ def render(args) -> Path:
                 fontsize=8, color="#37474F", va="top", ha="left", zorder=11,
                 bbox=dict(boxstyle="round,pad=.25", fc="#ECEFF1", ec="#90A4AE", alpha=.9))
 
+    # ---- 4 scenarios (A/B/C/D) --------------------------------------
+    if args.scenarios:
+        from ict_trader.rules import audit
+        from ict_trader.po3 import detect_po3
+        from ict_trader.scenarios import evaluate_scenarios, SCENARIO_COLORS, SCENARIO_NAMES
+        atr_s = float((analysis["high"] - analysis["low"]).rolling(14, min_periods=1).mean().iloc[-1])
+        a_s = audit(analysis, daily=None, market=args.market)
+        po3_s, _ = detect_po3(view, accumulate_bars=args.po3_accumulate_bars,
+                              body_ratio_threshold=args.po3_body_ratio)
+        sid, plan_s = evaluate_scenarios(a_s, po3_s, result, atr_s, price)
+        if plan_s is not None:
+            col = SCENARIO_COLORS[sid]
+            for label, val in [("Entry", plan_s.entry), ("SL", plan_s.sl), ("TP", plan_s.tp)]:
+                ax.axhline(val, color=col, lw=1.4, ls=(0, (4, 2)) if label == "Entry" else (0, (1, 2)), zorder=2)
+                ax.text(n - 1, val, f"[{sid}] {label} {val:.4g}", fontsize=7.5,
+                        color=col, ha="right", zorder=6)
+            txt = f"Scenario {sid}: {SCENARIO_NAMES[sid]} | {plan_s.direction.upper()} | {plan_s.status}"
+            if plan_s.net_rr is not None:
+                txt += f" | net {plan_s.net_rr:.2f}"
+            if plan_s.suppressed:
+                txt += f" | suppr {','.join(plan_s.suppressed)}"
+            ax.text(.5, float(view["high"].max()), txt, fontsize=8, color=col,
+                    va="top", ha="left", zorder=11,
+                    bbox=dict(boxstyle="round,pad=.25", fc="white", ec=col, alpha=.92))
+
     # ---- market structure ------------------------------------------
     if args.show_structure:
         swing_idx = [(i, sw) for i, sw in enumerate(result.swings)
@@ -635,6 +660,10 @@ def main() -> None:
                     help="bars defining the PO3 accumulation range")
     ap.add_argument("--po3-body-ratio", type=float, default=0.6,
                     help="displacement body-ratio threshold for PO3 distribution")
+    ap.add_argument("--scenarios", action=argparse.BooleanOptionalAction, default=False,
+                    help="evaluate the 4 core scenarios (A/B/C/D) and draw the winner")
+    ap.add_argument("--market", default="crypto", choices=["crypto", "us", "hk", "cn", "other"],
+                    help="market for the scenario audit")
     ap.add_argument("--commission-bps", type=float, default=5.0)
     ap.add_argument("--slippage-bps", type=float, default=2.0)
     ap.add_argument("--sell-tax-bps", type=float, default=0.0)
