@@ -354,6 +354,39 @@ def render(args) -> Path:
                 ax.text((j + n - 1) / 2, dist_lo, "Distribution", fontsize=7.5,
                         color="#1B5E20", va="top", ha="center", zorder=6)
 
+    # ---- PO3 (formal state machine) --------------------------------
+    if args.show_po3:
+        from ict_trader.po3 import detect_po3, ACCUMULATING, MANIPULATED, DISTRIBUTING, INVALID
+        po3, phases = detect_po3(view, accumulate_bars=args.po3_accumulate_bars,
+                                 body_ratio_threshold=args.po3_body_ratio)
+        phase_color = {
+            ACCUMULATING: "#90A4AE",
+            MANIPULATED: "#F9A825",
+            DISTRIBUTING: "#26A69A" if po3.sweep_direction == "bull" else "#EF5350",
+            INVALID: "#B0BEC5",
+        }
+        for i, ph in enumerate(phases):
+            ax.axvspan(i - .5, i + .5, color=phase_color.get(ph, "#90A4AE"), alpha=.08, zorder=0)
+        if po3.range_high is not None:
+            ax.axhline(po3.range_high, color="#78909C", ls=(0, (4, 2)), lw=1.0, alpha=.7, zorder=2)
+            ax.text(n - 1, po3.range_high, f"RH {po3.range_high:.4g}", fontsize=7.5,
+                    color="#546E7A", va="bottom", ha="right", zorder=6)
+        if po3.range_low is not None:
+            ax.axhline(po3.range_low, color="#78909C", ls=(0, (4, 2)), lw=1.0, alpha=.7, zorder=2)
+            ax.text(n - 1, po3.range_low, f"RL {po3.range_low:.4g}", fontsize=7.5,
+                    color="#546E7A", va="top", ha="right", zorder=6)
+        if po3.manipulation_extreme is not None:
+            tag = "ML" if po3.sweep_direction == "bull" else "MH"
+            col = "#1b8a4b" if po3.sweep_direction == "bull" else "#c62828"
+            ax.axhline(po3.manipulation_extreme, color=col, ls=(0, (1, 2)), lw=1.2, alpha=.85, zorder=2)
+            ax.annotate(f"{tag} {po3.manipulation_extreme:.4g}", (n - 1, po3.manipulation_extreme),
+                        xytext=(-4, 5), textcoords="offset points", fontsize=7.5, color=col,
+                        ha="right", zorder=6)
+        dirstr = f" ({po3.sweep_direction.capitalize()})" if po3.sweep_direction else ""
+        ax.text(.5, float(view["high"].max()), f"PO3: {po3.state}{dirstr}",
+                fontsize=8, color="#37474F", va="top", ha="left", zorder=11,
+                bbox=dict(boxstyle="round,pad=.25", fc="#ECEFF1", ec="#90A4AE", alpha=.9))
+
     # ---- market structure ------------------------------------------
     if args.show_structure:
         swing_idx = [(i, sw) for i, sw in enumerate(result.swings)
@@ -596,6 +629,12 @@ def main() -> None:
     ap.add_argument("--show-eq", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--show-amd", action=argparse.BooleanOptionalAction, default=False,
                     help="draw Accumulation / Manipulation / Distribution (Power of 3) zones")
+    ap.add_argument("--show-po3", action=argparse.BooleanOptionalAction, default=False,
+                    help="draw formal PO3 state-machine zones (range/ML/MH)")
+    ap.add_argument("--po3-accumulate-bars", type=int, default=20,
+                    help="bars defining the PO3 accumulation range")
+    ap.add_argument("--po3-body-ratio", type=float, default=0.6,
+                    help="displacement body-ratio threshold for PO3 distribution")
     ap.add_argument("--commission-bps", type=float, default=5.0)
     ap.add_argument("--slippage-bps", type=float, default=2.0)
     ap.add_argument("--sell-tax-bps", type=float, default=0.0)
