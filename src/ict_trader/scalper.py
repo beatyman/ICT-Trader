@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .concepts import ICTConfig, analyze
+from .concepts import ICTConfig, detect_fvgs
 from .rules import _htf_scores
 
 
-def _active_fvgs(res):
-    return [f for f in res.fvgs if getattr(f, "active", True) and not getattr(f, "inverted", False)]
+def _active_fvgs(fvgs):
+    return [f for f in fvgs if getattr(f, "active", True) and not getattr(f, "inverted", False)]
 
 
 def _net_rr(entry, sl, tp, direction):
@@ -63,14 +63,15 @@ def detect_scalper(htf_df: pd.DataFrame, ltf_df: pd.DataFrame,
     the FVG direction or the setup is rejected.
     """
     cfg = ICTConfig(mode="historical", show_sessions=False, show_htf_cisd=False,
-                    cisd_all=False, cisd_min_grade=0, show_sweeps=False)
-    htf = analyze(htf_df, cfg)
-    ltf = analyze(ltf_df, cfg)
+                    cisd_all=False, cisd_min_grade=0, show_sweeps=False,
+                    show_fvg=True, displacement_filter=True)
+    h_all = detect_fvgs(htf_df, cfg)
+    l_all = detect_fvgs(ltf_df, cfg)
     price = float(ltf_df["close"].iloc[-1])
     now = ltf_df["date"].iloc[-1]
 
     # 1. latest active 1H FVG
-    h_fvgs = sorted(_active_fvgs(htf), key=lambda f: f.created)
+    h_fvgs = sorted(_active_fvgs(h_all), key=lambda f: f.created)
     if not h_fvgs:
         return None
     h = h_fvgs[-1]
@@ -81,7 +82,7 @@ def detect_scalper(htf_df: pd.DataFrame, ltf_df: pd.DataFrame,
 
     # 3. a 5m FVG formed after the 1H FVG was created, overlapping its zone
     h_created_dt = htf_df["date"].iloc[h.created]
-    l_fvgs = sorted(_active_fvgs(ltf), key=lambda f: f.created)
+    l_fvgs = sorted(_active_fvgs(l_all), key=lambda f: f.created)
     candidates = []
     for l in l_fvgs:
         l_dt = ltf_df["date"].iloc[l.created]
