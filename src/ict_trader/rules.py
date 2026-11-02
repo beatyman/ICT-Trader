@@ -183,6 +183,70 @@ def _grade_from_ratio(ratio: float) -> tuple[str, int]:
     return "-", 0
 
 
+def premium_discount(price: float, range_high: float, range_low: float,
+                     atr: float | None = None, eq_tol_atr: float = 0.05) -> str:
+    """Classify price against the dealing-range equilibrium (PD Array).
+
+    premium = above EQ (overvalued -> look to sell);
+    discount = below EQ (undervalued -> look to buy)."""
+    eq = (range_high + range_low) / 2.0
+    tol = (eq_tol_atr * atr) if atr else 0.0
+    if price > eq + tol:
+        return "premium"
+    if price < eq - tol:
+        return "discount"
+    return "equilibrium"
+
+
+def in_silver_bullet(dt, tz: str = "America/New_York") -> bool:
+    """ICT Silver Bullet window: 10:00-11:00 New York time."""
+    try:
+        from zoneinfo import ZoneInfo
+        ts = pd.Timestamp(dt)
+        local = ts.tz_localize("UTC").tz_convert(ZoneInfo(tz)) if ts.tzinfo is None else ts.tz_convert(ZoneInfo(tz))
+        h, m = local.hour, local.minute
+        return (h == 10) or (h == 11 and m == 0)
+    except Exception:
+        return False
+
+
+def detect_intraday_session_levels(df: pd.DataFrame, tz: str = "America/New_York") -> dict:
+    """Latest pre-market / London / Opening-Range high & low (session liquidity).
+
+    Windows (New York time): pre-market 07:00-09:00, London 02:00-05:00,
+    opening range 09:30-10:00.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+    except Exception:
+        return {}
+    dt = pd.to_datetime(df["date"])
+    windows = {
+        "premarket": (7, 0, 9, 0),
+        "london": (2, 0, 5, 0),
+        "opening_range": (9, 30, 10, 0),
+    }
+    out: dict[str, dict] = {}
+    dates = dt.dt.date
+    for name, (sh, sm, eh, em) in windows.items():
+        hi = lo = None
+        cur_day = None
+        for i, ts in enumerate(dt):
+            local = ts.tz_localize("UTC").tz_convert(ZoneInfo(tz)) if ts.tzinfo is None else ts.tz_convert(ZoneInfo(tz))
+            inside = (local.hour, local.minute) >= (sh, sm) and (local.hour, local.minute) <= (eh, em)
+            day = dates.iloc[i]
+            if inside:
+                if day != cur_day:
+                    cur_day = day
+                    hi = float(df["high"].iloc[i])
+                    lo = float(df["low"].iloc[i])
+                else:
+                    hi = max(hi, float(df["high"].iloc[i]))
+                    lo = min(lo, float(df["low"].iloc[i]))
+        out[name] = {"high": hi, "low": lo}
+    return out
+
+
 def _setup_grade(by_id: dict) -> dict:
     """Letter grade (A+..C) from the enabled checklist items.  N/A items are
     excluded from the denominator, exactly like the Pine indicator."""
@@ -473,8 +537,11 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                          reason="no daily data" if not daily_ok else ""))
     pools = [k for k in res.key_levels if k.name in {"EQH", "EQL"}]
     rules.append(_status("L2-02", "L2", "EQH/EQL", bool(pools), value=len(pools)))
-    rules.append(_status("L2-03", "L2", "session range", None, blocking=False,
-                         reason="no session range data"))
+    sess_liq = detect_intraday_session_levels(df)
+    rules.append(_status("L2-03", "L2", "session range",
+                         bool(sess_liq) and any(v.get("high") is not None for v in sess_liq.values()),
+                         blocking=False, value=sess_liq,
+                         reason="no session liquidity" if not sess_liq else ""))
     rules.append(_status("L2-04", "L2", "liquidity sweep", bool(recent_sweeps),
                          blocking=True, value=len(recent_sweeps),
                          reason="no sweep within 20 bars" if not recent_sweeps else ""))
@@ -542,7 +609,11 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
             and float(f.top) >= poi_lo and float(f.bottom) <= poi_hi]
     obs = [o for o in res.order_blocks if o.active and o.created >= poi_time_lo
            and float(o.top) >= poi_lo and float(o.bottom) <= poi_hi]
-    rules.append(_status("L3-01", "L3", "FVG", bool(fvgs), value={"count": len(fvgs), "entry_ref": poi_ref}))
+    first_p = [f for f in fvgs if getattr(f, "first_presented", False)]
+    rules.append(_status("L3-01", "L3", "FVG", bool(fvgs),
+                         value={"count": len(fvgs), "entry_ref": poi_ref,
+                                "first_presented": len(first_p),
+                                "first_p_ce": None if not first_p else round(float(first_p[-1].ce), 6)}))
     rules.append(_status("L3-02", "L3", "OB", bool(obs), value={"count": len(obs), "entry_ref": poi_ref}))
     rules.append(_status("L3-03", "L3", "Breaker", None, blocking=False,
                          reason="breaker classification not implemented"))
@@ -623,8 +694,10 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     rules.append(_status("L4-06", "L4", "invalidation/overnight", None, blocking=False, reason="execution policy"))
 
     # ---- L5 ---------------------------------------------------------
-    rules.append(_status("L5-01", "L5", "killzone", None, blocking=False,
-                         reason="session/killzone input required"))
+    sb_active = in_silver_bullet(last["date"])
+    rules.append(_status("L5-01", "L5", "Silver Bullet", sb_active, blocking=False,
+                         value=str(last["date"]),
+                         reason="outside 10:00-11:00 NY window" if not sb_active else ""))
     rules.append(_status("L5-02", "L5", "news filter", None, blocking=False,
                          reason="no news calendar"))
     if daily is not None and len(daily) >= 2:
@@ -669,6 +742,25 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                          reason="no session pool data"))
     rules.append(_status("L5-05", "L5", "SMT filter", None, blocking=False,
                          reason="no second symbol"))
+
+    # L5-06: direction must agree with the premium/discount zone.
+    pd_zone = None
+    pd_ok = None
+    pd_reason = "no swings"
+    if res.swings:
+        highs = [s.price for s in res.swings if s.kind == "H"]
+        lows = [s.price for s in res.swings if s.kind == "L"]
+        if highs and lows:
+            pd_zone = premium_discount(price, max(highs[-3:]), min(lows[-3:]), atr)
+            if direction == "long":
+                pd_ok = pd_zone == "discount"
+            elif direction == "short":
+                pd_ok = pd_zone == "premium"
+            pd_reason = ("no direction" if direction is None else
+                         ("" if pd_ok else f"{direction} wants {'discount' if direction == 'long' else 'premium'}, price in {pd_zone}"))
+    rules.append(_status("L5-06", "L5", "premium/discount vs direction", pd_ok, blocking=False,
+                         value={"zone": pd_zone, "direction": direction},
+                         reason=pd_reason))
 
     plan_info = None
     if plan:
