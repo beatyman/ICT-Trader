@@ -227,6 +227,15 @@ def render(args) -> Path:
     )
     plan = _resolve_plan(args, view, result)
 
+    # grade + position size (Authrain grade model)
+    grade_report = None
+    pos_size = None
+    if args.grade or args.risk_usd is not None:
+        from ict_trader.rules import audit as _audit
+        _a = _audit(analysis, daily=None, market=args.market, plan=plan, risk_usd=args.risk_usd)
+        grade_report = _a.get("grade")
+        pos_size = _a.get("position_size")
+
     def view_index(dt) -> int | None:
         hits = view.index[view["date"] == pd.Timestamp(dt)].tolist()
         return int(hits[0]) if hits else None
@@ -616,6 +625,14 @@ def render(args) -> Path:
              f"last bar {view['date'].iloc[-1]}  ·  close {price:.6g}  ·  {status}",
              fontsize=9.8, ha="left", color="#555555")
 
+    if grade_report is not None:
+        gcol = {"A+": "#00C853", "A": "#64DD17", "B+": "#9ACD32",
+                "B-": "#FFB300", "C": "#FF7043"}.get(grade_report.get("grade", "-"), "#888888")
+        gtxt = f"Grade {grade_report.get('grade', '-')}  ({grade_report.get('hits', 0)}/{grade_report.get('enabled', 0)})"
+        if pos_size is not None and args.risk_usd is not None:
+            gtxt += f"  ·  Size {pos_size}c @ ${args.risk_usd:.0f}"
+        fig.text(.99, .955, gtxt, fontsize=11, fontweight="bold", ha="right", color=gcol)
+
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, facecolor="white", bbox_inches=None)
@@ -664,6 +681,10 @@ def main() -> None:
                     help="evaluate the 4 core scenarios (A/B/C/D) and draw the winner")
     ap.add_argument("--market", default="crypto", choices=["crypto", "us", "hk", "cn", "other"],
                     help="market for the scenario audit")
+    ap.add_argument("--grade", action=argparse.BooleanOptionalAction, default=False,
+                    help="show the setup grade (A+..C) in the top-right")
+    ap.add_argument("--risk-usd", type=float, default=None,
+                    help="risk amount for position sizing (requires a plan)")
     ap.add_argument("--commission-bps", type=float, default=5.0)
     ap.add_argument("--slippage-bps", type=float, default=2.0)
     ap.add_argument("--sell-tax-bps", type=float, default=0.0)
