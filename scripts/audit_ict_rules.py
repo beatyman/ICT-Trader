@@ -49,6 +49,8 @@ def main() -> None:
     ap.add_argument("--rule-mode", choices=["strict", "shadow"], default="strict")
     ap.add_argument("--touch-atr-source", choices=["htf", "ltf"], default="htf")
     ap.add_argument("--touch-semantics", choices=["current", "historical", "overlap"], default="current")
+    ap.add_argument("--risk-usd", type=float, default=None,
+                    help="risk amount for contract sizing (requires --plan-json)")
     ap.add_argument("--json-out", default="output/ict/rule_audit.json")
     args = ap.parse_args()
 
@@ -58,7 +60,7 @@ def main() -> None:
     report = audit(df, daily=daily, market=args.market,
                    plan=_load_plan(args.plan_json), smt_df=smt, mode=args.rule_mode,
                    touch_atr_source=args.touch_atr_source,
-                   touch_semantics=args.touch_semantics)
+                   touch_semantics=args.touch_semantics, risk_usd=args.risk_usd)
 
     out = Path(args.json_out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -68,6 +70,10 @@ def main() -> None:
     print(f"decision: {report['decision']}")
     print(f"strict: {report.get('strict_decision')}  mode: {report.get('rule_mode')}")
     print(f"blocking failures: {', '.join(report['blocking_failures']) or 'none'}")
+    g = report.get("grade", {})
+    print(f"grade: {g.get('grade', '-')}  ({g.get('hits', 0)}/{g.get('enabled', 0)} checks)")
+    if report.get("position_size") is not None:
+        print(f"position size: {report['position_size']} contracts")
     for r in report["rules"]:
         print(f"{r['rule_id']:<7} {r['status']:<4} {r['name']}")
     print(f"saved {out}")

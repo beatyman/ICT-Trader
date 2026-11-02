@@ -146,6 +146,63 @@ def _plan_net_rr(plan: dict | None) -> tuple[float | None, float | None]:
     return gross, net
 
 
+def position_size(risk_usd: float, entry: float, sl: float,
+                  point_value: float = 1.0, min_qty: int = 0) -> int:
+    """Contract/shares from $ risk and stop distance (Authrain sizing).
+
+    point_value = dollar value of one point/contract (1.0 for spot crypto/share;
+    use the tick value for futures)."""
+    dist = abs(entry - sl)
+    if dist <= 0 or point_value <= 0 or risk_usd <= 0:
+        return 0
+    return max(int(risk_usd / (dist * point_value)), min_qty)
+
+
+# Six-item setup checklist mapped onto the L-layer rules (Authrain grade model).
+_CHECKLIST = [
+    ("Liquidity Sweep", "L2-04"),
+    ("HTF PDA Delivery", "L2-08"),
+    ("Volume", "L2-09"),
+    ("Session Sweep", "L2-03"),
+    ("Clear Targets", "L4-02"),
+    ("SMT", "L2-10"),
+]
+
+
+def _grade_from_ratio(ratio: float) -> tuple[str, int]:
+    if ratio >= 0.95:
+        return "A+", 7
+    if ratio >= 0.80:
+        return "A", 6
+    if ratio >= 0.65:
+        return "B+", 5
+    if ratio >= 0.45:
+        return "B-", 4
+    if ratio >= 0.25:
+        return "C", 3
+    return "-", 0
+
+
+def _setup_grade(by_id: dict) -> dict:
+    """Letter grade (A+..C) from the enabled checklist items.  N/A items are
+    excluded from the denominator, exactly like the Pine indicator."""
+    hits = enabled = 0
+    items = []
+    for name, rid in _CHECKLIST:
+        r = by_id.get(rid)
+        if r is None or r.status == "N/A":
+            items.append({"name": name, "status": "n/a"})
+            continue
+        enabled += 1
+        ok = r.status == "PASS"
+        hits += 1 if ok else 0
+        items.append({"name": name, "status": "pass" if ok else "fail"})
+    ratio = hits / enabled if enabled else 0.0
+    letter, numeric = _grade_from_ratio(ratio)
+    return {"grade": letter, "numeric": numeric, "ratio": round(ratio, 3),
+            "hits": hits, "enabled": enabled, "items": items}
+
+
 
 
 def _delivery_state(direction: str, last_close: float, bottom: float, top: float,
@@ -334,7 +391,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
           market: str = "crypto", plan: dict | None = None,
           smt_df: pd.DataFrame | None = None, mode: str = "strict",
           touch_atr_source: str = "htf", touch_semantics: str = "current",
-          htf_stub: dict | None = None) -> dict:
+          htf_stub: dict | None = None, risk_usd: float | None = None) -> dict:
     """Run the L0-L5 checks and return a JSON-serialisable report."""
     if mode not in {"strict", "shadow"}:
         raise ValueError("mode must be strict or shadow")
@@ -688,6 +745,10 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                    "failed": [g["id"] for g in req if g["status"] == "FAIL"],
                    "incomplete": [g["id"] for g in req if g["status"] == "N/A"],
                    "quality_flags": quality_flags}
+    grade = _setup_grade(by_id)
+    pos_size = None
+    if risk_usd is not None and plan and plan.get("entry") and plan.get("sl"):
+        pos_size = position_size(risk_usd, float(plan["entry"]), float(plan["sl"]))
     req = [g for g in good if g["necessary"]]
     plan_status = plan.get("plan_status", "conditional") if plan else None
     strict_decision, hard_bad = decide_from_good(good, plan)
@@ -723,5 +784,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         "blockers": blocker_details,
         "quality_flags": quality_flags,
         "htf_stub": htf_stub,
+        "grade": grade,
+        "position_size": pos_size,
         "rules": [r.as_dict() for r in rules],
     }
