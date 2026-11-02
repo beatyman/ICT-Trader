@@ -198,19 +198,23 @@ def premium_discount(price: float, range_high: float, range_low: float,
     return "equilibrium"
 
 
-def in_silver_bullet(dt, tz: str = "America/New_York") -> bool:
-    """ICT Silver Bullet window: 10:00-11:00 New York time."""
+def in_silver_bullet(dt, tz: str = "America/New_York", input_tz: str = "UTC") -> bool:
+    """ICT Silver Bullet window: 10:00-11:00 New York time.
+
+    ``input_tz`` is the timezone of the naive timestamps in ``df``
+    (UTC for crypto, America/New_York for US, Asia/Hong_Kong for HK...)."""
     try:
         from zoneinfo import ZoneInfo
         ts = pd.Timestamp(dt)
-        local = ts.tz_localize("UTC").tz_convert(ZoneInfo(tz)) if ts.tzinfo is None else ts.tz_convert(ZoneInfo(tz))
+        local = ts.tz_localize(input_tz).tz_convert(ZoneInfo(tz))
         h, m = local.hour, local.minute
         return (h == 10) or (h == 11 and m == 0)
     except Exception:
         return False
 
 
-def detect_intraday_session_levels(df: pd.DataFrame, tz: str = "America/New_York") -> dict:
+def detect_intraday_session_levels(df: pd.DataFrame, tz: str = "America/New_York",
+                                   input_tz: str = "UTC") -> dict:
     """Latest pre-market / London / Opening-Range high & low (session liquidity).
 
     Windows (New York time): pre-market 07:00-09:00, London 02:00-05:00,
@@ -232,7 +236,7 @@ def detect_intraday_session_levels(df: pd.DataFrame, tz: str = "America/New_York
         hi = lo = None
         cur_day = None
         for i, ts in enumerate(dt):
-            local = ts.tz_localize("UTC").tz_convert(ZoneInfo(tz)) if ts.tzinfo is None else ts.tz_convert(ZoneInfo(tz))
+            local = ts.tz_localize(input_tz).tz_convert(ZoneInfo(tz))
             inside = (local.hour, local.minute) >= (sh, sm) and (local.hour, local.minute) <= (eh, em)
             day = dates.iloc[i]
             if inside:
@@ -245,6 +249,15 @@ def detect_intraday_session_levels(df: pd.DataFrame, tz: str = "America/New_York
                     lo = min(lo, float(df["low"].iloc[i]))
         out[name] = {"high": hi, "low": lo}
     return out
+
+
+_MARKET_TZ = {
+    "crypto": "UTC",
+    "us": "America/New_York",
+    "hk": "Asia/Hong_Kong",
+    "cn": "Asia/Shanghai",
+    "other": "UTC",
+}
 
 
 def _setup_grade(by_id: dict) -> dict:
@@ -537,7 +550,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                          reason="no daily data" if not daily_ok else ""))
     pools = [k for k in res.key_levels if k.name in {"EQH", "EQL"}]
     rules.append(_status("L2-02", "L2", "EQH/EQL", bool(pools), value=len(pools)))
-    sess_liq = detect_intraday_session_levels(df)
+    sess_liq = detect_intraday_session_levels(df, input_tz=_MARKET_TZ.get(market, "UTC"))
     rules.append(_status("L2-03", "L2", "session range",
                          bool(sess_liq) and any(v.get("high") is not None for v in sess_liq.values()),
                          blocking=False, value=sess_liq,
@@ -694,7 +707,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     rules.append(_status("L4-06", "L4", "invalidation/overnight", None, blocking=False, reason="execution policy"))
 
     # ---- L5 ---------------------------------------------------------
-    sb_active = in_silver_bullet(last["date"])
+    sb_active = in_silver_bullet(last["date"], input_tz=_MARKET_TZ.get(market, "UTC"))
     rules.append(_status("L5-01", "L5", "Silver Bullet", sb_active, blocking=False,
                          value=str(last["date"]),
                          reason="outside 10:00-11:00 NY window" if not sb_active else ""))
