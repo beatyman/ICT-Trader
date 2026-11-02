@@ -14,6 +14,7 @@ from __future__ import annotations
 import pandas as pd
 
 from .concepts import ICTConfig, analyze
+from .rules import _htf_scores
 
 
 def _active_fvgs(res):
@@ -31,8 +32,36 @@ def _net_rr(entry, sl, tp, direction):
     return gross, net
 
 
-def detect_scalper(htf_df: pd.DataFrame, ltf_df: pd.DataFrame) -> dict | None:
-    """htf_df = 1H bars, ltf_df = 5m bars (both up to the last closed bar)."""
+def _dir_of(s: dict) -> str | None:
+    l = s.get("long", 0)
+    sh = s.get("short", 0)
+    if l >= 2 and sh < 2:
+        return "long"
+    if sh >= 2 and l < 2:
+        return "short"
+    return None
+
+
+def aligned_direction(ltf_df: pd.DataFrame, htf_df: pd.DataFrame) -> str | None:
+    """Day-trader filter: 15M and 1H must agree with the 4H direction.
+
+    Returns "long" / "short" when aligned, else None (sit on your hands).
+    """
+    d15 = _dir_of(_htf_scores(ltf_df, "15min"))     # 5m -> 15m
+    d1 = _dir_of(_htf_scores(htf_df, "1h"))        # 1h identity
+    d4 = _dir_of(_htf_scores(htf_df, "4h"))        # 1h -> 4h
+    if d4 is None or d1 != d4 or d15 != d4:
+        return None
+    return d4
+
+
+def detect_scalper(htf_df: pd.DataFrame, ltf_df: pd.DataFrame,
+                   require_alignment: bool = True) -> dict | None:
+    """htf_df = 1H bars, ltf_df = 5m bars (both up to the last closed bar).
+
+    If ``require_alignment``, the 15M/1H/4H day-trader filter must agree with
+    the FVG direction or the setup is rejected.
+    """
     cfg = ICTConfig(mode="historical", show_sessions=False, show_htf_cisd=False,
                     cisd_all=False, cisd_min_grade=0, show_sweeps=False)
     htf = analyze(htf_df, cfg)
@@ -71,6 +100,13 @@ def detect_scalper(htf_df: pd.DataFrame, ltf_df: pd.DataFrame) -> dict | None:
 
     # 4. entry on the 5m FVG CE; 5. 2R target
     direction = "long" if l.direction == "bull" else "short"
+
+    # day-trader filter: 15M + 1H must agree with 4H, and FVG direction matches
+    if require_alignment:
+        aligned = aligned_direction(ltf_df, htf_df)
+        if aligned is None or aligned != direction:
+            return None
+
     entry = float(l.ce) if getattr(l, "ce", None) else (float(l.bottom) + float(l.top)) / 2
     if direction == "long":
         sl = float(l.bottom)
