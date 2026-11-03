@@ -13,6 +13,7 @@ import pandas as pd
 
 from .concepts import ICTConfig, analyze
 from .indicators import add_indicators, resample_htf
+from .strategy import net_rr
 
 
 @dataclass
@@ -140,10 +141,9 @@ def _plan_net_rr(plan: dict | None) -> tuple[float | None, float | None]:
     reward = (tp - entry) if direction == "long" else (entry - tp)
     if risk <= 0 or reward <= 0:
         return None, None
-    cost = entry * 0.0007 + tp * 0.0007
-    gross = reward / risk
-    net = (reward - cost) / (risk + cost)
-    return gross, net
+    # one implementation for the whole package (see strategy.net_rr); the
+    # defaults are exactly the old hardcoded 7 bps per leg
+    return net_rr(entry, sl, tp, direction)
 
 
 def position_size(risk_usd: float, entry: float, sl: float,

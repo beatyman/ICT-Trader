@@ -11,6 +11,7 @@ from datetime import time as dtime
 from typing import Iterable, Literal
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 Market = Literal["cn", "hk", "crypto", "other"]
@@ -112,6 +113,60 @@ def dealing_range(swings: Iterable, idx: int, lookback_bars: int = 120) -> Deali
     if high <= low:
         return None
     return DealingRange(high, low, (high + low) / 2, int(h.index), int(l.index))
+
+
+class SwingIndex:
+    """O(1)-per-bar view over one zigzag swing list.
+
+    ``dealing_range`` and ``structure_bias`` filter the whole swing list on
+    every call, which is O(swings) inside a per-signal loop (measured: 3.6 s of
+    a 12.8 s ``build_setup`` on 20k BTC 15m bars).  The zigzag list is ordered
+    by bar index and ``confirmed_at`` grows with it, so "the last N confirmed
+    swings at bar t" is a binary search instead of a scan.  Results are
+    identical to the functions above - ``tests/test_context.py`` checks every
+    bar against them.
+    """
+
+    def __init__(self, swings: Iterable) -> None:
+        swings = list(swings)
+        for key, kind in (("h", "H"), ("l", "L")):
+            sub = [s for s in swings if getattr(s, "kind", "") == kind]
+            setattr(self, f"{key}_index", np.array([int(s.index) for s in sub], dtype=np.int64))
+            setattr(self, f"{key}_conf", np.array([int(getattr(s, "confirmed_at", s.index))
+                                                  for s in sub], dtype=np.int64))
+            setattr(self, f"{key}_price", np.array([float(s.price) for s in sub], dtype=float))
+
+    def _n(self, key: str, t: int) -> int:
+        return int(np.searchsorted(getattr(self, f"{key}_conf"), int(t), side="right"))
+
+    def structure_bias(self, t: int, lookback: int = 2) -> str:
+        nh, nl = self._n("h", t), self._n("l", t)
+        if nh >= lookback and nl >= lookback:
+            hp, lp = self.h_price, self.l_price
+            hh = hp[nh - 1] > hp[nh - lookback]
+            hl = lp[nl - 1] > lp[nl - lookback]
+            lh = hp[nh - 1] < hp[nh - lookback]
+            ll = lp[nl - 1] < lp[nl - lookback]
+            if hh and hl:
+                return "bull"
+            if lh and ll:
+                return "bear"
+        return "flat"
+
+    def dealing_range(self, t: int, lookback_bars: int = 120) -> DealingRange | None:
+        nh, nl = self._n("h", t), self._n("l", t)
+        if nh == 0 or nl == 0:
+            return None
+        hi, li = nh - 1, nl - 1
+        if (int(t) - int(self.h_conf[hi]) > lookback_bars
+                or int(t) - int(self.l_conf[li]) > lookback_bars):
+            return None
+        high = max(float(self.h_price[hi]), float(self.l_price[li]))
+        low = min(float(self.h_price[hi]), float(self.l_price[li]))
+        if high <= low:
+            return None
+        return DealingRange(high, low, (high + low) / 2,
+                            int(self.h_index[hi]), int(self.l_index[li]))
 
 
 def ote_from_signal(df: pd.DataFrame, start: int, end: int, entry: float, direction: str) -> float | None:

@@ -21,6 +21,7 @@ crypto Asian session use ~16-32 15m bars.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -67,17 +68,28 @@ def _atr_val(df: pd.DataFrame) -> float:
     return float(v) if pd.notna(v) else 0.0
 
 
-def detect_po3(
+def _detect_core(
     df: pd.DataFrame,
     accumulate_bars: int = 20,
     body_ratio_threshold: float = 0.6,
     mss_window: int = 20,
     atr: float | None = None,
+    min_reclaim_ratio: float = 0.0,
+    max_manipulation_bars: int = 0,
+    mss_events: Iterable[tuple[int, str]] | None = None,
 ) -> tuple[PO3State, list[str]]:
     """Detect the PO3 cycle over ``df``.
 
     Returns ``(state, phases)`` where ``phases`` is a per-bar label list for
     plotting (ACCUMULATING / MANIPULATED / DISTRIBUTING / INVALID).
+
+    ``min_reclaim_ratio`` filters noise spikes: a manipulation bar must close
+    back inside the range by at least this fraction of its own high-low range
+    (BTC 15m A/B: reclaim < 50% wins 28.7% at 2R, reclaim >= 50% wins 33.8%).
+    ``max_manipulation_bars`` expires a MANIPULATED state that never
+    distributes (0 disables).  ``mss_events`` is an iterable of
+    ``(bar_index, direction)`` and enables the documented
+    DISTRIBUTING -> INVALID transition; without it the state expires by time.
     """
     n = len(df)
     high = df["high"].to_numpy(float)
@@ -99,12 +111,14 @@ def detect_po3(
     # ---- ACCUMULATING -> MANIPULATED ---------------------------------
     i = acc_end
     while i < n and st.state == ACCUMULATING:
-        if low[i] < range_low and close[i] > range_low:
+        rng = high[i] - low[i]
+        reclaim = ((close[i] - low[i]) / rng) if rng > 0 else 0.0
+        if low[i] < range_low and close[i] > range_low and reclaim >= min_reclaim_ratio:
             st.state = MANIPULATED
             st.sweep_direction = "bull"
             st.manipulation_extreme = float(np.min(low[i:i + 1]))
             st.sweep_bar = i
-        elif high[i] > range_high and close[i] < range_high:
+        elif high[i] > range_high and close[i] < range_high and (1.0 - reclaim) >= min_reclaim_ratio:
             st.state = MANIPULATED
             st.sweep_direction = "bear"
             st.manipulation_extreme = float(np.max(high[i:i + 1]))
@@ -118,6 +132,14 @@ def detect_po3(
     # ---- MANIPULATED -> INVALID (breakaway) or DISTRIBUTING -----------
     while i < n and st.state == MANIPULATED:
         phases[i] = MANIPULATED
+        if max_manipulation_bars > 0 and (i - m) > max_manipulation_bars:
+            # A sweep that never distributes is not a PO3: without this the
+            # state can sit in MANIPULATED for the rest of the session and any
+            # later CISD is read as a distribution retest.
+            st.state = INVALID
+            st.invalid_reason = f"manipulation expired after {max_manipulation_bars} bars"
+            phases[i:] = [INVALID] * (n - i)
+            return st, phases
         if st.sweep_direction == "bull":
             # bull PO3: swept below, real move is up.  A close that keeps
             # running down through the manipulation extreme = real breakdown.
@@ -155,6 +177,60 @@ def detect_po3(
     # only record the window for the injector.
     st._mss_deadline = d + mss_window  # type: ignore[attr-defined]
     phases[d:] = [DISTRIBUTING] * (n - d)
+    # DISTRIBUTING -> INVALID when the promised MSS never arrives.  This
+    # transition is in the module docstring; without it the state stayed
+    # DISTRIBUTING for ever (BTC 15m: 103 of 114 distributing true days ended
+    # past the MSS window).
+    expected = "bull" if st.sweep_direction == "bull" else "bear"
+    deadline = d + mss_window
+    if n - 1 > deadline:
+        if mss_events is not None:
+            confirmed = any(
+                direction == expected and d <= int(idx) <= deadline
+                for idx, direction in mss_events
+            )
+            expired = not confirmed
+            st.invalid_reason = None if confirmed else (
+                f"no same-direction MSS within {mss_window} bars of distribution")
+        else:
+            expired = True
+            st.invalid_reason = (
+                f"distribution expired after {mss_window} bars (no MSS feed supplied)")
+        if expired:
+            st.state = INVALID
+            phases[deadline + 1:] = [INVALID] * (n - deadline - 1)
+    return st, phases
+
+
+def detect_po3(
+    df: pd.DataFrame,
+    accumulate_bars: int = 20,
+    body_ratio_threshold: float = 0.6,
+    mss_window: int = 20,
+    atr: float | None = None,
+    min_reclaim_ratio: float = 0.0,
+    max_manipulation_bars: int = 0,
+    mss_events: Iterable[tuple[int, str]] | None = None,
+    index_offset: int = 0,
+) -> tuple[PO3State, list[str]]:
+    """Detect the PO3 cycle over ``df``; see ``_detect_core`` for the rules.
+
+    ``index_offset`` shifts ``sweep_bar`` / ``distribution_bar`` into the
+    coordinates of the parent frame, so a state detected on a session (true
+    day) slice can be matched against a result built on the full history.
+    ``phases`` stays aligned to ``df`` itself.
+    """
+    st, phases = _detect_core(
+        df, accumulate_bars=accumulate_bars,
+        body_ratio_threshold=body_ratio_threshold, mss_window=mss_window, atr=atr,
+        min_reclaim_ratio=min_reclaim_ratio,
+        max_manipulation_bars=max_manipulation_bars, mss_events=mss_events,
+    )
+    if index_offset:
+        for attr in ("sweep_bar", "distribution_bar"):
+            value = getattr(st, attr, None)
+            if value is not None:
+                setattr(st, attr, int(value) + int(index_offset))
     return st, phases
 
 

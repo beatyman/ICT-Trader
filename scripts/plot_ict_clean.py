@@ -223,7 +223,8 @@ def render(args) -> Path:
     result = analyze(
         analysis,
         ICTConfig(mode="historical", show_sessions=False, show_htf_cisd=False,
-                  cisd_all=True, cisd_min_grade=0, sweep_reclaim_bars=args.sweep_reclaim_bars),
+                  cisd_all=True, cisd_min_grade=0, sweep_reclaim_bars=args.sweep_reclaim_bars,
+                  fvg_min_width_atr=args.fvg_min_width_atr),
     )
     plan = _resolve_plan(args, view, result)
 
@@ -366,8 +367,25 @@ def render(args) -> Path:
     # ---- PO3 (formal state machine) --------------------------------
     if args.show_po3:
         from ict_trader.po3 import detect_po3, ACCUMULATING, MANIPULATED, DISTRIBUTING, INVALID
-        po3, phases = detect_po3(view, accumulate_bars=args.po3_accumulate_bars,
-                                 body_ratio_threshold=args.po3_body_ratio)
+        # PO3 runs on the true UTC day that contains the last bar, not on the
+        # arbitrary plot window: the accumulation range must be the 00:00 UTC
+        # open, otherwise the same chart shows a different PO3 state just by
+        # changing --last-bars.
+        day_start = pd.Timestamp(view["date"].iloc[-1]).floor("D")
+        day_view = view[pd.to_datetime(view["date"]) >= day_start].reset_index(drop=True)
+        mss = [(int(e.index), e.direction) for e in result.events]
+        po3_src = day_view if len(day_view) >= args.po3_accumulate_bars + 2 else view
+        # bars are matched against `analysis` (the frame res.events indexes)
+        offset = len(analysis) - len(po3_src)
+        po3, phases_day = detect_po3(po3_src, accumulate_bars=args.po3_accumulate_bars,
+                                     body_ratio_threshold=args.po3_body_ratio,
+                                     min_reclaim_ratio=args.po3_min_reclaim,
+                                     mss_events=mss, index_offset=offset)
+        if po3_src is view:
+            phases = phases_day
+        else:
+            # bars before the true-day slice stay ACCUMULATING in the picture
+            phases = [ACCUMULATING] * (n - len(phases_day)) + phases_day
         phase_color = {
             ACCUMULATING: "#90A4AE",
             MANIPULATED: "#F9A825",
@@ -403,10 +421,19 @@ def render(args) -> Path:
         from ict_trader.scenarios import evaluate_scenarios, SCENARIO_COLORS, SCENARIO_NAMES
         atr_s = float((analysis["high"] - analysis["low"]).rolling(14, min_periods=1).mean().iloc[-1])
         a_s = audit(analysis, daily=None, market=args.market)
-        po3_s, _ = detect_po3(view, accumulate_bars=args.po3_accumulate_bars,
-                              body_ratio_threshold=args.po3_body_ratio)
-        sid, plan_s = evaluate_scenarios(a_s, po3_s, result, atr_s, price)
-        if plan_s is not None:
+        day_start_s = pd.Timestamp(view["date"].iloc[-1]).floor("D")
+        day_view_s = view[pd.to_datetime(view["date"]) >= day_start_s].reset_index(drop=True)
+        po3_src_s = day_view_s if len(day_view_s) >= args.po3_accumulate_bars + 2 else view
+        mss_s = [(int(e.index), e.direction) for e in result.events]
+        po3_s, _ = detect_po3(po3_src_s, accumulate_bars=args.po3_accumulate_bars,
+                              body_ratio_threshold=args.po3_body_ratio,
+                              min_reclaim_ratio=args.po3_min_reclaim,
+                              max_manipulation_bars=args.po3_max_manipulation_bars,
+                              mss_events=mss_s, index_offset=len(analysis) - len(po3_src_s))
+        sid, plan_s = evaluate_scenarios(a_s, po3_s, result, atr_s, price,
+                                         at=len(analysis) - 1,
+                                         max_sweep_age=args.max_sweep_age)
+        if plan_s is not None and not str(plan_s.status).startswith("REJECTED"):
             col = SCENARIO_COLORS[sid]
             for label, val in [("Entry", plan_s.entry), ("SL", plan_s.sl), ("TP", plan_s.tp)]:
                 ax.axhline(val, color=col, lw=1.4, ls=(0, (4, 2)) if label == "Entry" else (0, (1, 2)), zorder=2)
@@ -601,7 +628,10 @@ def render(args) -> Path:
     low = min([float(view["low"].min())] + extra)
     high = max([float(view["high"].max())] + extra)
     pad = max((high - low) * .06, 1e-6)
-    ax.set_xlim(-1, n + 22)
+    # The label gutter is 20% of the *total* axis width, not a fixed bar count:
+    # with a 220-bar view a fixed 22 bars leaves only 10%, so right-side labels
+    # and leader lines run off the canvas.  n/4 gives gutter/(n+gutter) = 20%.
+    ax.set_xlim(-1, n + max(int(n * 0.25), 12))
     ax.set_ylim(low - pad, high + pad)
     if pending_labels:
         atr_val = float((view["high"] - view["low"]).rolling(14, min_periods=1).mean().iloc[-1]) or 1.0
@@ -677,6 +707,15 @@ def main() -> None:
                     help="bars defining the PO3 accumulation range")
     ap.add_argument("--po3-body-ratio", type=float, default=0.6,
                     help="displacement body-ratio threshold for PO3 distribution")
+    ap.add_argument("--po3-min-reclaim", type=float, default=0.0,
+                    help="manipulation bar must close back inside the range by this "
+                         "fraction of its own range (BTC 15m review: 0.5)")
+    ap.add_argument("--po3-max-manipulation-bars", type=int, default=0,
+                    help="expire MANIPULATED after N bars without distribution (0=off)")
+    ap.add_argument("--max-sweep-age", type=int, default=15,
+                    help="scenario plans ignore sweeps older than this many bars")
+    ap.add_argument("--fvg-min-width-atr", type=float, default=0.0,
+                    help="drop FVGs narrower than this many ATR (BTC 15m review: 0.1)")
     ap.add_argument("--scenarios", action=argparse.BooleanOptionalAction, default=False,
                     help="evaluate the 4 core scenarios (A/B/C/D) and draw the winner")
     ap.add_argument("--market", default="crypto", choices=["crypto", "us", "hk", "cn", "other"],

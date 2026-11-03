@@ -29,20 +29,44 @@ import numpy as np
 import pandas as pd
 
 from .concepts import ICTConfig, ICTResult, analyze, fetch_futu, load_csv
+from .stats import mean_interval, n_for_margin, wilson_interval
 
 
 def net_rr(entry: float, stop: float, target: float, direction: str,
-           commission_bps: float = 5.0, slippage_bps: float = 2.0,
+           commission_bps: float = 10.0, slippage_bps: float = 2.0,
            sell_tax_bps: float = 0.0) -> tuple[float, float]:
-    """Return (gross_RR, net_RR) after both-side commission/slippage and sell tax."""
+    """Return (gross_RR, net_RR); the one implementation in the package.
+
+    Formula (``docs/GOOD_SETUP_CRITERIA.md`` GS-08)::
+
+        net = (reward - cost) / (risk + cost)
+        cost = entry * per_leg + target * (per_leg + sell_tax)
+        per_leg = commission_bps / 2 + slippage_bps
+
+    * ``commission_bps`` is ONE round trip, so each leg pays half
+      (Binance futures taker 0.05%/side -> pass 10 -> 5 bps per leg);
+    * ``slippage_bps`` is per side, so each leg pays all of it;
+    * the cost is added to the risk denominator as well, because a stop-out
+      costs ``risk + cost``, not ``risk``.
+
+    Before this was unified there were four copies in the tree with two
+    different formulas: ``rules._plan_net_rr`` / ``scenarios._net_rr`` /
+    ``scalper._net_rr`` used the documented ``(reward-cost)/(risk+cost)`` with a
+    hardcoded 7 bps per leg, while ``strategy.net_rr`` divided by ``risk`` only
+    and charged ``commission_bps`` on both legs.  The effect was user-visible:
+    the plan card printed net RR 1.60 while the GS-08 gate on the same plan
+    said 1.09.
+    """
     risk = abs(float(entry) - float(stop))
+    reward = abs(float(target) - float(entry))
+    if direction not in {"long", "short", "bull", "bear"}:
+        raise ValueError(f"unknown direction {direction!r}")
     if risk <= 0:
         return 0.0, 0.0
-    reward = abs(float(target) - float(entry))
-    entry_cost = abs(float(entry)) * (float(commission_bps) + float(slippage_bps)) / 10_000
-    exit_cost = abs(float(target)) * (float(commission_bps) + float(slippage_bps)
-                                      + float(sell_tax_bps)) / 10_000
-    return reward / risk, (reward - entry_cost - exit_cost) / risk
+    per_leg = float(commission_bps) / 2.0 + float(slippage_bps)
+    cost = abs(float(entry)) * per_leg / 10_000 + \
+        abs(float(target)) * (per_leg + float(sell_tax_bps)) / 10_000
+    return reward / risk, (reward - cost) / (risk + cost)
 
 
 @dataclass
@@ -57,6 +81,9 @@ class StrategyConfig:
     sell_tax_bps: float = 0.0       # A-share stamp duty on sell
     allow_long: bool = True
     allow_short: bool = True
+    # Charged as (entry+exit)*commission_bps/2, i.e. ONE round-trip of
+    # commission_bps, so a venue that charges X bps PER SIDE must be passed
+    # 2*X here (Binance futures taker 5 bps/side -> commission_bps=10).
     commission_bps: float = 5.0
     slippage_bps: float = 2.0
     entry_delay: int = 1            # bars after confirmation
@@ -70,6 +97,14 @@ class StrategyConfig:
     retest_tolerance_atr: float = 0.0  # allow a wick this close to the key
     trail_activate_r: float = 0.0     # activate ATR trail after this favourable R
     trail_atr_mult: float = 0.0       # trail distance in entry-bar ATR
+    # Partial scale-out.  Take ``t1_fraction`` of the position off at
+    # ``t1_at_r`` R, optionally pull the runner's stop to break-even.  This is
+    # the only mechanism that can lift the win rate without giving up the RR of
+    # the runner: the first leg is a booked win, the second leg keeps the 2.5R
+    # target alive.  ``r_multiple`` becomes the size-weighted blend of both legs.
+    t1_at_r: float = 0.0
+    t1_fraction: float = 0.5
+    t1_move_be: bool = True
     max_daily_loss_r: float = 0.0     # stop new entries after this daily R loss (0=off)
 
 
@@ -96,6 +131,8 @@ class Trade:
     time_to_mfe: int = 0
     be_triggered: bool = False
     t1_locked: bool = False
+    t1_filled: bool = False          # partial scale-out leg was taken
+    t1_price: float | None = None
     sell_tax: float = 0.0
     planned_entry: float | None = None
     planned_sl: float | None = None
@@ -331,6 +368,9 @@ def simulate_cisd(
         be_armed = False
         trail_active = False
         best_price = entry
+        t1_price: float | None = None
+        t1_filled = False
+        t1_at = (entry + cfg.t1_at_r * risk) if c.direction == "bull" else (entry - cfg.t1_at_r * risk)
         atr_entry = float(atr[max(0, entry_idx - 1)]) if len(atr) else 0.0
         if not np.isfinite(atr_entry) or atr_entry <= 0:
             atr_entry = risk
@@ -388,6 +428,16 @@ def simulate_cisd(
                 if hit_tp:
                     exit_price, exit_idx, reason = tp, k, "tp"
                     break
+                # partial take-profit on the first leg; the runner keeps the
+                # original target and (optionally) a break-even stop.
+                if cfg.t1_at_r > 0 and not t1_filled:
+                    reached = (high[k] >= t1_at) if c.direction == "bull" else (low[k] <= t1_at)
+                    if reached:
+                        t1_price, t1_filled = t1_at, True
+                        if cfg.t1_move_be and (sl_current == c.sl or
+                                               (t1_at > sl_current if c.direction == "bull"
+                                                else t1_at < sl_current)):
+                            sl_current = entry
                 if cfg.breakeven_at_r > 0 and not be_armed:
                     moved = (high[k] - entry) if c.direction == "bull" else (entry - low[k])
                     if moved >= cfg.breakeven_at_r * risk:
@@ -423,10 +473,21 @@ def simulate_cisd(
         assert exit_price is not None and exit_idx is not None
         busy_until = exit_idx
         # exit cost: commission + A-share sell stamp duty
+        def leg_r(px: float) -> float:
+            g = (px - entry) if c.direction == "bull" else (entry - px)
+            t = px * cfg.sell_tax_bps / 10000.0
+            return (g - (entry + px) * (cfg.commission_bps / 10000.0) / 2 - t) / risk
+
         gross = (exit_price - entry) if c.direction == "bull" else (entry - exit_price)
         tax = exit_price * cfg.sell_tax_bps / 10000.0
         net = gross - (entry + exit_price) * (cfg.commission_bps / 10000.0) / 2 - tax
         r = net / risk
+        if t1_filled and t1_price is not None:
+            # blend the two legs by size; both legs pay their own exit cost
+            frac = min(max(cfg.t1_fraction, 0.0), 1.0)
+            r = frac * leg_r(t1_price) + (1.0 - frac) * leg_r(exit_price)
+            if reason in {"sl", "trail"} and exit_price == entry:
+                reason = "t1_be"
         equity *= (1 + cfg.risk_pct * r)
         day_r[dates.iloc[exit_idx].date()] = day_r.get(dates.iloc[exit_idx].date(), 0.0) + r
         entry_dev_r = ((entry - c.level) if c.direction == "bull" else (c.level - entry)) / risk
@@ -459,6 +520,8 @@ def simulate_cisd(
             time_to_mfe=int(mfe_idx - entry_idx),
             be_triggered=bool(be_armed),
             t1_locked=bool(t1_locked),
+            t1_filled=bool(t1_filled),
+            t1_price=float(t1_price) if t1_price is not None else None,
             sell_tax=float(tax),
             planned_entry=float(c.level),
             planned_sl=float(c.sl),
@@ -514,7 +577,12 @@ def _metrics(trades: list[Trade], equity: pd.Series) -> dict:
     return {
         "trades": len(trades),
         "win_rate": float((r > 0).mean()),
+        # Small samples: a 50% win rate on 23 trades is indistinguishable from
+        # 30%.  The interval travels with the point estimate so it cannot be
+        # quoted alone.
+        "win_rate_ci95": [round(x, 4) for x in wilson_interval(int((r > 0).sum()), len(r))],
         "avg_r": float(r.mean()),
+        "avg_r_ci95": [round(x, 4) for x in mean_interval([float(x) for x in r])],
         "total_r": float(r.sum()),
         "profit_factor": float(wins.sum() / abs(losses.sum())) if len(losses) and losses.sum() != 0 else float("inf"),
         "max_dd": float(dd),
@@ -523,6 +591,7 @@ def _metrics(trades: list[Trade], equity: pd.Series) -> dict:
         "sharpe": float(sharpe),
         "avg_bars": float(np.mean([t.bars for t in trades])),
         "sample_class": _sample_class(len(trades)),
+        "n_for_5pct_win_rate": n_for_margin(0.5, 0.05),
     }
 
 
@@ -650,4 +719,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

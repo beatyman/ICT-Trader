@@ -154,7 +154,15 @@ Every filter is explicit and can be disabled to run an ablation:
 --require-first-fvg
 --require-fresh-fvg
 --max-inducements
---quality-profile standard|high_value
+--quality-profile standard|high_value|high_rr|btc_15m   (btc_15m has no proven edge,
+                                                        see docs/BTC_15M_OPTIMIZATION.md)
+--allow-short                       (bearish CISD setups; long-only by default)
+--min-sweep-strength / --min-stop-atr
+--fvg-min-width-atr                 (drop FVGs narrower than N ATR)
+--t1-at-r / --t1-fraction / --t1-no-be   (partial scale-out; RR of the trade
+                                   becomes the size-weighted blend of both legs)
+--commission-bps                   charged once per ROUND TRIP: pass 2x the
+                                   per-side rate (5bps/side -> 10)
 --stack 1d_4h_15m|1d_1h_15m|1d_15m|4h_15m|4h_1h_15m
 --origin-mode strict_sweep|pine
 --origin-filter any|both|sweep|fvg

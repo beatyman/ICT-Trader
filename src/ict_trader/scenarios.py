@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 
+from .strategy import net_rr
+
 SCENARIO_NAMES = {
     "A": "PO3 Distribution Retest",
     "B": "Key POI Reversal",
@@ -45,10 +47,7 @@ def _net_rr(entry: float, sl: float, tp: float, direction: str) -> tuple[float |
     reward = (tp - entry) if direction == "long" else (entry - tp)
     if risk <= 0 or reward <= 0:
         return None, None
-    cost = entry * 0.0007 + tp * 0.0007
-    gross = reward / risk
-    net = (reward - cost) / (risk + cost)
-    return gross, net
+    return net_rr(entry, sl, tp, direction)
 
 
 def _rule(audit: dict, rid: str) -> dict | None:
@@ -96,14 +95,29 @@ def _plan_a(po3, atr: float, min_rr: float) -> dict | None:
 # --------------------------------------------------------------------------
 # Scenario B: Key POI Reversal (HTF FVG/OB + sweep + MSS)
 # --------------------------------------------------------------------------
-def _plan_b(audit: dict, res, atr: float, price: float, min_rr: float) -> dict | None:
-    # needs: L2-08 PDA touch + L2-04 sweep + L1-04 valid MSS
-    if not (_passed(audit, "L2-08") and _passed(audit, "L2-04") and _passed(audit, "L1-04")):
-        return None
+def _recent_sweep(res, max_age: int | None, at: int | None):
+    """Latest sweep, optionally bounded to the last ``max_age`` bars.
+
+    Without the bound a sweep from weeks ago is used as the "current" trigger,
+    so the card shows a plan for a level the market left long ago.
+    """
     sweeps = list(res.sweeps)
     if not sweeps:
         return None
     s = sweeps[-1]
+    if max_age is not None and at is not None and (at - int(s.reclaim_bar)) > max_age:
+        return None
+    return s
+
+
+def _plan_b(audit: dict, res, atr: float, price: float, min_rr: float,
+            max_sweep_age: int | None = None, at: int | None = None) -> dict | None:
+    # needs: L2-08 PDA touch + L2-04 sweep + L1-04 valid MSS
+    if not (_passed(audit, "L2-08") and _passed(audit, "L2-04") and _passed(audit, "L1-04")):
+        return None
+    s = _recent_sweep(res, max_sweep_age, at)
+    if s is None:
+        return None
     # MSS direction follows the sweep (bull sweep -> long reversal, bear -> short)
     direction = "long" if s.direction == "bull" else "short"
     # entry: retest of the POI edge (use the swept level as the retest zone)
@@ -111,7 +125,7 @@ def _plan_b(audit: dict, res, atr: float, price: float, min_rr: float) -> dict |
     # SL: sweep extreme +/- 0.1 ATR
     sl = (float(s.sweep_price) - 0.1 * atr) if direction == "long" else (float(s.sweep_price) + 0.1 * atr)
     # TP: nearest opposite-side unswept pool (DOL)
-    tp = _dol(res, entry, direction)
+    tp = _dol(res, entry, direction, at)
     if tp is None:
         return None
     gross, net = _net_rr(entry, sl, tp, direction)
@@ -130,7 +144,8 @@ def _plan_b(audit: dict, res, atr: float, price: float, min_rr: float) -> dict |
 # --------------------------------------------------------------------------
 # Scenario C: Consecutive FVG Breakout (strong trend, no pullback)
 # --------------------------------------------------------------------------
-def _plan_c(audit: dict, res, atr: float, price: float, min_rr: float) -> dict | None:
+def _plan_c(audit: dict, res, atr: float, price: float, min_rr: float,
+            max_sweep_age: int | None = None, at: int | None = None) -> dict | None:
     # needs: L3-01 FVG present + HTF strong (L5-03 PASS)
     if not _passed(audit, "L3-01"):
         return None
@@ -156,7 +171,7 @@ def _plan_c(audit: dict, res, atr: float, price: float, min_rr: float) -> dict |
             return None
         entry = (float(f.bottom) + float(f.top)) / 2
         sl = float(f.top)
-    tp = _dol(res, entry, direction)
+    tp = _dol(res, entry, direction, at)
     if tp is None:
         return None
     gross, net = _net_rr(entry, sl, tp, direction)
@@ -176,22 +191,22 @@ def _plan_c(audit: dict, res, atr: float, price: float, min_rr: float) -> dict |
 # --------------------------------------------------------------------------
 # Scenario D: Range Boundary Fakeout (lowest priority)
 # --------------------------------------------------------------------------
-def _plan_d(audit: dict, res, atr: float, price: float, min_rr: float) -> dict | None:
+def _plan_d(audit: dict, res, atr: float, price: float, min_rr: float,
+            max_sweep_age: int | None = None, at: int | None = None) -> dict | None:
     # needs: no strong trend + a recent sweep with NO MSS
     if _passed(audit, "L1-04"):
         return None  # a valid MSS means it is not a fakeout
     l5 = _rule(audit, "L5-03")
     if l5 and l5.get("status") == "PASS":
         return None  # strong trend -> not a range fakeout
-    sweeps = list(res.sweeps)
-    if not sweeps:
+    s = _recent_sweep(res, max_sweep_age, at)
+    if s is None:
         return None
-    s = sweeps[-1]
     # fade the fakeout: bull sweep (fake breakdown) -> long, bear -> short
     direction = "long" if s.direction == "bull" else "short"
     entry = float(s.level)
     sl = (float(s.sweep_price) - 0.1 * atr) if direction == "long" else (float(s.sweep_price) + 0.1 * atr)
-    tp = _dol(res, entry, direction)
+    tp = _dol(res, entry, direction, at)
     if tp is None:
         return None
     gross, net = _net_rr(entry, sl, tp, direction)
@@ -207,10 +222,16 @@ def _plan_d(audit: dict, res, atr: float, price: float, min_rr: float) -> dict |
     }
 
 
-def _dol(res, price: float, direction: str) -> float | None:
-    """Nearest unswept pool on the target side."""
+def _dol(res, price: float, direction: str, at: int | None = None) -> float | None:
+    """Nearest unswept pool on the target side.
+
+    ``at`` restricts the pool to levels that were already known at that bar:
+    a level confirmed after the decision bar is future data and cannot be a
+    draw on liquidity.
+    """
     levels = [k for k in res.key_levels
-              if k.sweep_bar is None and k.broken_at is None]
+              if k.sweep_bar is None and k.broken_at is None
+              and (at is None or getattr(k, "known_at", 0) <= at)]
     side = [k for k in levels if (k.price > price if direction == "long" else k.price < price)]
     if not side:
         return None
@@ -221,21 +242,66 @@ def _dol(res, price: float, direction: str) -> float | None:
 # Evaluator
 # --------------------------------------------------------------------------
 def evaluate_scenarios(audit: dict, po3, res, atr: float, price: float,
-                       min_net_rr: float = 2.5) -> tuple[str | None, ScenarioPlan | None]:
-    """Return (scenario_id, plan) honouring priority A > B > C > D."""
+                       min_net_rr: float = 2.5,
+                       max_sweep_age: int | None = 15,
+                       at: int | None = None,
+                       po3_veto: bool = True,
+                       po3_veto_scenarios: tuple[str, ...] = ("A", "B"),
+                       min_risk_atr: float = 0.5) -> tuple[str | None, ScenarioPlan | None]:
+    """Return (scenario_id, plan) honouring priority A > B > C > D.
+
+    Only a *live* plan can win: a candidate whose status starts with
+    ``REJECTED`` is demoted behind every live candidate instead of suppressing
+    it (BTC 15m: 141 of 220 sampled windows published a rejected plan while
+    suppressing a valid lower-priority one).  When ``po3_veto`` is set the
+    PO3 INVALID state blocks every scenario, matching ``inject_po3_to_plan``.
+    ``at`` is the decision bar index inside ``res.bars``; it bounds the sweep
+    age and the DOL levels to what was known at that bar.
+
+    Scenario A's ``cisd_confirmed`` flag is derived here from ``res.cisds``
+    (nothing in the engine set it), and a CISD against the distribution
+    cancels A.  ``min_risk_atr`` rejects a plan whose stop is too tight to be
+    executable (``entry_invalid``).
+    """
+    # The PO3 veto belongs to the PO3-derived scenarios only.  C (trend
+    # continuation) and D (range fakeout) describe the regime where there is no
+    # clean AMD cycle at all, so vetoing them on INVALID would silence the very
+    # setup they exist for (28 of 29 sampled BTC windows were D on an INVALID
+    # PO3 day).
+    po3_invalid = (po3 is not None and getattr(po3, "state", None) == "INVALID")
+    if po3 is not None and getattr(po3, "state", None) == "DISTRIBUTING":
+        expected = "bull" if po3.sweep_direction == "bull" else "bear"
+        end = at if at is not None else len(res.bars) - 1
+        d = int(po3.distribution_bar or 0)
+        later = [c for c in res.cisds if d < int(c.end) <= end]
+        if any(c.direction == expected for c in later):
+            po3.cisd_confirmed = True
+        elif later:
+            # A CISD against the distribution means the retest failed: cancel
+            # the plan instead of waiting to be stopped out inside the range.
+            return None, None
     candidates: list[dict] = []
     for fn in (_plan_a, _plan_b, _plan_c, _plan_d):
         try:
             if fn is _plan_a:
                 p = fn(po3, atr, min_net_rr)
             else:
-                p = fn(audit, res, atr, price, min_net_rr)
+                p = fn(audit, res, atr, price, min_net_rr,
+                       max_sweep_age=max_sweep_age, at=at)
         except Exception:
             p = None
         if p:
+            if po3_veto and po3_invalid and p.get("scenario") in po3_veto_scenarios:
+                continue
+            risk = abs(float(p["entry"]) - float(p["sl"]))
+            if min_risk_atr > 0 and atr > 0 and risk < min_risk_atr * atr:
+                p["status"] = "REJECTED_ENTRY_INVALID"
+                p["reason"] = (f"stop {risk / atr:.2f} ATR < {min_risk_atr:.2f} ATR floor "
+                               f"({p.get('reason', '')})")
             candidates.append(p)
     if not candidates:
         return None, None
-    winner = candidates[0]
-    winner["suppressed"] = [p["scenario"] for p in candidates[1:]]
+    live = [p for p in candidates if not str(p.get("status", "")).startswith("REJECTED")]
+    winner = live[0] if live else candidates[0]
+    winner["suppressed"] = [p["scenario"] for p in candidates if p is not winner]
     return winner["scenario"], ScenarioPlan(**{k: v for k, v in winner.items() if k in ScenarioPlan.__dataclass_fields__})

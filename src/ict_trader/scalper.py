@@ -15,6 +15,7 @@ import pandas as pd
 
 from .concepts import ICTConfig, detect_fvgs
 from .rules import _htf_scores
+from .strategy import net_rr
 
 
 def _active_fvgs(fvgs):
@@ -22,14 +23,12 @@ def _active_fvgs(fvgs):
 
 
 def _net_rr(entry, sl, tp, direction):
+    """Kept as a thin alias so scripts importing it keep working."""
     risk = (entry - sl) if direction == "long" else (sl - entry)
     reward = (tp - entry) if direction == "long" else (entry - tp)
     if risk <= 0:
         return None, None
-    cost = entry * 0.0007 + tp * 0.0007
-    gross = reward / risk
-    net = (reward - cost) / (risk + cost)
-    return gross, net
+    return net_rr(entry, sl, tp, direction)
 
 
 def _dir_of(s: dict) -> str | None:

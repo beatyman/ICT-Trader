@@ -20,20 +20,21 @@ import argparse
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
 
 from .cisd import CISD
 from .concepts import ICTConfig, analyze, detect_fvgs, load_csv
-from .context import (candle2_closure, candle3_closure, dealing_range, in_session,
-                      ote_from_signal, structure_bias)
+from .context import (SwingIndex, candle2_closure, candle3_closure, dealing_range,
+                      in_session, ote_from_signal, structure_bias)
 from .pd_arrays import count_path_liquidity, near_arrays
 from .sweeps import nearest_key_target
 from .strategy import StrategyConfig, simulate_cisd
 from .indicators import add_indicators, align_htf, ichimoku, macd, resample_cn_4h, resample_htf
-from .quality import measure_displacement, score_setup
-from .regime import market_regime
+from .quality import Displacement, measure_displacement, score_setup
+from .regime import Regime, market_regime
 
 
 @dataclass
@@ -58,6 +59,8 @@ class SetupConfig:
     origin_filter: str = "any"  # any | both | sweep | fvg
     sweep_window: int = 15
     sweep_reclaim_bars: int = 3
+    min_sweep_strength: float = 0.0   # BTC 15m A/B: >=3.0 lifts the win rate
+    min_stop_atr: float = 0.0         # BTC 15m A/B: >2.0 ATR stops win ~55-60%
     use_key_targets: bool = False
     target_mode: str = "fixed"  # fixed | liquidity | hybrid | dol | htf_dol
     min_target_rr: float = 2.0
@@ -68,6 +71,7 @@ class SetupConfig:
     min_setup_score: float = 0.0
     fvg_min_atr: float = 0.25
     fvg_min_body: float = 0.5
+    fvg_min_width_atr: float = 0.0
     allow_short: bool = False
     rr: float = 2.0
     max_bars: int = 40
@@ -82,6 +86,13 @@ class SetupConfig:
     trail_activate_r: float = 0.0
     trail_atr_mult: float = 0.0
     max_daily_loss_r: float = 0.0
+    # Execution costs, forwarded to StrategyConfig by run_one.  ``commission_bps``
+    # is ONE round trip; Binance futures taker 5 bps/side -> 10.
+    commission_bps: float = 5.0
+    slippage_bps: float = 2.0
+    t1_at_r: float = 0.0             # partial scale-out level (0 = off)
+    t1_fraction: float = 0.5
+    t1_move_be: bool = True
     session_gate: str = "none"  # none | auto | london | ny_am | ny_pm | cn | hk
     pd_gate: bool = False
     pd_buy_max: float = 0.5
@@ -134,6 +145,29 @@ def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
             cfg,
             min_disp_body_ratio=max(cfg.min_disp_body_ratio, 0.65),
         )
+    if cfg.quality_profile == "btc_15m":
+        # BTCUSDT perpetual 15m study profile - NOT a proven edge, off by default.
+        #
+        # Everything below is measured on BTCUSDT 15m/1h 2024-11..2026-11 with
+        # taker 0.05%/side + 1bps/side (scripts/optimize_btc.py, rule_search.py):
+        #   pool = this frozen setup             n=146 win 30.8% avg -0.358R
+        #   train slice, this profile            n= 21 win 52.4% avg +0.19R
+        #   holdout slice, this profile          n=  6 win 50.0% avg +0.45R
+        #   FULL sample, this profile            n= 23 win 39.1% avg -0.084R
+        # The split looked good and the full sample did not reproduce it: the
+        # two conditions (displacement >= 1.45 ATR, stop >= 1.4 ATR) are the only
+        # rule of 1,793 that survived its first holdout, and it still fails the
+        # second test.  Kept so the study is reproducible, not recommended for
+        # live use.  Sweep strength was explicitly rejected: strength >= 3 was
+        # the best in-sample rule (54.9% / +0.28R) and fell to 13.3% / -0.59R out
+        # of sample on 15m, and to 32-35% / negative when the 1h base and the
+        # cost basis were changed.
+        return replace(
+            cfg,
+            min_disp_atr=max(cfg.min_disp_atr, 1.45),
+            min_stop_atr=max(cfg.min_stop_atr, 1.4),
+            rr=max(cfg.rr, 2.5),
+        )
     return cfg
 
 
@@ -181,6 +215,212 @@ def _stack_spec(cfg: SetupConfig) -> StackSpec:
     return stacks.get(cfg.stack, stacks["1d_4h_15m"])
 
 
+class _BoxIndex:
+    """Struct-of-arrays view of a list of price boxes (FVG / OB / PDA array).
+
+    ``build_setup`` scanned every FVG (thousands) for every CISD, which was the
+    largest cost in the loop (measured: 617k ``.ce`` property calls).  The same
+    "nearest box on the correct side, known at bar t" answer is a numpy argmin
+    over pre-extracted arrays.  List order is preserved, so the chosen box is
+    identical to the stable ``sorted(key=abs(...))[0]`` version.
+    """
+
+    __slots__ = ("items", "created", "active", "fresh", "first", "edge")
+
+    def __init__(self, items, edge_of, fresh_of=None, first_of=None) -> None:
+        self.items = list(items)
+        self.created = np.array([int(x.created) for x in self.items], dtype=np.int64)
+        self.active = np.array([bool(x.active) for x in self.items], dtype=bool)
+        self.edge = np.array([float(edge_of(x)) for x in self.items], dtype=float)
+        self.fresh = (np.array([bool(fresh_of(x)) for x in self.items], dtype=bool)
+                      if fresh_of is not None else np.ones(len(self.items), dtype=bool))
+        self.first = (np.array([bool(first_of(x)) for x in self.items], dtype=bool)
+                      if first_of is not None else np.ones(len(self.items), dtype=bool))
+
+    def nearest(self, level: float, t: int, *, require_fresh: bool = False):
+        """Return ``(index, item)`` of the nearest live box, or ``(None, None)``."""
+        if not self.items:
+            return None, None
+        mask = (self.created <= t) & self.active
+        if require_fresh:
+            mask &= self.fresh
+        if not mask.any():
+            return None, None
+        diff = np.where(mask, np.abs(self.edge - float(level)), np.inf)
+        return int(np.argmin(diff)), self.items[int(np.argmin(diff))]
+
+    def is_first(self, j) -> bool:
+        return bool(self.first[j]) if j is not None else False
+
+
+def _swing_index(swings: Iterable):
+    """Backwards-compatible alias kept for readability inside setup.py."""
+    return SwingIndex(swings)
+
+
+class _SetupPrecompute:
+    """Everything ``build_setup`` needs per bar, computed once per call."""
+
+    def __init__(self, df: pd.DataFrame, result, cfg: "SetupConfig", daily, spec: StackSpec):
+        self.n = len(df)
+        self.close = df["close"].to_numpy(float)
+        self.high = df["high"].to_numpy(float)
+        self.low = df["low"].to_numpy(float)
+        self.open = df["open"].to_numpy(float)
+        tr = np.maximum.reduce([
+            self.high - self.low,
+            np.abs(self.high - np.r_[np.nan, self.close[:-1]]),
+            np.abs(self.low - np.r_[np.nan, self.close[:-1]]),
+        ])
+        self.atr14 = pd.Series(tr).rolling(14, min_periods=1).mean().to_numpy()
+        self.swings = SwingIndex(result.swings)
+
+        # HTF indicator columns as numpy, plus the NaN gate and the per-bar
+        # checks for both directions (avoids a pandas row lookup per CISD).
+        d1 = _tf_frame(df, daily, spec.bias_tf, cfg.market)
+        self.d1 = {c: d1[c].to_numpy(float) for c in
+                   ("close", "tenkan", "kijun", "span_a", "span_b", "macd", "macd_signal")}
+        self.d1_ok = ~np.isnan(np.column_stack(
+            [self.d1[c] for c in ("tenkan", "kijun", "span_a", "span_b", "macd", "macd_signal")]
+        )).any(axis=1)
+        self.h4 = None
+        self.h4_ok = None
+        if spec.confirm_tf:
+            h4 = _tf_frame(df, daily, spec.confirm_tf, cfg.market)
+            self.h4 = {c: h4[c].to_numpy(float) for c in
+                       ("close", "tenkan", "kijun", "span_a", "span_b", "macd", "macd_signal")}
+            self.h4_ok = ~np.isnan(np.column_stack(
+                [self.h4[c] for c in
+                 ("close", "tenkan", "kijun", "span_a", "span_b", "macd", "macd_signal")]
+            )).any(axis=1)
+        i15 = ichimoku(df)
+        self.i15 = {c: i15[c].to_numpy(float) for c in ("tenkan", "kijun", "span_a", "span_b")}
+        self.i15_ok = ~np.isnan(np.column_stack(list(self.i15.values()))).any(axis=1)
+        self.hist = macd(df)["hist"].to_numpy(float)
+        self.hist_prev = np.r_[np.nan, self.hist[:-1]]
+
+        # price boxes
+        self.fvg = {d: _BoxIndex([f for f in result.fvgs if f.direction == d],
+                                 edge_of=lambda f: f.ce,
+                                 fresh_of=lambda f: f.fresh,
+                                 first_of=lambda f: f.first_presented)
+                    for d in ("bull", "bear")}
+        self.ob = {d: _BoxIndex([o for o in result.order_blocks if o.direction == d],
+                                edge_of=lambda o: o.mean)
+                   for d in ("bull", "bear")}
+        self.pda_top = {d: np.array([float(a.top) for a in result.pd_arrays if a.direction == d])
+                        for d in ("bull", "bear")}
+        self.pda_bottom = {d: np.array([float(a.bottom) for a in result.pd_arrays
+                                        if a.direction == d]) for d in ("bull", "bear")}
+        self.pda_created = {d: np.array([int(a.confirmed_at) for a in result.pd_arrays
+                                         if a.direction == d], dtype=np.int64)
+                            for d in ("bull", "bear")}
+        self.pda_kind = {d: [a.kind for a in result.pd_arrays if a.direction == d]
+                         for d in ("bull", "bear")}
+
+        # sweeps (result.sweeps is sorted by reclaim_bar)
+        self.sweep_reclaim = np.array([int(s.reclaim_bar) for s in result.sweeps], dtype=np.int64)
+        self.sweep_dir = [s.direction for s in result.sweeps]
+
+        # regime + displacement inputs
+        self.ema20 = pd.Series(self.close).ewm(span=20, adjust=False).mean().to_numpy()
+        self.body = np.abs(self.close - self.open)
+        self.vol = df["volume"].to_numpy(float) if "volume" in df else np.zeros(self.n)
+
+    def bars_ok(self, t: int) -> bool:
+        """NaN gate: HTF 1D indicators, 4H indicators and 15m Ichimoku present."""
+        if not self.d1_ok[t] or not self.i15_ok[t]:
+            return False
+        return True if self.h4_ok is None else bool(self.h4_ok[t])
+
+    def htf_checks(self, t: int, direction: str, cfg: "SetupConfig"):
+        """The 1D / 4H / 15m indicator checks for one CISD, as bool lists."""
+        bull = direction == "bull"
+        d1, h4, i15 = self.d1, self.h4, self.i15
+        d1_checks = []
+        if cfg.require_1d_cloud:
+            span = np.maximum(d1["span_a"][t], d1["span_b"][t]) if bull else \
+                np.minimum(d1["span_a"][t], d1["span_b"][t])
+            d1_checks.append(bool(d1["close"][t] > span) if bull else bool(d1["close"][t] < span))
+        if cfg.require_1d_tk:
+            d1_checks.append(bool(d1["tenkan"][t] > d1["kijun"][t]) if bull
+                             else bool(d1["tenkan"][t] < d1["kijun"][t]))
+        if cfg.require_1d_macd:
+            d1_checks.append(bool(d1["macd"][t] > d1["macd_signal"][t]) if bull
+                             else bool(d1["macd"][t] < d1["macd_signal"][t]))
+        h4_checks = []
+        if h4 is not None:
+            if cfg.require_4h_cloud:
+                span = np.maximum(h4["span_a"][t], h4["span_b"][t]) if bull else \
+                    np.minimum(h4["span_a"][t], h4["span_b"][t])
+                h4_checks.append(bool(h4["close"][t] > span) if bull
+                                 else bool(h4["close"][t] < span))
+            if cfg.require_4h_tk:
+                h4_checks.append(bool(h4["tenkan"][t] > h4["kijun"][t]) if bull
+                                 else bool(h4["tenkan"][t] < h4["kijun"][t]))
+            if cfg.require_4h_macd:
+                h4_checks.append(bool(h4["macd"][t] > h4["macd_signal"][t]) if bull
+                                 else bool(h4["macd"][t] < h4["macd_signal"][t]))
+        m15_checks = []
+        if cfg.require_15m_cloud:
+            span = np.maximum(i15["span_a"][t], i15["span_b"][t]) if bull else \
+                np.minimum(i15["span_a"][t], i15["span_b"][t])
+            m15_checks.append(bool(self.close[t] > span) if bull else bool(self.close[t] < span))
+        if cfg.require_15m_macd:
+            m15_checks.append(bool(self.hist[t] > 0) if bull else bool(self.hist[t] < 0))
+        if cfg.require_15m_hist_rising:
+            rising = t > 0 and self.hist[t] > self.hist_prev[t]
+            m15_checks.append(rising if bull else (t > 0 and self.hist[t] < self.hist_prev[t]))
+        return d1_checks, h4_checks, m15_checks
+
+    def near_arrays(self, direction: str, price: float, atr: float, t: int,
+                    tol_atr: float) -> list[str]:
+        """Kinds of same-side PDA arrays known at ``t`` within ``tol_atr`` ATR."""
+        top, bottom = self.pda_top[direction], self.pda_bottom[direction]
+        if len(top) == 0:
+            return []
+        tol = max(float(atr) * float(tol_atr), 0.0)
+        dist = np.where((bottom <= price) & (price <= top), 0.0,
+                        np.minimum(np.abs(price - top), np.abs(price - bottom)))
+        mask = (dist <= tol) & (self.pda_created[direction] <= t)
+        return [self.pda_kind[direction][i] for i in np.nonzero(mask)[0]]
+
+    def regime(self, t: int, lookback: int = 500):
+        """Vectorised ``regime.market_regime`` for one bar."""
+        if t < 20 or t >= self.n:
+            return Regime("flat", "normal", 0.0, 0.0, 0.5)
+        a = float(self.atr14[t]) if not np.isnan(self.atr14[t]) else 0.0
+        slope = float(self.ema20[t] - self.ema20[max(0, t - 10)])
+        strength = slope / a if a > 0 else 0.0
+        atr_pct = a / float(self.close[t]) if self.close[t] else 0.0
+        lo = max(0, t - lookback + 1)
+        hist = self.atr14[lo:t + 1]
+        hist = hist[~np.isnan(hist)]
+        rank = float((hist <= a).mean()) if len(hist) else 0.5
+        trend = "up" if strength > 0.15 else "down" if strength < -0.15 else "flat"
+        vol = "high" if rank >= 0.75 else "low" if rank <= 0.25 else "normal"
+        return Regime(trend, vol, strength, atr_pct, rank)
+
+    def displacement(self, idx: int, lookback: int = 20) -> Displacement:
+        """Same arithmetic as ``quality.measure_displacement``, O(lookback)."""
+        body = abs(float(self.close[idx]) - float(self.open[idx]))
+        rng = max(float(self.high[idx]) - float(self.low[idx]), 1e-12)
+        body_ratio = body / rng
+        a = max(0, idx - lookback)
+        prev_body = self.body[a:idx]
+        avg_body = float(prev_body.mean()) if len(prev_body) else body
+        body_multiple = body / max(avg_body, 1e-12)
+        body_atr = body / max(float(self.atr14[idx]), 1e-12)
+        vol_avg = float(self.vol[a:idx].mean()) if idx else 0.0
+        volume_ratio = float(self.vol[idx] / vol_avg) if vol_avg > 0 else 0.0
+        score = 0.0
+        score += 0.4 * min(body_ratio / 0.65, 1.0)
+        score += 0.3 * min(body_atr / 1.0, 1.0)
+        score += 0.2 * min(body_multiple / 1.3, 1.0)
+        score += 0.1 * min(volume_ratio / 1.2, 1.0)
+        return Displacement(body_ratio, body_atr, body_multiple, volume_ratio, min(score, 1.0))
+
+
 def _tf_frame(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str) -> pd.DataFrame:
     if tf == "1D":
         if market == "crypto":
@@ -208,7 +448,8 @@ def _htf_fvg_zones(df: pd.DataFrame, daily: pd.DataFrame | None,
     """HTF FVG zones mapped to the first base bar that knows the zone."""
     base_dates = pd.to_datetime(df["date"]).to_numpy()
     fcfg = ICTConfig(show_fvg=True, displacement_filter=True,
-                     fvg_min_atr=cfg.fvg_min_atr, fvg_min_body=cfg.fvg_min_body)
+                     fvg_min_atr=cfg.fvg_min_atr, fvg_min_body=cfg.fvg_min_body,
+                     fvg_min_width_atr=cfg.fvg_min_width_atr)
     zones: list[tuple[float, float, int, str, str]] = []
     for tf in ("1h", "4h", "1D"):
         h = _raw_htf(df, daily, tf, cfg.market)
@@ -297,16 +538,11 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     if cfg.origin_filter == "fvg" and cfg.require_sweep:
         cfg = replace(cfg, require_sweep=False)
     spec = _stack_spec(cfg)
-    d1 = _tf_frame(df, daily, spec.bias_tf, cfg.market)
-    h4 = _tf_frame(df, daily, spec.confirm_tf, cfg.market) if spec.confirm_tf else None
-    i15 = ichimoku(df)
-    m15 = macd(df)
-    close = df["close"].to_numpy(float)
-    high = df["high"].to_numpy(float)
-    low = df["low"].to_numpy(float)
-    tr = np.maximum.reduce([high - low, np.abs(high - np.r_[np.nan, close[:-1]]),
-                            np.abs(low - np.r_[np.nan, close[:-1]])])
-    atr14 = pd.Series(tr).rolling(14, min_periods=1).mean().to_numpy()
+    # All per-bar series are computed once: the loop below visits every CISD
+    # (1210 on 20k BTC bars) and previously re-derived ATR, the HTF row lookup,
+    # the swing scans and the displacement window each time.
+    pre = _SetupPrecompute(df, result, cfg, daily, spec)
+    close, high, low, atr14 = pre.close, pre.high, pre.low, pre.atr14
     htf_zones = _htf_fvg_zones(df, daily, cfg) if cfg.htf_fvg else []
     daily_bias = _daily_bias_series(df, daily, cfg, spec)
     out: list[CISD] = []
@@ -319,14 +555,14 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
         bias_dir = daily_bias[t]
         if cfg.daily_bias_filter != "none" and bias_dir != c.direction:
             continue
-        htf_struct = structure_bias(result.swings, t)
+        htf_struct = pre.swings.structure_bias(t)
         if cfg.htf_structure_gate == "aligned" and htf_struct != c.direction:
             continue
         if cfg.session_gate != "none" and not in_session(df, t, cfg.market, cfg.session_gate):
             continue
 
         pd_pos = None
-        dr = dealing_range(result.swings, t, cfg.pd_lookback)
+        dr = pre.swings.dealing_range(t, cfg.pd_lookback)
         if dr is not None:
             pd_pos = dr.position(c.level)
         if cfg.pd_gate:
@@ -342,85 +578,22 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             if ote_pos is None or not (cfg.ote_min <= ote_pos <= cfg.ote_max):
                 continue
 
-        array_hits = near_arrays(result.pd_arrays, c.level, c.direction,
-                                 atr14[t], t, cfg.pda_array_tol_atr)
+        array_hits = pre.near_arrays(c.direction, c.level, atr14[t], t,
+                                     cfg.pda_array_tol_atr)
         if cfg.require_pda_array and not array_hits:
             continue
-        fvg_hits = [
-            f for f in result.fvgs
-            if f.direction == c.direction and f.created <= t and f.active
-        ]
-        fvg_hits.sort(key=lambda f: abs(f.ce - c.level))
-        if cfg.require_fresh_fvg:
-            fvg_hits = [f for f in fvg_hits if f.fresh]
-        chosen_fvg = fvg_hits[0] if fvg_hits else None
+        _, chosen_fvg = pre.fvg[c.direction].nearest(
+            c.level, t, require_fresh=cfg.require_fresh_fvg)
         if cfg.require_fresh_fvg and chosen_fvg is None:
             continue
         if cfg.require_first_fvg and (chosen_fvg is None or not chosen_fvg.first_presented):
             continue
 
-        ob_hits = [
-            o for o in result.order_blocks
-            if o.direction == c.direction and o.created <= t and o.active
-        ]
-        ob_hits.sort(key=lambda o: abs(o.mean - c.level))
-        chosen_ob = ob_hits[0] if ob_hits else None
+        _, chosen_ob = pre.ob[c.direction].nearest(c.level, t)
 
-        row1 = d1.iloc[t]
-        row4 = h4.iloc[t] if h4 is not None else None
-        if row1[["tenkan", "kijun", "span_a", "span_b", "macd", "macd_signal"]].isna().any():
+        if not pre.bars_ok(t):
             continue
-        if row4 is not None and row4[["close", "tenkan", "kijun", "span_a", "span_b", "macd", "macd_signal"]].isna().any():
-            continue
-        if i15.iloc[t][["tenkan", "kijun", "span_a", "span_b"]].isna().any():
-            continue
-
-        if c.direction == "bull":
-            d1_checks = []
-            if cfg.require_1d_cloud:
-                d1_checks.append(row1["close"] > max(row1["span_a"], row1["span_b"]))
-            if cfg.require_1d_tk:
-                d1_checks.append(row1["tenkan"] > row1["kijun"])
-            if cfg.require_1d_macd:
-                d1_checks.append(row1["macd"] > row1["macd_signal"])
-            h4_checks = []
-            if row4 is not None:
-                if cfg.require_4h_cloud:
-                    h4_checks.append(row4["close"] > max(row4["span_a"], row4["span_b"]))
-                if cfg.require_4h_tk:
-                    h4_checks.append(row4["tenkan"] > row4["kijun"])
-                if cfg.require_4h_macd:
-                    h4_checks.append(row4["macd"] > row4["macd_signal"])
-            m15_checks = []
-            if cfg.require_15m_cloud:
-                m15_checks.append(close[t] > max(i15["span_a"].iloc[t], i15["span_b"].iloc[t]))
-            if cfg.require_15m_macd:
-                m15_checks.append(m15["hist"].iloc[t] > 0)
-            if cfg.require_15m_hist_rising:
-                m15_checks.append(t > 0 and m15["hist"].iloc[t] > m15["hist"].iloc[t - 1])
-        else:
-            d1_checks = []
-            if cfg.require_1d_cloud:
-                d1_checks.append(row1["close"] < min(row1["span_a"], row1["span_b"]))
-            if cfg.require_1d_tk:
-                d1_checks.append(row1["tenkan"] < row1["kijun"])
-            if cfg.require_1d_macd:
-                d1_checks.append(row1["macd"] < row1["macd_signal"])
-            h4_checks = []
-            if row4 is not None:
-                if cfg.require_4h_cloud:
-                    h4_checks.append(row4["close"] < min(row4["span_a"], row4["span_b"]))
-                if cfg.require_4h_tk:
-                    h4_checks.append(row4["tenkan"] < row4["kijun"])
-                if cfg.require_4h_macd:
-                    h4_checks.append(row4["macd"] < row4["macd_signal"])
-            m15_checks = []
-            if cfg.require_15m_cloud:
-                m15_checks.append(close[t] < min(i15["span_a"].iloc[t], i15["span_b"].iloc[t]))
-            if cfg.require_15m_macd:
-                m15_checks.append(m15["hist"].iloc[t] < 0)
-            if cfg.require_15m_hist_rising:
-                m15_checks.append(t > 0 and m15["hist"].iloc[t] < m15["hist"].iloc[t - 1])
+        d1_checks, h4_checks, m15_checks = pre.htf_checks(t, c.direction, cfg)
 
         def passed(checks, min_score):
             if not checks:
@@ -430,10 +603,11 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             return all(checks)
 
         if passed(d1_checks, spec.min_bias) and passed(h4_checks, spec.min_confirm) and passed(m15_checks, cfg.min_15m_score):
-            recent_sweeps = [
-                s for s in result.sweeps
-                if s.direction == c.direction and 0 <= t - s.reclaim_bar <= cfg.sweep_window
-            ]
+            # result.sweeps is sorted by reclaim_bar, so the window is a slice.
+            lo = int(np.searchsorted(pre.sweep_reclaim, t - cfg.sweep_window, side="left"))
+            hi = int(np.searchsorted(pre.sweep_reclaim, t, side="right"))
+            recent_sweeps = [result.sweeps[k] for k in range(lo, hi)
+                             if pre.sweep_dir[k] == c.direction]
             origin = (
                 "both" if c.checks.get("sweep") and c.checks.get("pda")
                 else "sweep" if c.checks.get("sweep")
@@ -454,7 +628,13 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             if cfg.require_sweep and not recent_sweeps:
                 continue
             sweep_strength = max((s.strength for s in recent_sweeps), default=0)
-            disp = measure_displacement(df, t)
+            if cfg.min_sweep_strength > 0 and sweep_strength < cfg.min_sweep_strength:
+                continue
+            if cfg.min_stop_atr > 0:
+                stop_atr = abs(float(c.level) - float(c.sl)) / max(float(atr14[t]), 1e-12)
+                if stop_atr < cfg.min_stop_atr:
+                    continue
+            disp = pre.displacement(t)
             if disp.body_ratio < cfg.min_disp_body_ratio:
                 continue
             if disp.body_atr < cfg.min_disp_atr:
@@ -507,7 +687,7 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             if ote_pos is not None:
                 quality_parts["ote"] = float(ote_pos)
             if array_hits:
-                quality_parts["pda_arrays"] = [a.kind for a in array_hits]
+                quality_parts["pda_arrays"] = list(array_hits)
             if chosen_fvg is not None:
                 quality_parts["fvg_ce"] = float(chosen_fvg.ce)
                 quality_parts["fvg_size_atr"] = float(chosen_fvg.size_atr)
@@ -564,7 +744,7 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 continue
             quality_parts["inducement_candidates"] = inducements
             if cfg.regime_features or cfg.regime_trend_gate != "none" or cfg.regime_vol_gate != "none":
-                reg = market_regime(df, t)
+                reg = pre.regime(t)
                 expected = "up" if c.direction == "bull" else "down"
                 if cfg.regime_trend_gate == "aligned" and reg.trend != expected:
                     continue
@@ -605,6 +785,7 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
     ict_cfg = ICTConfig(mode="historical", show_sessions=False, show_htf_cisd=False,
                         cisd_all=True, cisd_min_grade=0,
                         fvg_min_atr=cfg.fvg_min_atr, fvg_min_body=cfg.fvg_min_body,
+                        fvg_min_width_atr=cfg.fvg_min_width_atr,
                         sweep_reclaim_bars=cfg.sweep_reclaim_bars)
     res = analyze(df, ict_cfg)
     sigs = build_setup(df, res, cfg, daily=daily)
@@ -613,6 +794,9 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
                         allow_short=cfg.allow_short, risk_pct=cfg.risk_pct,
                         breakeven_at_r=cfg.breakeven_at_r,
                         t_plus_1=cfg.t_plus_1, sell_tax_bps=cfg.sell_tax_bps,
+                        commission_bps=cfg.commission_bps, slippage_bps=cfg.slippage_bps,
+                        t1_at_r=cfg.t1_at_r, t1_fraction=cfg.t1_fraction,
+                        t1_move_be=cfg.t1_move_be,
                         max_concurrent=cfg.max_concurrent,
                         min_rr=cfg.min_target_rr,
                         entry_mode=cfg.entry_mode,
@@ -730,5 +914,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
