@@ -987,7 +987,7 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
     if result.fib and result.swings:
         a, b = result.swings[-2], result.swings[-1]
         if b.index >= start:
-            x0, x1 = rel(a.index), m - 1
+            x0, x1 = max(rel(a.index), 0), m - 1
             for lvl in result.fib:
                 ax.hlines(lvl.price, x0, x1, colors="#999999",
                           linestyles="--", linewidth=0.5, alpha=0.6, zorder=1)
@@ -1025,7 +1025,7 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
                       f"TP     {tp:.6g}"]
         if grade is not None:
             plan_lines.append(f"Grade  {grade.get('grade', '-')} ({grade.get('hits', 0)}/{grade.get('enabled', 0)})")
-        fig.text(0.985, 0.06, "\n".join(plan_lines), fontsize=8.5, ha="right", va="bottom",
+        fig.text(0.015, 0.10, "\n".join(plan_lines), fontsize=8.5, ha="left", va="bottom",
                  color=col, family="monospace",
                  bbox=dict(boxstyle="round,pad=.5", fc="white", ec=col, alpha=.96))
 
@@ -1057,7 +1057,10 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
     )
     ax.set_ylabel("Price")
     ax.grid(alpha=0.15)
-    ax.set_xlim(-1, m)
+    # right gutter so the level labels (key/CISD/session, all ha="left" at the
+    # last bar) have room instead of spilling past the axis or clipping.
+    gutter = max(4, int(m * 0.15))
+    ax.set_xlim(-1, m - 1 + gutter)
     ticks = np.linspace(0, m - 1, min(10, m)).astype(int)
     ax.set_xticks(ticks)
     ax.set_xticklabels([dates.iloc[i].strftime("%Y-%m-%d") for i in ticks], rotation=30, ha="right")
