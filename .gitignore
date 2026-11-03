@@ -16,3 +16,6 @@ Thumbs.db
 scripts/install_verify_proxy.sh
 *clash*.yaml
 *mihomo*
+
+# Memdoor memory tool (project rules cache, not code)
+.memdoor/
