@@ -799,6 +799,30 @@ def _latest_by_direction(items: Iterable, max_n: int, directions: tuple[str, ...
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
+def _place_right_labels(ax, x: int, y_span: float, labels: list[tuple[float, str, str]]) -> None:
+    """Stagger right-edge labels vertically to avoid overlap.
+
+    ``labels`` is a list of (price, text, color).  Sorted by price, then pushed
+    down when closer than a minimum gap; a thin leader line ties each staggered
+    label back to its true price.
+    """
+    if not labels:
+        return
+    min_gap = max(y_span * 0.02, 1e-9)
+    labels.sort(key=lambda t: t[0])
+    last = None
+    for price, text, color in labels:
+        y = price
+        if last is not None and y - last < min_gap:
+            y = last + min_gap
+        ax.text(x, y, text, color=color, fontsize=6.5, va="center", ha="left",
+                alpha=0.92, zorder=8,
+                bbox=dict(boxstyle="round,pad=.12", fc="white", ec="none", alpha=.75))
+        if abs(y - price) > min_gap * 0.55:
+            ax.plot([x - 0.6, x], [price, y], color=color, lw=0.4, alpha=0.45, zorder=7)
+        last = y
+
+
 def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: int | None = None,
          plan: dict | None = None, grade: dict | None = None,
          po3: object | None = None, scenario: str | None = None,
@@ -811,6 +835,7 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
     m = len(df)
     if m == 0:
         raise ValueError("empty plot window")
+    right_labels: list[tuple[float, str, str]] = []
 
     fig, ax = plt.subplots(figsize=(15, 8), dpi=140)
     dates = pd.to_datetime(df["date"])
@@ -859,8 +884,7 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
         ax.add_patch(Rectangle((x0, ob.bottom), x1 - x0, ob.top - ob.bottom,
                                facecolor=color, edgecolor=color, alpha=0.12,
                                linestyle=":", zorder=1))
-        ax.text(x1, (ob.top + ob.bottom) / 2, "+OB" if ob.direction == "bull" else "-OB",
-                color=color, fontsize=7, va="center", ha="left")
+        right_labels.append(((ob.top + ob.bottom) / 2, "+OB" if ob.direction == "bull" else "-OB", color))
 
     # liquidity
     for liq in _latest_by_direction(result.liquidity, max(cfg.max_liq, 0), ("buyside", "sellside")):
@@ -885,7 +909,7 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
         x1 = m - 1
         color = "#7E57C2" if k.kind == "H" else "#26A69A"
         ax.hlines(k.price, x0, x1, colors=color, linestyles="--", linewidth=0.7, alpha=0.55, zorder=2)
-        ax.text(x1, k.price, k.name, color=color, fontsize=6, va="center", ha="left", alpha=0.8)
+        right_labels.append((k.price, k.name, color))
 
     # liquidity sweeps: exact sweep bar, level and reclaim close
     for s in result.sweeps[-8:]:
@@ -905,7 +929,7 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
         x1 = min(rel(lvl.end) + 8, m - 1)
         color = "#607D8B" if not lvl.swept else "#B0BEC5"
         ax.hlines(lvl.price, x0, x1, colors=color, linestyles=":", linewidth=0.8, alpha=0.8, zorder=2)
-        ax.text(x1, lvl.price, lvl.name, color=color, fontsize=6, va="center", ha="left")
+        right_labels.append((lvl.price, lvl.name, color))
 
     # SMT divergence lines
     for s in result.smts:
@@ -939,18 +963,15 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
         alpha = 0.95 if c.active else 0.35
         ax.hlines(c.level, x0, x1, colors=color, linestyles="-" if c.active else ":",
                   linewidth=1.4, alpha=alpha, zorder=6)
-        ax.text(x1, c.level, f"{c.label}{'+' if c.direction == 'bull' else '-'} {grade_txt.get(c.grade, '')}",
-                color=color, fontsize=7, va="center", ha="left", alpha=alpha, zorder=7)
+        right_labels.append((c.level, f"{c.label}{'+' if c.direction == 'bull' else '-'} {grade_txt.get(c.grade, '')}", color))
         if c.target is not None:
-            ax.hlines(c.target, max(rel(c.end) - 2, 0), min(rel(c.end) + 22, m - 1),
-                      colors=color, linestyles="--", linewidth=0.8, alpha=0.5, zorder=5)
-            ax.text(min(rel(c.end) + 22, m - 1), c.target, "TP", color=color,
-                    fontsize=6, va="center", ha="left", alpha=0.7)
+            ax.hlines(c.target, max(rel(c.end), 0), m - 1,
+                      colors=color, linestyles="--", linewidth=1.0, alpha=0.55, zorder=5)
+            right_labels.append((c.target, "TP", color))
         if c.active:
             ax.hlines(c.sl, max(rel(c.end) - 1, 0), min(rel(c.end) + 8, m - 1),
                       colors="#555555", linestyles=":", linewidth=0.8, alpha=0.7, zorder=5)
-            ax.text(min(rel(c.end) + 8, m - 1), c.sl, "SL", color="#555555",
-                    fontsize=6, va="center", ha="left", alpha=0.7)
+            right_labels.append((c.sl, "SL", "#555555"))
 
     # HTF CISD levels
     for c in result.htf_cisds[-max(cfg.max_htf, 0):]:
@@ -960,8 +981,10 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
         x1 = min(rel(c.end) + cfg.cisd_extend, m - 1)
         color = "#64B5F6" if c.direction == "bull" else "#E57373"
         ax.hlines(c.level, x0, x1, colors=color, linestyles="--", linewidth=1.0, alpha=0.8, zorder=5)
-        ax.text(x1, c.level, f"{c.tf} CISD{'+' if c.direction == 'bull' else '-'}",
-                color=color, fontsize=6, va="center", ha="left", alpha=0.8)
+        right_labels.append((c.level, f"{c.tf} CISD{'+' if c.direction == 'bull' else '-'}", color))
+
+    # right-edge labels (OB/key/session/CISD/TP/SL/HTF), staggered to avoid overlap
+    _place_right_labels(ax, m - 1, float(df["high"].max() - df["low"].min()), right_labels)
 
     # swings + structure
     shown_events = result.events
