@@ -1009,21 +1009,29 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
         tp = plan.get("tp")
         status = plan.get("status") or plan.get("plan_status")
         col = "#1E88E5" if direction == "long" else "#E53935"
-        for label, val, ls in (("Entry", entry, "--"), ("SL", sl, ":"), ("TP", tp, ":")):
+        # clearer lines: entry solid, SL/TP dashed; label at the LEFT edge so
+        # text never spills past the right axis.
+        for label, val, ls, lw in (("Entry", entry, "-", 1.6), ("SL", sl, "--", 1.2), ("TP", tp, ":", 1.2)):
             if val is None:
                 continue
-            ax.hlines(val, 0, m - 1, colors=col, linestyles=ls, linewidth=1.2, alpha=0.85, zorder=7)
-            txt = f"{label} {val:.6g}"
-            if label == "Entry" and status:
-                txt += f"  [{status}]"
-            ax.text(m - 1, val, txt, color=col, fontsize=7.5, va="center", ha="left", zorder=8,
-                    bbox=dict(boxstyle="round,pad=.15", fc="white", ec=col, alpha=.85))
+            ax.hlines(val, 0, m - 1, colors=col, linestyles=ls, linewidth=lw, alpha=0.9, zorder=7)
+            ax.text(1, val, f"{label} {val:.6g}", color=col, fontsize=7.5,
+                    va="center", ha="left", zorder=8,
+                    bbox=dict(boxstyle="round,pad=.12", fc="white", ec=col, alpha=.85))
+        # trade-plan text box, bottom-right (figure coords -> no axis misalignment)
+        plan_lines = [f"{direction.upper()}  {status or ''}",
+                      f"Entry  {entry:.6g}",
+                      f"SL     {sl:.6g}",
+                      f"TP     {tp:.6g}"]
+        if grade is not None:
+            plan_lines.append(f"Grade  {grade.get('grade', '-')} ({grade.get('hits', 0)}/{grade.get('enabled', 0)})")
+        fig.text(0.985, 0.06, "\n".join(plan_lines), fontsize=8.5, ha="right", va="bottom",
+                 color=col, family="monospace",
+                 bbox=dict(boxstyle="round,pad=.5", fc="white", ec=col, alpha=.96))
 
     extra: list[str] = []
     if grade is not None:
         g = grade.get("grade", "-")
-        gcol = {"A+": "#00C853", "A": "#64DD17", "B+": "#9ACD32",
-                "B-": "#FFB300", "C": "#FF7043"}.get(g, "#888888")
         extra.append(f"Grade {g} ({grade.get('hits', 0)}/{grade.get('enabled', 0)})")
     if po3 is not None:
         po3_state = getattr(po3, "state", None)
@@ -1036,8 +1044,8 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
     if scenario_plan is not None and getattr(scenario_plan, "status", None):
         extra.append(f"{getattr(scenario_plan, 'status')}")
     if extra:
-        ax.text(0, float(df["high"].max()), "  |  ".join(extra), fontsize=8, color="#37474F",
-                va="top", ha="left", zorder=11,
+        ax.text(0.01, 0.99, "  |  ".join(extra), fontsize=8, color="#37474F",
+                va="top", ha="left", transform=ax.transAxes, zorder=11,
                 bbox=dict(boxstyle="round,pad=.3", fc="white", ec="#90A4AE", alpha=.9))
 
     ax.set_title(
