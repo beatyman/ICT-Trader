@@ -799,27 +799,32 @@ def _latest_by_direction(items: Iterable, max_n: int, directions: tuple[str, ...
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
-def _place_right_labels(ax, x: int, y_span: float, labels: list[tuple[float, str, str]]) -> None:
-    """Stagger right-edge labels vertically to avoid overlap.
+def _place_right_labels(ax, x: int, y_span: float, labels: list[tuple[float, str, str]],
+                        gutter: int = 0) -> None:
+    """Stagger right-edge labels in a right gutter with curved leader lines.
 
     ``labels`` is a list of (price, text, color).  Sorted by price, then pushed
-    down when closer than a minimum gap; a thin leader line ties each staggered
-    label back to its true price.
+    down when closer than a minimum gap; a curved arc ties each label (in the
+    gutter) back to its true price so it never sits at the wrong level.
     """
     if not labels:
         return
     min_gap = max(y_span * 0.02, 1e-9)
     labels.sort(key=lambda t: t[0])
+    label_x = x + max(1, int(gutter * 0.35))
     last = None
     for price, text, color in labels:
         y = price
         if last is not None and y - last < min_gap:
             y = last + min_gap
-        ax.text(x, y, text, color=color, fontsize=6.5, va="center", ha="left",
-                alpha=0.92, zorder=8,
-                bbox=dict(boxstyle="round,pad=.12", fc="white", ec="none", alpha=.75))
-        if abs(y - price) > min_gap * 0.55:
-            ax.plot([x - 0.6, x], [price, y], color=color, lw=0.4, alpha=0.45, zorder=7)
+        ax.text(label_x, y, text, color=color, fontsize=7, va="center", ha="left",
+                alpha=0.95, zorder=9,
+                bbox=dict(boxstyle="round,pad=.14", fc="white", ec="none", alpha=.8))
+        # curved leader line from the label back to the true level
+        ax.annotate("", xy=(x, price), xytext=(label_x, y),
+                    arrowprops=dict(arrowstyle="-", connectionstyle="arc3,rad=0.12",
+                                    color=color, lw=0.5, alpha=0.5),
+                    zorder=7)
         last = y
 
 
@@ -836,6 +841,7 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
     if m == 0:
         raise ValueError("empty plot window")
     right_labels: list[tuple[float, str, str]] = []
+    gutter = max(10, int(m * 0.4))  # right gutter for level labels / leader lines
 
     fig, ax = plt.subplots(figsize=(15, 8), dpi=140)
     dates = pd.to_datetime(df["date"])
@@ -983,8 +989,8 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
         ax.hlines(c.level, x0, x1, colors=color, linestyles="--", linewidth=1.0, alpha=0.8, zorder=5)
         right_labels.append((c.level, f"{c.tf} CISD{'+' if c.direction == 'bull' else '-'}", color))
 
-    # right-edge labels (OB/key/session/CISD/TP/SL/HTF), staggered to avoid overlap
-    _place_right_labels(ax, m - 1, float(df["high"].max() - df["low"].min()), right_labels)
+    # right-edge labels (OB/key/session/CISD/TP/SL/HTF), staggered in the gutter
+    _place_right_labels(ax, m - 1, float(df["high"].max() - df["low"].min()), right_labels, gutter)
 
     # swings + structure
     shown_events = result.events
@@ -1081,9 +1087,7 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
     )
     ax.set_ylabel("Price")
     ax.grid(alpha=0.15)
-    # right gutter so the level labels (key/CISD/session, all ha="left" at the
-    # last bar) have room instead of spilling past the axis or clipping.
-    gutter = max(4, int(m * 0.15))
+    # right gutter so level labels + curved leader lines have room
     ax.set_xlim(-1, m - 1 + gutter)
     ticks = np.linspace(0, m - 1, min(10, m)).astype(int)
     ax.set_xticks(ticks)
