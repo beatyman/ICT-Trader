@@ -43,45 +43,7 @@ def cmd_analyze(args) -> None:
     df = load_csv(args.csv)
     cfg = _ict_config(args)
     res = analyze(df, cfg)
-
-    plan = None
-    if args.plan_json:
-        plan = json.loads(Path(args.plan_json).read_text(encoding="utf-8"))
-
-    grade = None
-    if args.grade:
-        try:
-            from .rules import audit, _setup_grade
-            from .concepts import analyze as _analyze
-            a = audit(df, daily=None, market=getattr(args, "market", "crypto"), plan=plan)
-            grade = a.get("grade")
-        except Exception:
-            grade = None
-
-    po3 = None
-    if args.show_po3:
-        try:
-            from .po3 import detect_po3
-            po3, _ = detect_po3(df, accumulate_bars=20)
-        except Exception:
-            po3 = None
-
-    scenario = None
-    scenario_plan = None
-    if args.scenarios:
-        try:
-            from .rules import audit
-            from .po3 import detect_po3
-            from .scenarios import evaluate_scenarios
-            a = audit(df, daily=None, market=getattr(args, "market", "crypto"), plan=plan)
-            p3, _ = detect_po3(df, accumulate_bars=20)
-            atr_v = float(atr_series(df).iloc[-1])
-            scenario, scenario_plan = evaluate_scenarios(a, p3, res, atr_v, float(df["close"].iloc[-1]))
-        except Exception:
-            scenario = scenario_plan = None
-
-    out = plot(res, args.out, title=f"ICT - {args.symbol}", bars=args.bars,
-               plan=plan, grade=grade, po3=po3, scenario=scenario, scenario_plan=scenario_plan)
+    out = plot(res, args.out, title=f"ICT - {args.symbol}", bars=args.bars)
     sig = signals_frame(res)
     sig.to_csv(args.signals, index=False, encoding="utf-8-sig")
     summary = {
@@ -465,14 +427,6 @@ def main(argv=None) -> None:
 
     a = sub.add_parser("analyze", help="key levels, sweeps, CISD and chart")
     _add_data_args(a)
-    a.add_argument("--plan-json", default=None,
-                   help="trade plan JSON (direction/entry/sl/tp) to draw on the chart")
-    a.add_argument("--grade", action="store_true",
-                   help="overlay the setup grade (A+..C)")
-    a.add_argument("--show-po3", action="store_true",
-                   help="overlay the PO3 state")
-    a.add_argument("--scenarios", action="store_true",
-                   help="overlay the 4-scenario winner")
     a.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("plan", help="latest frozen-setup trade card")
