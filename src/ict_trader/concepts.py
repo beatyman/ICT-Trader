@@ -1018,16 +1018,17 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
             ax.text(1, val, f"{label} {val:.6g}", color=col, fontsize=7.5,
                     va="center", ha="left", zorder=8,
                     bbox=dict(boxstyle="round,pad=.12", fc="white", ec=col, alpha=.85))
-        # trade-plan text box, bottom-right (figure coords -> no axis misalignment)
+        # trade-plan text box, bottom-left INSIDE the axes (transAxes -> always
+        # renders, never clipped or hidden by tight_layout)
         plan_lines = [f"{direction.upper()}  {status or ''}",
                       f"Entry  {entry:.6g}",
                       f"SL     {sl:.6g}",
                       f"TP     {tp:.6g}"]
         if grade is not None:
             plan_lines.append(f"Grade  {grade.get('grade', '-')} ({grade.get('hits', 0)}/{grade.get('enabled', 0)})")
-        fig.text(0.015, 0.10, "\n".join(plan_lines), fontsize=8.5, ha="left", va="bottom",
-                 color=col, family="monospace",
-                 bbox=dict(boxstyle="round,pad=.5", fc="white", ec=col, alpha=.96))
+        ax.text(0.01, 0.01, "\n".join(plan_lines), fontsize=8.5, ha="left", va="bottom",
+                transform=ax.transAxes, color=col, family="monospace", zorder=12,
+                bbox=dict(boxstyle="round,pad=.5", fc="white", ec=col, alpha=.96))
 
     extra: list[str] = []
     if grade is not None:
