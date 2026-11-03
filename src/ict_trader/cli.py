@@ -35,6 +35,7 @@ def _ict_config(args) -> ICTConfig:
         cisd_max=args.cisd_max,
         fvg_min_atr=args.fvg_min_atr,
         fvg_min_body=args.fvg_min_body,
+        fvg_min_width_atr=getattr(args, "fvg_min_width_atr", 0.0),
     )
 
 
@@ -42,7 +43,45 @@ def cmd_analyze(args) -> None:
     df = load_csv(args.csv)
     cfg = _ict_config(args)
     res = analyze(df, cfg)
-    out = plot(res, args.out, title=f"ICT - {args.symbol}", bars=args.bars)
+
+    plan = None
+    if args.plan_json:
+        plan = json.loads(Path(args.plan_json).read_text(encoding="utf-8"))
+
+    grade = None
+    if args.grade:
+        try:
+            from .rules import audit, _setup_grade
+            from .concepts import analyze as _analyze
+            a = audit(df, daily=None, market=getattr(args, "market", "crypto"), plan=plan)
+            grade = a.get("grade")
+        except Exception:
+            grade = None
+
+    po3 = None
+    if args.show_po3:
+        try:
+            from .po3 import detect_po3
+            po3, _ = detect_po3(df, accumulate_bars=20)
+        except Exception:
+            po3 = None
+
+    scenario = None
+    scenario_plan = None
+    if args.scenarios:
+        try:
+            from .rules import audit
+            from .po3 import detect_po3
+            from .scenarios import evaluate_scenarios
+            a = audit(df, daily=None, market=getattr(args, "market", "crypto"), plan=plan)
+            p3, _ = detect_po3(df, accumulate_bars=20)
+            atr_v = float(atr_series(df).iloc[-1])
+            scenario, scenario_plan = evaluate_scenarios(a, p3, res, atr_v, float(df["close"].iloc[-1]))
+        except Exception:
+            scenario = scenario_plan = None
+
+    out = plot(res, args.out, title=f"ICT - {args.symbol}", bars=args.bars,
+               plan=plan, grade=grade, po3=po3, scenario=scenario, scenario_plan=scenario_plan)
     sig = signals_frame(res)
     sig.to_csv(args.signals, index=False, encoding="utf-8-sig")
     summary = {
@@ -86,6 +125,7 @@ def _setup_config(args) -> SetupConfig:
         sell_tax_bps=args.sell_tax_bps,
         fvg_min_atr=args.fvg_min_atr,
         fvg_min_body=args.fvg_min_body,
+        fvg_min_width_atr=getattr(args, "fvg_min_width_atr", 0.0),
         entry_mode=args.entry_mode,
         retest_max_bars=args.retest_max_bars,
         retest_tolerance_atr=args.retest_tolerance_atr,
@@ -104,6 +144,14 @@ def _setup_config(args) -> SetupConfig:
         require_fresh_fvg=args.require_fresh_fvg,
         max_inducements=args.max_inducements,
         quality_profile=args.quality_profile,
+        min_sweep_strength=args.min_sweep_strength,
+        min_stop_atr=args.min_stop_atr,
+        allow_short=getattr(args, "allow_short", False),
+        commission_bps=getattr(args, "commission_bps", 5.0),
+        slippage_bps=getattr(args, "slippage_bps", 2.0),
+        t1_at_r=getattr(args, "t1_at_r", 0.0),
+        t1_fraction=getattr(args, "t1_fraction", 0.5),
+        t1_move_be=not getattr(args, "t1_no_be", False),
         stack=args.stack,
     )
 
@@ -134,6 +182,9 @@ def cmd_plan(args) -> None:
     net_rr_value = None
     if latest is not None:
         risk = abs(latest.level - latest.sl)
+        risk_atr = risk / last_atr
+        # A stop closer than the execution noise cannot be honoured: the plan
+        # is not executable, however good the rest of the card looks.
         if args.target_mode == "dol":
             target = latest.target
             if target is None:
@@ -148,14 +199,19 @@ def cmd_plan(args) -> None:
         entry_distance_atr = abs(price - latest.level) / last_atr
         max_dist = args.max_entry_distance_atr * last_atr
         if rejected is None:
-            if latest.direction == "bull":
-                price_ok = latest.sl < price < target
+            if risk <= 0:
+                rejected = "entry_invalid"
+            elif risk_atr < getattr(args, "min_risk_atr", 0.0):
+                rejected = "entry_invalid"
             else:
-                price_ok = target < price < latest.sl
-            if not price_ok:
-                rejected = "price_outside_entry_risk"
-            elif abs(price - latest.level) > max_dist:
-                rejected = "price_too_far_from_entry"
+                if latest.direction == "bull":
+                    price_ok = latest.sl < price < target
+                else:
+                    price_ok = target < price < latest.sl
+                if not price_ok:
+                    rejected = "price_outside_entry_risk"
+                elif abs(price - latest.level) > max_dist:
+                    rejected = "price_too_far_from_entry"
         if rejected is None and target is not None:
             gross_rr, net_rr_value = net_rr(
                 latest.level, latest.sl, target, latest.direction,
@@ -235,6 +291,14 @@ def cmd_plan(args) -> None:
             card["rejected"] = "rule_audit_failed"
             card["reason"] = "rule_audit_failed: " + ",".join(report["blocking_failures"])
             card["setup"] = None
+    else:
+        # A NO_TRADE must still say *which* GS/L gates failed.  Running the
+        # audit without a plan cannot change the decision (it is already
+        # NO_TRADE), it only makes the rejection auditable instead of an
+        # unexplained "no_qualified_setup".
+        report = audit_rules(df, daily=daily, market=args.market, plan=None,
+                             mode=getattr(args, "rule_mode", "strict"))
+        card["rule_audit"] = report
     _write_json(args.json_out, card)
     print(json.dumps(card, ensure_ascii=False, indent=2))
 
@@ -297,6 +361,8 @@ def _add_data_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--sweep-reclaim-bars", type=int, default=3)
     p.add_argument("--fvg-min-atr", type=float, default=0.0)
     p.add_argument("--fvg-min-body", type=float, default=0.0)
+    p.add_argument("--fvg-min-width-atr", type=float, default=0.0,
+                   help="drop FVGs narrower than this many ATR (BTC 15m: 0.1)")
 
 
 def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
@@ -333,12 +399,25 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
     p.add_argument("--sell-tax-bps", type=float, default=5.0)
     p.add_argument("--commission-bps", type=float, default=5.0)
     p.add_argument("--slippage-bps", type=float, default=2.0)
+    p.add_argument("--allow-short", action="store_true",
+                   help="also trade bearish CISD setups (default: long only)")
+    p.add_argument("--t1-at-r", type=float, default=0.0,
+                   help="take a partial profit at this R multiple (0=off)")
+    p.add_argument("--t1-fraction", type=float, default=0.5,
+                   help="fraction of the position taken off at --t1-at-r")
+    p.add_argument("--t1-no-be", action="store_true",
+                   help="keep the runner's original stop instead of moving it to break-even")
     p.add_argument("--min-net-rr", type=float, default=2.0)
     p.add_argument("--strict-audit", action="store_true",
                    help="require killzone + DOL + sweep + net RR for a TRADE")
     p.add_argument("--fvg-min-atr", type=float, default=0.25)
     p.add_argument("--fvg-min-body", type=float, default=0.5)
-    p.add_argument("--entry-mode", choices=["next_open", "retest_key", "fvg_ce"], default="next_open",
+    p.add_argument("--fvg-min-width-atr", type=float, default=0.0,
+                   help="drop FVGs narrower than this many ATR (BTC 15m: 0.1)")
+    p.add_argument("--min-risk-atr", type=float, default=0.5,
+                   help="reject a plan whose stop is closer than this many ATR (entry_invalid)")
+    p.add_argument("--entry-mode", choices=["next_open", "retest_key", "fvg_ce", "ob_me", "ote"],
+                   default="next_open",
                    help="enter at next open, retest the CISD key level, or retest the FVG CE")
     p.add_argument("--retest-max-bars", type=int, default=20)
     p.add_argument("--retest-tolerance-atr", type=float, default=0.0)
@@ -368,8 +447,14 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="require an unmitigated FVG that has not been touched")
     p.add_argument("--max-inducements", type=int, default=-1,
                    help="reject if more minor swings lie between entry and target (-1=off)")
-    p.add_argument("--quality-profile", choices=["standard", "high_value"], default="standard",
-                   help="opt-in stricter displacement/grade/confluence profile")
+    p.add_argument("--quality-profile", choices=["standard", "high_value", "high_rr", "btc_15m"],
+                   default="standard",
+                   help="opt-in stricter profile (btc_15m = sweep>=3 + stop>2ATR + "
+                        "grade>=4 + 2.5R; holdout win 60% on n=20)")
+    p.add_argument("--min-sweep-strength", type=float, default=0.0,
+                   help="reject signals whose best recent sweep is weaker than this")
+    p.add_argument("--min-stop-atr", type=float, default=0.0,
+                   help="reject signals whose stop is closer than this many ATR")
     p.add_argument("--stack", choices=["1d_4h_15m", "1d_1h_15m", "1d_15m", "4h_15m", "4h_1h_15m"],
                    default="1d_4h_15m", help="multi-timeframe stack to test")
 
@@ -380,6 +465,14 @@ def main(argv=None) -> None:
 
     a = sub.add_parser("analyze", help="key levels, sweeps, CISD and chart")
     _add_data_args(a)
+    a.add_argument("--plan-json", default=None,
+                   help="trade plan JSON (direction/entry/sl/tp) to draw on the chart")
+    a.add_argument("--grade", action="store_true",
+                   help="overlay the setup grade (A+..C)")
+    a.add_argument("--show-po3", action="store_true",
+                   help="overlay the PO3 state")
+    a.add_argument("--scenarios", action="store_true",
+                   help="overlay the 4-scenario winner")
     a.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("plan", help="latest frozen-setup trade card")
@@ -416,4 +509,3 @@ def main(argv=None) -> None:
 
 if __name__ == "__main__":
     main()
-

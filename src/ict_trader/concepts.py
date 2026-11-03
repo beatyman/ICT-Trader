@@ -60,6 +60,7 @@ class ICTConfig:
     displacement_body_ratio: float = 0.36
     fvg_min_atr: float = 0.0
     fvg_min_body: float = 0.0
+    fvg_min_width_atr: float = 0.0
     fvg_max_age: int = 500
     show_fvg: bool = True
     show_bpr: bool = False
@@ -359,13 +360,15 @@ def detect_fvgs(df: pd.DataFrame, cfg: ICTConfig) -> list[FVG]:
         vol_ratio = vol[i - 1] / vol_avg[i - 1] if vol_avg[i - 1] > 0 else 0.0
         if low[i] > high[i - 2] and (disp_up or not cfg.displacement_filter):
             gap = float(low[i] - high[i - 2])
-            if gap >= cfg.fvg_min_atr * atr14[i] and body_ratio >= cfg.fvg_min_body:
+            if (gap >= cfg.fvg_min_atr * atr14[i] and body_ratio >= cfg.fvg_min_body
+                    and gap >= cfg.fvg_min_width_atr * atr14[i]):
                 out.append(FVG("bull", float(low[i]), float(high[i - 2]), i - 2, i, i,
                                size_atr=gap / max(atr14[i], 1e-12), body_ratio=body_ratio,
                                volume_ratio=vol_ratio))
         if high[i] < low[i - 2] and (disp_dn or not cfg.displacement_filter):
             gap = float(low[i - 2] - high[i])
-            if gap >= cfg.fvg_min_atr * atr14[i] and body_ratio >= cfg.fvg_min_body:
+            if (gap >= cfg.fvg_min_atr * atr14[i] and body_ratio >= cfg.fvg_min_body
+                    and gap >= cfg.fvg_min_width_atr * atr14[i]):
                 out.append(FVG("bear", float(low[i - 2]), float(high[i]), i - 2, i, i,
                                size_atr=gap / max(atr14[i], 1e-12), body_ratio=body_ratio,
                                volume_ratio=vol_ratio))
@@ -796,7 +799,10 @@ def _latest_by_direction(items: Iterable, max_n: int, directions: tuple[str, ...
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
-def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: int | None = None) -> Path:
+def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: int | None = None,
+         plan: dict | None = None, grade: dict | None = None,
+         po3: object | None = None, scenario: str | None = None,
+         scenario_plan: object | None = None) -> Path:
     cfg = result.config
     n = len(result.bars)
     bars = bars or cfg.plot_bars
@@ -995,6 +1001,45 @@ def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: 
                 continue
             ax.axvspan(max(rel(a_i), 0), min(rel(b_i), m - 1), color="#999999", alpha=0.08, zorder=0)
 
+    # ---- trade plan layer (entry/SL/TP + grade + PO3 + scenario) ----
+    if plan is not None:
+        direction = plan.get("direction")
+        entry = plan.get("entry")
+        sl = plan.get("sl")
+        tp = plan.get("tp")
+        status = plan.get("status") or plan.get("plan_status")
+        col = "#1E88E5" if direction == "long" else "#E53935"
+        for label, val, ls in (("Entry", entry, "--"), ("SL", sl, ":"), ("TP", tp, ":")):
+            if val is None:
+                continue
+            ax.hlines(val, 0, m - 1, colors=col, linestyles=ls, linewidth=1.2, alpha=0.85, zorder=7)
+            txt = f"{label} {val:.6g}"
+            if label == "Entry" and status:
+                txt += f"  [{status}]"
+            ax.text(m - 1, val, txt, color=col, fontsize=7.5, va="center", ha="left", zorder=8,
+                    bbox=dict(boxstyle="round,pad=.15", fc="white", ec=col, alpha=.85))
+
+    extra: list[str] = []
+    if grade is not None:
+        g = grade.get("grade", "-")
+        gcol = {"A+": "#00C853", "A": "#64DD17", "B+": "#9ACD32",
+                "B-": "#FFB300", "C": "#FF7043"}.get(g, "#888888")
+        extra.append(f"Grade {g} ({grade.get('hits', 0)}/{grade.get('enabled', 0)})")
+    if po3 is not None:
+        po3_state = getattr(po3, "state", None)
+        if po3_state is None and isinstance(po3, dict):
+            po3_state = po3.get("state")
+        if po3_state:
+            extra.append(f"PO3: {po3_state}")
+    if scenario is not None:
+        extra.append(f"Scenario {scenario}")
+    if scenario_plan is not None and getattr(scenario_plan, "status", None):
+        extra.append(f"{getattr(scenario_plan, 'status')}")
+    if extra:
+        ax.text(0, float(df["high"].max()), "  |  ".join(extra), fontsize=8, color="#37474F",
+                va="top", ha="left", zorder=11,
+                bbox=dict(boxstyle="round,pad=.3", fc="white", ec="#90A4AE", alpha=.9))
+
     ax.set_title(
         f"{title}  |  bars={m}  MSS/BOS={len(shown_events)}  "
         f"FVG={len(_latest_by_direction(result.fvgs, cfg.max_fvg, ('bull', 'bear')))}  "
@@ -1145,4 +1190,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
