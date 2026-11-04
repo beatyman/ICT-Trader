@@ -223,11 +223,13 @@ def _plan_d(audit: dict, res, atr: float, price: float, min_rr: float,
 
 
 def _dol(res, price: float, direction: str, at: int | None = None) -> float | None:
-    """Nearest unswept pool on the target side.
+    """Highest-liquidity unswept pool on the target side.
 
     ``at`` restricts the pool to levels that were already known at that bar:
     a level confirmed after the decision bar is future data and cannot be a
-    draw on liquidity.
+    draw on liquidity.  Levels are ranked by liquidity quality first, then by
+    distance, so price is drawn to the EQH/EQL stop cluster, not the nearest
+    arbitrary swing.
     """
     levels = [k for k in res.key_levels
               if k.sweep_bar is None and k.broken_at is None
@@ -235,7 +237,8 @@ def _dol(res, price: float, direction: str, at: int | None = None) -> float | No
     side = [k for k in levels if (k.price > price if direction == "long" else k.price < price)]
     if not side:
         return None
-    return float(min(side, key=lambda k: k.price).price) if direction == "long" else float(max(side, key=lambda k: k.price).price)
+    side.sort(key=lambda k: (-getattr(k, "quality", 0.0), abs(k.price - price)))
+    return float(side[0].price)
 
 
 # --------------------------------------------------------------------------

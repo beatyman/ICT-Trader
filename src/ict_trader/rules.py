@@ -577,12 +577,19 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
         # current swing extreme, not an untested draw.
         dol_side = [k for k in (above if plan["direction"] == "long" else below)
                     if k.known_at < n - 20]
+        # DOL = the highest-liquidity unswept pool, not merely the nearest
+        # level: price is drawn to where the stops pool (EQH/EQL), not to the
+        # closest arbitrary swing high/low.
+        if dol_side:
+            dol_side.sort(key=lambda k: (-getattr(k, "quality", 0.0),
+                                         abs(k.price - price)))
         dol = dol_side[0] if dol_side else None
         rules.append(_status("L2-07", "L2", "DOL", dol is not None,
                              blocking=True,
                              value={"direction": plan["direction"],
                                     "dol": None if dol is None else round(dol.price, 4),
-                                    "name": None if dol is None else dol.name},
+                                    "name": None if dol is None else dol.name,
+                                    "quality": None if dol is None else getattr(dol, "quality", 0.0)},
                              reason="no unswept pool on plan side" if dol is None else ""))
     else:
         rules.append(_status("L2-07", "L2", "DOL", None, blocking=True,
