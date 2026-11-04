@@ -44,7 +44,7 @@ from matplotlib.patches import Rectangle
 from .cisd import CISD, CISDConfig, detect_cisd
 from .enhancements import SMT, SessionLevel, detect_htf_cisds, detect_session_levels, detect_smt
 from .pd_arrays import PDAArray, detect_breakers, detect_mitigations, detect_rejections
-from .sweeps import KeyLevel, LiquiditySweep, detect_key_levels, detect_sweeps, nearest_key_target
+from .sweeps import KeyLevel, LiquiditySweep, detect_key_levels, detect_sweeps, nearest_key_target, score_key_levels
 
 Direction = Literal["bull", "bear"]
 
@@ -674,6 +674,7 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
                            min_penetration_atr=cfg.sweep_min_penetration_atr,
                            reclaim_window=cfg.sweep_reclaim_bars) if cfg.show_sweeps else []
     sweep_bars = [(s.reclaim_bar, s.direction) for s in sweeps]
+    score_key_levels(key_levels, sessions, df)
 
     cisds: list[CISD] = []
     if cfg.show_cisd:

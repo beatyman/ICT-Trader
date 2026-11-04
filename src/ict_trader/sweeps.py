@@ -37,6 +37,7 @@ class KeyLevel:
     sweep_bar: int | None = None
     broken_at: int | None = None
     touches: int = 1
+    quality: float = 0.0  # liquidity quality score (higher = more liquidity)
 
 
 @dataclass
@@ -241,6 +242,50 @@ def detect_sweeps(
         if key not in uniq or s.strength > uniq[key].strength:
             uniq[key] = s
     return sorted(uniq.values(), key=lambda s: s.reclaim_bar)
+
+
+def score_key_levels(levels: Iterable[KeyLevel], sessions: Iterable,
+                     df: pd.DataFrame) -> None:
+    """Assign each key level a liquidity quality score (in place).
+
+    The "obvious / eye-catching" level is one where liquidity actually pools:
+
+      * touches          -- EQH/EQL cluster size (each extra touch = more stops)
+      * liquidity pool   -- the level IS an EQH/EQL platform
+      * session overlap  -- price coincides with a session level (PDH/PDL/...)
+      * sweep evidence   -- a deep wick + reclaim already tested the liquidity
+      * volume spike     -- heavy turnover at the level's bar
+
+    A lone swing high/low scores ~1; a swept EQH platform that overlaps a
+    session level scores ~10.  Callers can then rank and keep only the top.
+    """
+    atr_arr = _atr(df)
+    tol = max(float(np.nanmedian(atr_arr)) * 0.3, 1e-9) if len(atr_arr) else 1e-9
+    session_prices = [float(s.price) for s in sessions]
+
+    vol = df["volume"].to_numpy(float) if "volume" in df else None
+    vol_sma = (pd.Series(vol).rolling(20, min_periods=1).mean().to_numpy()
+               if vol is not None else None)
+
+    for k in levels:
+        score = 0.0
+        # cluster size (capped) -- more touches = more liquidity
+        score += float(min(int(k.touches), 6))
+        # the platform itself (EQH/EQL)
+        if k.name in {"EQH", "EQL"}:
+            score += 2.0
+        # session overlap
+        if session_prices and any(abs(p - k.price) <= tol for p in session_prices):
+            score += 2.0
+        # tested liquidity (swept)
+        if k.swept:
+            score += 2.0
+        # volume spike at the level's bar
+        if (vol is not None and vol_sma is not None
+                and 0 <= k.known_at < len(vol_sma) and vol_sma[k.known_at] > 0):
+            if vol[k.known_at] >= 1.5 * vol_sma[k.known_at]:
+                score += 1.0
+        k.quality = round(score, 2)
 
 
 def nearest_key_target(levels: Iterable[KeyLevel], price: float, bull: bool,

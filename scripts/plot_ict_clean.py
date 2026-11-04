@@ -278,6 +278,20 @@ def render(args) -> Path:
         handles.append(Line2D([0], [0], color=color, lw=1.2, ls=(0, (5, 3)),
                               label=f"{k.name} {k.price:.4g}"))
 
+    # ---- high-quality key levels (liquidity pools, the "碍眼的" ones) --
+    qlev = [k for k in result.key_levels
+            if getattr(k, "quality", 0) >= 5 and k.known_at <= last]
+    qlev.sort(key=lambda k: -k.quality)
+    for k in qlev[:4]:
+        color = "#0d47a1" if k.kind == "H" else "#b71c1c"
+        ax.axhline(float(k.price), color=color, linestyle="-",
+                   linewidth=2.0, alpha=.85, zorder=3)
+        ax.text(last, float(k.price), f"{k.name} {k.price:.4g} Q{k.quality:.0f}",
+                color=color, fontsize=7, va="center", ha="left", zorder=8,
+                bbox=dict(boxstyle="round,pad=.1", fc="white", ec="none", alpha=.7))
+        handles.append(Line2D([0], [0], color=color, lw=2.0,
+                              label=f"KEY {k.name} {k.price:.4g} (Q{k.quality:.0f})"))
+
     # ---- active FVG / OB (mapped onto the plotted window) ----------
     view_end = view["date"].iloc[-1]
     view_start = view["date"].iloc[0]
