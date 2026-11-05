@@ -70,3 +70,34 @@ def test_invalidation_includes_broken_key_when_invalid():
     assert any("close above" in iv or "broke below" in iv for iv in p.invalidations)
     # invalidation should include "broke below key_level"
     assert any("broke below" in iv for iv in p.invalidations)
+
+
+def test_ict_primary_auxiliaries_cannot_flip_direction():
+    # ICT short (primary) + Ichimoku long + Wyckoff accumulation (long)
+    # -> conflict -> downgrade to wait, NOT flip to long
+    inp = FusionInput(current_price=100, wyckoff_phase="accumulation", wyckoff_valid=True,
+                      key_level=95, ichimoku_filter="long", cloud_bottom=90,
+                      cloud_top=110, ict_direction="short", price_in_premium=False)
+    p = decide(inp)
+    assert p.direction == "wait"
+    assert p.layers["L3_ict_direction"] == "PASS"  # ICT still primary
+
+
+def test_auxiliaries_confirm_raises_confidence():
+    # ICT short + Ichimoku short + Wyckoff distribution (all aligned) -> confidence 8
+    inp = FusionInput(current_price=100, wyckoff_phase="distribution", wyckoff_valid=True,
+                      key_level=110, ichimoku_filter="short", cloud_bottom=90,
+                      cloud_top=110, ict_direction="short", price_in_premium=True)
+    p = decide(inp)
+    assert p.direction == "short"
+    assert p.confidence == 8  # 5 + 1(ICT primary) + 1(ichi) + 1(wyck)
+
+
+def test_ict_wait_is_flat_regardless_of_auxiliaries():
+    # ICT has no direction -> stay flat even if auxiliaries agree
+    inp = FusionInput(current_price=100, wyckoff_phase="distribution", wyckoff_valid=True,
+                      key_level=110, ichimoku_filter="short", cloud_bottom=90,
+                      cloud_top=110, ict_direction="wait", price_in_premium=True)
+    p = decide(inp)
+    assert p.direction == "wait"
+    assert p.layers["L3_ict_direction"] == "FAIL"
