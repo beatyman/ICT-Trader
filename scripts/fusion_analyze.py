@@ -30,11 +30,11 @@ def run_engines(df: pd.DataFrame, daily: pd.DataFrame, market: str) -> FusionInp
     """跑三引擎，映射成 FusionInput。"""
     # ---- Wyckoff (15m) ----
     st, _ = detect_wyckoff(df)
-    phase = "中性"
+    phase = "neutral"
     if st.direction == 1:
-        phase = "吸筹"
+        phase = "accumulation"
     elif st.direction == -1:
-        phase = "派发"
+        phase = "distribution"
     wy_valid = st.direction != 0 and not st.failed
     key_level = st.invalidation if not np.isnan(st.invalidation) else st.climax_side
     if np.isnan(key_level):
@@ -47,11 +47,11 @@ def run_engines(df: pd.DataFrame, daily: pd.DataFrame, market: str) -> FusionInp
     sig = ichi_sig(d, ind, 26)
     last = -1
     if bool(sig["below_cloud"].iloc[last]):
-        ichi_filter = "空"
+        ichi_filter = "short"
     elif bool(sig["above_cloud"].iloc[last]):
-        ichi_filter = "多"
+        ichi_filter = "long"
     else:
-        ichi_filter = "观望"
+        ichi_filter = "wait"
     cloud_bottom = float(sig["cloud_bottom"].iloc[last])
     cloud_top = float(sig["cloud_top"].iloc[last])
 
@@ -59,11 +59,11 @@ def run_engines(df: pd.DataFrame, daily: pd.DataFrame, market: str) -> FusionInp
     from ict_trader.rules import audit
     a = audit(df, daily=daily, market=market)
     by_id = {r["rule_id"]: r for r in a["rules"]}
-    ict_dir = "观望"
+    ict_dir = "wait"
     r503 = by_id.get("L5-03")
     if r503 and isinstance(r503.get("value"), dict):
         d_ = r503["value"].get("direction")
-        ict_dir = "多" if d_ == "long" else "空" if d_ == "short" else "观望"
+        ict_dir = "long" if d_ == "long" else "short" if d_ == "short" else "wait"
     price_in_premium = False
     r506 = by_id.get("L5-06")
     if r506 and isinstance(r506.get("value"), dict):
