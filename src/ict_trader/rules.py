@@ -158,7 +158,8 @@ def position_size(risk_usd: float, entry: float, sl: float,
     return max(int(risk_usd / (dist * point_value)), min_qty)
 
 
-# Six-item setup checklist mapped onto the L-layer rules (Authrain grade model).
+# Seven-item setup checklist mapped onto the L-layer rules (Authrain grade model
+# + the focused entry model L3-11).
 _CHECKLIST = [
     ("Liquidity Sweep", "L2-04"),
     ("HTF PDA Delivery", "L2-08"),
@@ -166,6 +167,7 @@ _CHECKLIST = [
     ("Session Sweep", "L2-03"),
     ("Clear Targets", "L4-02"),
     ("SMT", "L2-10"),
+    ("Entry Model", "L3-11"),
 ]
 
 
@@ -708,14 +710,22 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     ifvgs = [f for f in res.fvgs
              if getattr(f, "inverted", False) and getattr(f, "active", True)
              and f.created >= max(0, n - 60)]
-    model_ok = bool(session_sweep and ifvgs and cisds and dol is not None)
-    rules.append(_status("L3-11", "L3", "entry model (sweep→IFVG→CISD→DOL)", model_ok,
+    if plan is None:
+        # DOL needs a plan direction; the 4-step model is not evaluable.
+        model_val = None
+        model_reason = "no plan direction (DOL step unevaluable)"
+    else:
+        model_ok = bool(session_sweep and ifvgs and cisds and dol is not None)
+        model_val = model_ok
+        model_reason = ("one of: Asia/London sweep, IFVG, CISD, DOL missing"
+                        if not model_ok else "")
+    rules.append(_status("L3-11", "L3", "entry model (sweep→IFVG→CISD→DOL)", model_val,
                          blocking=False,
                          value={"session_sweep": session_sweep,
                                 "ifvg_count": len(ifvgs),
                                 "cisd_count": len(cisds),
                                 "dol": None if dol is None else round(dol.price, 4)},
-                         reason="one of: Asia/London sweep, IFVG, CISD, DOL missing" if not model_ok else ""))
+                         reason=model_reason))
 
     # ---- L4 ---------------------------------------------------------
     gross, net = _plan_net_rr(plan)
