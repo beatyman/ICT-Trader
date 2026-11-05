@@ -496,19 +496,26 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
           market: str = "crypto", plan: dict | None = None,
           smt_df: pd.DataFrame | None = None, mode: str = "strict",
           touch_atr_source: str = "htf", touch_semantics: str = "current",
-          htf_stub: dict | None = None, risk_usd: float | None = None) -> dict:
-    """Run the L0-L5 checks and return a JSON-serialisable report."""
+          htf_stub: dict | None = None, risk_usd: float | None = None,
+          res: "ICTResult | None" = None) -> dict:
+    """Run the L0-L5 checks and return a JSON-serialisable report.
+
+    ``res`` is an optional pre-computed ``ICTResult`` (from ``analyze``); when
+    supplied the caller avoids a second, redundant ``analyze`` pass (this is the
+    hot path in the auto-analyzer backtest).
+    """
     if mode not in {"strict", "shadow"}:
         raise ValueError("mode must be strict or shadow")
     rules: list[RuleResult] = []
     n = len(df)
     last = df.iloc[-1]
     price = float(last["close"])
-    res = analyze(
-        df,
-        ICTConfig(mode="historical", show_sessions=False, show_htf_cisd=False,
-                  cisd_all=True, cisd_min_grade=0),
-    )
+    if res is None:
+        res = analyze(
+            df,
+            ICTConfig(mode="historical", show_sessions=False, show_htf_cisd=False,
+                      cisd_all=True, cisd_min_grade=0),
+        )
     atr = _atr(df)
     trend = int(res.trend.iloc[-1]) if len(res.trend) else 0
 

@@ -45,8 +45,8 @@ def ict_signal(df_5m: pd.DataFrame, df_daily: pd.DataFrame, market: str = "crypt
     # 分析（拿扫单/结构/OB/FVG）
     res = analyze(df_5m, ICTConfig(mode="historical", show_sessions=False,
                                    show_htf_cisd=False, cisd_all=True, cisd_min_grade=0))
-    # 审计（拿规则 PASS/FAIL）
-    a = audit(df_5m, daily=df_daily, market=market)
+    # 审计（拿规则 PASS/FAIL）——复用上面的 res，避免二次 analyze
+    a = audit(df_5m, daily=df_daily, market=market, res=res)
     by_id = {r["rule_id"]: r for r in a["rules"]}
     sig.rules = {rid: by_id[rid]["status"] for rid in by_id}
 

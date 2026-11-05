@@ -188,6 +188,7 @@ def main() -> None:
     b.add_argument("--risk-pct", type=float, default=0.01)
     b.add_argument("--warmup", type=int, default=300)
     b.add_argument("--step", type=int, default=1)
+    b.add_argument("--limit", type=int, default=0, help="only use the last N bars (0 = all)")
     b.add_argument("--json-out", default=None)
     b.set_defaults(func=lambda a: _cmd_backtest(a))
 
@@ -224,6 +225,8 @@ def _cmd_backtest(args):
     d = _load(args.daily_csv)
     h = _load(args.htf_csv)
     symbol = args.symbol or Path(args.csv).stem
+    if args.limit > 0:
+        df = df.tail(args.limit).reset_index(drop=True)
     out = run_backtest(df, d, h, args.market, symbol, args.capital, args.risk_pct, args.warmup, args.step)
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
