@@ -251,6 +251,32 @@ def detect_intraday_session_levels(df: pd.DataFrame, tz: str = "America/New_York
     return out
 
 
+def _session_liquidity_sweep(df: pd.DataFrame, sess_liq: dict,
+                             lookback: int = 20) -> dict | None:
+    """Did price sweep an Asia/London session high or low within ``lookback``?
+
+    A bull sweep = a wick below a session low then a close back above it;
+    a bear sweep = a wick above a session high then a close back below it.
+    Returns the most recent such sweep, else None.
+    """
+    if not sess_liq:
+        return None
+    lows = [v["low"] for v in sess_liq.values() if v.get("low") is not None]
+    highs = [v["high"] for v in sess_liq.values() if v.get("high") is not None]
+    if not lows and not highs:
+        return None
+    found = None
+    for _, r in df.tail(lookback).iterrows():
+        h, lo, c = float(r["high"]), float(r["low"]), float(r["close"])
+        for lv in lows:
+            if lo < lv and c > lv:
+                found = {"level": round(lv, 4), "direction": "bull", "bar": str(r["date"])}
+        for hv in highs:
+            if h > hv and c < hv:
+                found = {"level": round(hv, 4), "direction": "bear", "bar": str(r["date"])}
+    return found
+
+
 _MARKET_TZ = {
     "crypto": "UTC",
     "us": "America/New_York",
@@ -572,6 +598,7 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
                and (k.broken_at is None or k.broken_at > n - 1)]
     above = sorted([k for k in visible if k.price > price], key=lambda k: k.price)
     below = sorted([k for k in visible if k.price < price], key=lambda k: -k.price)
+    dol = None
     if plan:
         # Do not use a pool created inside the last 20 bars as DOL: it is the
         # current swing extreme, not an untested draw.
@@ -675,6 +702,20 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     rules.append(_status("L3-10", "L3", "displacement quality", False if disp is None else disp["ok"],
                          blocking=False, value=disp,
                          reason="no CISD" if disp is None else ("" if disp["ok"] else "displacement below threshold")))
+
+    # ---- focused entry model: Sweep(Asia/London) -> IFVG -> CISD -> DOL ----
+    session_sweep = _session_liquidity_sweep(df, sess_liq)
+    ifvgs = [f for f in res.fvgs
+             if getattr(f, "inverted", False) and getattr(f, "active", True)
+             and f.created >= max(0, n - 60)]
+    model_ok = bool(session_sweep and ifvgs and cisds and dol is not None)
+    rules.append(_status("L3-11", "L3", "entry model (sweep→IFVG→CISD→DOL)", model_ok,
+                         blocking=False,
+                         value={"session_sweep": session_sweep,
+                                "ifvg_count": len(ifvgs),
+                                "cisd_count": len(cisds),
+                                "dol": None if dol is None else round(dol.price, 4)},
+                         reason="one of: Asia/London sweep, IFVG, CISD, DOL missing" if not model_ok else ""))
 
     # ---- L4 ---------------------------------------------------------
     gross, net = _plan_net_rr(plan)
