@@ -1,0 +1,246 @@
+//@version=5
+// =============================================================================
+//  Wyckoff Accumulation & Distribution 结构检测（可回测信号版）
+//  -------------------------------------------------------------------------
+//  依据 tradingwyckoff.com 方法论 + 量化代理。非重绘：所有事件只在已收盘 K 线
+//  上判定；pivot 用确认摆动点；无 request.security 前视，无 lookahead。
+//
+//  事件：PS/PSY · SC/BC · AR · ST · Spring/UTAD · Test · SOS/SOW · LPS/LPSY
+//  阶段：A（停止）→ B（建因）→ C（震仓测试）→ D（SOS/SOW）→ E（LPS/LPSY）
+//
+//  注意：Wyckoff 含主观判读，本脚本是「可量化代理」——高潮/宽幅/量能递减用
+//  阈值代理，事件是「被后续验证的假设」，标签用「潜在」直到 AR/ST 确认。
+// =============================================================================
+indicator("Wyckoff Accumulation & Distribution [Quant Proxy]", "Wyckoff QA",
+     overlay = true, max_labels_count = 300, max_lines_count = 200, max_boxes_count = 60)
+
+// ---- 输入 -------------------------------------------------------------
+grp = "Schematic"
+trendLen   = input.int(50,  "Climax lookback (bars)",        minval=10, maxval=300, group=grp)
+climRng    = input.float(1.2, "Climax range (× ATR)",         minval=0.5, maxval=5.0, step=0.1, group=grp)
+climVol    = input.float(1.5, "Climax volume (× 20-bar avg)", minval=1.0, maxval=6.0, step=0.1, group=grp)
+pivLen     = input.int(3,    "Swing strength",               minval=2,  maxval=10,  group=grp)
+arMin      = input.float(2.0, "Min AR (× ATR)",               minval=0.5, maxval=10.0, step=0.1, group=grp)
+maxH       = input.float(10.0,"Max range height (× ATR)",     minval=3.0, maxval=30.0, step=0.5, group=grp)
+minRange   = input.int(15,   "Min range length (bars)",      minval=5,  maxval=200, group=grp)
+stTol      = input.float(0.35,"ST zone (part of range)",      minval=0.1, maxval=0.6, step=0.05, group=grp)
+sprBars    = input.int(3,    "Spring/UTAD max bars outside", minval=1,  maxval=10,  group=grp)
+failDep    = input.float(0.30,"Break depth (part of range)",  minval=0.1, maxval=1.0, step=0.05, group=grp)
+maxRng     = input.int(300,  "Range expiry (bars)",          minval=50, maxval=2000, group=grp)
+
+grpS = "Strategy signals"
+tradeSpring = input.bool(false, "Trade Spring/UTAD directly (aggressive)", group=grpS)
+stopMode    = input.string("Scenario", "Stop placement", options=["Trigger", "Scenario", "Structural"], group=grpS)
+
+// ---- 系列 -------------------------------------------------------------
+atr   = ta.atr(14)
+avgV  = ta.sma(volume, 20)
+hasVol = avgV > 0
+newLo = low <= ta.lowest(low, trendLen)
+newHi = high >= ta.highest(high, trendLen)
+ph    = ta.pivothigh(high, pivLen, pivLen)
+pl    = ta.pivotlow(low, pivLen, pivLen)
+pBar  = bar_index - pivLen
+
+// ---- 状态 -------------------------------------------------------------
+var int   stage = 0
+var int   dir   = 0
+var int   startBar = na
+var float ext  = na
+var int   extBar = na
+var float arP  = na
+var int   arBar = na
+var float trTop = na
+var float trBot = na
+var float rngH = na
+var float cs   = na
+var float bs   = na
+var bool  stOn  = false
+var bool  sprOn = false
+var float sprExt = na
+var int   sprBar = na
+var bool  pend  = false
+var int   pendN = 0
+var float pendExt = na
+var int   pendExtBar = na
+var int   sosBar = na
+var bool  lpsOn = false
+var float t1 = na
+var float t2 = na
+var float inv = na
+
+var box   trBox = na
+var line  bsLn  = na
+var line  t1Ln  = na
+var line  t2Ln  = na
+var line  invLn = na
+
+evClim = false
+evSpr  = false
+evSos  = false
+evLps  = false
+evFail = false
+
+// ---- 状态机（已收盘 K 线）--------------------------------------------
+if barstate.isconfirmed and not na(atr)
+    age    = bar_index - startBar
+    early  = age < minRange
+    wickC  = dir == 1 ? low : high
+    fav    = dir == 1 ? high : low
+
+    // D / E：目标、失效、LPS/LPSY
+    if stage >= 4
+        if (inv - close) * dir > 0
+            evFail := true
+        if stage == 4
+            pv = dir == 1 ? pl : ph
+            if not na(pv) and pBar > sosBar and (pv - (trTop + trBot) / 2) * dir > 0
+                stage := 5
+                lpsOn := true
+                evLps := true
+                label.new(pBar, pv, dir == 1 ? "LPS" : "LPSY",
+                     style=dir == 1 ? label.style_label_up : label.style_label_down,
+                     color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+
+    // B / C：ST、Spring/UTAD、SOS/SOW
+    else if stage == 2 or stage == 3
+        if stage == 2 and not pend and not stOn
+            pv = dir == 1 ? pl : ph
+            if not na(pv) and pBar > arBar and (pv - cs) * dir >= 0 and (pv - cs) * dir <= stTol * rngH
+                stOn := true
+                label.new(pBar, pv, "ST", style=dir == 1 ? label.style_label_up : label.style_label_down,
+                     color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+        if (close - bs) * dir > 0
+            if early
+                evFail := true
+            else
+                stage := 4
+                sosBar := bar_index
+                evSos := true
+                t1 := bs + dir * rngH
+                t2 := bs + dir * 2 * rngH
+                inv := sprOn ? sprExt : cs
+                label.new(bar_index, fav, dir == 1 ? "SOS" : "SOW",
+                     style=dir == -1 ? label.style_label_up : label.style_label_down,
+                     color=color.new(dir == 1 ? color.green : color.red, 10), textcolor=color.white, size=size.small)
+                box.set_right(trBox, bar_index)
+                line.set_x2(bsLn, bar_index)
+                t1Ln := line.new(sosBar, t1, bar_index + 3, t1, color=color.new(dir == 1 ? color.green : color.red, 10), width=2)
+                t2Ln := line.new(sosBar, t2, bar_index + 3, t2, color=color.new(dir == 1 ? color.green : color.red, 10), width=2, style=line.style_dashed)
+                invLn := line.new(sosBar, inv, bar_index + 3, inv, color=color.new(color.gray, 10), width=1, style=line.style_dotted)
+        else if stage == 2
+            if pend
+                pendN += 1
+                if (pendExt - wickC) * dir > 0
+                    pendExt := wickC
+                    pendExtBar := bar_index
+                if (close - cs) * dir >= 0
+                    pend := false
+                    if not early
+                        sprOn := true
+                        sprExt := pendExt
+                        sprBar := pendExtBar
+                else if (cs - close) * dir > failDep * rngH or pendN > sprBars
+                    evFail := true
+            else if (cs - wickC) * dir > 0
+                if (close - cs) * dir >= 0
+                    if not early
+                        sprOn := true
+                        sprExt := wickC
+                        sprBar := bar_index
+                else if (cs - close) * dir > failDep * rngH
+                    evFail := true
+                else
+                    pend := true
+                    pendN := 1
+                    pendExt := wickC
+                    pendExtBar := bar_index
+            if sprOn
+                stage := 3
+                evSpr := true
+                label.new(sprBar, sprExt, dir == 1 ? "SPRING" : "UTAD",
+                     style=dir == 1 ? label.style_label_up : label.style_label_down,
+                     color=color.new(color.blue, 10), textcolor=color.white, size=size.small)
+            else if bar_index - startBar > maxRng
+                evFail := true
+        else
+            if (sprExt - close) * dir > 0
+                evFail := true
+
+    // A：高潮延续，直到 AR 形成
+    else if stage == 1
+        if (ext - wickC) * dir > 0
+            ext := wickC
+            extBar := bar_index
+        pv = dir == 1 ? ph : pl
+        if not na(pv) and pBar > extBar and (pv - ext) * dir >= arMin * atr
+            if math.abs(pv - ext) > maxH * atr
+                evFail := true
+            else
+                stage := 2
+                arP := pv
+                arBar := pBar
+                trTop := math.max(ext, arP)
+                trBot := math.min(ext, arP)
+                rngH := trTop - trBot
+                cs := ext
+                bs := arP
+                trBox := box.new(extBar, trTop, bar_index, trBot,
+                     border_color=color.new(color.blue, 40), border_width=2,
+                     bgcolor=color.new(color.blue, 91),
+                     text=dir == 1 ? "ACCUMULATION" : "DISTRIBUTION", text_color=color.white, text_size=size.small)
+                bsLn := line.new(arBar, bs, bar_index, bs, color=color.new(dir == 1 ? color.green : color.red, 15), width=2, style=line.style_dashed)
+                label.new(arBar, arP, "AR", style=dir == -1 ? label.style_label_up : label.style_label_down,
+                     color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+        else if bar_index - extBar > trendLen
+            evFail := true
+
+    // 搜索高潮
+    if stage == 0
+        rngOk = not na(atr) and high - low >= climRng * atr
+        volOk = not hasVol or volume >= climVol * avgV
+        sc = newLo and rngOk and volOk
+        bc = newHi and rngOk and volOk
+        if sc or bc
+            dir := sc and (not bc or close < open) ? 1 : -1
+            stage := 1
+            ext := dir == 1 ? low : high
+            extBar := bar_index
+            startBar := bar_index
+            stOn := false
+            sprOn := false
+            lpsOn := false
+            pend := false
+            pendN := 0
+            evClim := true
+            label.new(bar_index, ext, dir == 1 ? "SC" : "BC",
+                 style=dir == 1 ? label.style_label_up : label.style_label_down,
+                 color=color.new(color.gray, 20), textcolor=color.white, size=size.small)
+
+    // 结束
+    if evFail and stage >= 2
+        label.new(bar_index, dir == 1 ? low : high, "FAILED",
+             style=dir == 1 ? label.style_label_up : label.style_label_down,
+             color=color.new(color.red, 20), textcolor=color.white, size=size.small)
+        stage := 0
+        dir := 0
+        evFail := false
+        pend := false
+        pendN := 0
+
+// ---- 运行中的盒子跟随 -------------------------------------------------
+if stage == 2 or stage == 3
+    box.set_right(trBox, bar_index)
+    line.set_x2(bsLn, bar_index)
+if stage >= 4 and not na(t1Ln)
+    line.set_x2(t1Ln, bar_index + 3)
+    line.set_x2(t2Ln, bar_index + 3)
+    line.set_x2(invLn, bar_index + 3)
+
+// ---- 警报 -------------------------------------------------------------
+alertcondition(evSpr and dir == 1, "Wyckoff Spring", "{{ticker}} Spring confirmed")
+alertcondition(evSpr and dir == -1, "Wyckoff UTAD", "{{ticker}} UTAD confirmed")
+alertcondition(evSos and dir == 1, "Wyckoff SOS", "{{ticker}} Sign of Strength")
+alertcondition(evSos and dir == -1, "Wyckoff SOW", "{{ticker}} Sign of Weakness")
+alertcondition(evLps, "Wyckoff LPS/LPSY", "{{ticker}} LPS/LPSY confirmed")
+alertcondition(evFail, "Wyckoff Failed", "{{ticker}} schematic failed")

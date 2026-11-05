@@ -60,6 +60,20 @@ def pivot_low(low: np.ndarray, left: int, right: int) -> np.ndarray:
 
 
 @dataclass
+class WyckoffSignal:
+    """一条可回测的入场信号（在事件发生时发出）。"""
+    bar: int
+    direction: str              # "long" / "short"
+    kind: str                   # spring / utad / sos / sow / lps / lpsy
+    entry_price: float
+    range_top: float
+    range_bottom: float
+    creek_ice: float            # 突破边（吸筹 Creek / 派发 ICE）
+    climax_side: float          # 高潮边
+    spring_extreme: float       # Spring 低点 / UTAD 高点（场景失效位）
+
+
+@dataclass
 class WyckoffState:
     stage: int = 0                # 0 搜索 · 1 A · 2 B · 3 C · 4 D · 5 E
     direction: int = 0            # 1 吸筹 · -1 派发
@@ -87,6 +101,7 @@ class WyckoffState:
     failed: bool = False
     completed: bool = False
     events: list = field(default_factory=list)   # (bar, price, label)
+    signals: list = field(default_factory=list)  # WyckoffSignal
 
 
 def _ema_warm(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
@@ -163,6 +178,12 @@ def detect_wyckoff(
                     st.lps_confirmed = True
                     st.events.append((i, pv, "LPS" if d == 1 else "LPSY"))
                     st.phase = "E"
+                    st.signals.append(WyckoffSignal(
+                        bar=i, direction="long" if d == 1 else "short",
+                        kind="lps" if d == 1 else "lpsy",
+                        entry_price=float(pv), range_top=st.range_top,
+                        range_bottom=st.range_bottom, creek_ice=st.creek_ice,
+                        climax_side=st.climax_side, spring_extreme=st.spring_extreme))
 
         # ---- B / C：ST、Spring/UTAD、SOS/SOW ----
         elif st.stage in (2, 3):
@@ -187,6 +208,12 @@ def detect_wyckoff(
                     st.invalidation = st.spring_extreme if st.spring_confirmed else st.climax_side
                     st.events.append((i, fav, "SOS" if d == 1 else "SOW"))
                     st.phase = "D"
+                    st.signals.append(WyckoffSignal(
+                        bar=i, direction="long" if d == 1 else "short",
+                        kind="sos" if d == 1 else "sow",
+                        entry_price=float(close[i]), range_top=st.range_top,
+                        range_bottom=st.range_bottom, creek_ice=st.creek_ice,
+                        climax_side=st.climax_side, spring_extreme=st.spring_extreme))
             elif st.stage == 2:
                 # Spring / UTAD 渗透检测
                 if pend:
@@ -223,6 +250,12 @@ def detect_wyckoff(
                     st.events.append((st.spring_bar, st.spring_extreme,
                                       "SPRING" if d == 1 else "UTAD"))
                     st.phase = "C"
+                    st.signals.append(WyckoffSignal(
+                        bar=i, direction="long" if d == 1 else "short",
+                        kind="spring" if d == 1 else "utad",
+                        entry_price=float(close[i]), range_top=st.range_top,
+                        range_bottom=st.range_bottom, creek_ice=st.creek_ice,
+                        climax_side=st.climax_side, spring_extreme=st.spring_extreme))
                 elif i - st.start_bar > max_range_bars and not st.failed:
                     st.failed = True
             else:  # stage 3，已 spring，等 SOS 或失效
