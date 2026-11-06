@@ -33,6 +33,16 @@ def test_resolve_pair():
     assert resolve_pair("SOLUSDT") == "ETHUSDT"
     assert resolve_pair("DOGEUSDT") == "ETHUSDT"
     assert resolve_pair("UNKNOWN") == ""
+    # 港股科技 -> 恒生科技指数；港股非科技 -> 恒生指数
+    assert resolve_pair("HK.00700") == "HK.800700"   # 腾讯 -> 恒生科技
+    assert resolve_pair("HK.03690") == "HK.800700"   # 美团 -> 恒生科技
+    assert resolve_pair("HK.00005") == "HK.800000"   # 汇丰 -> 恒生指数
+    # 美股 -> 纳指
+    assert resolve_pair("US.AAPL") == "US.IXIC"
+    # A股：科创50(688) -> 科创50，创业板(30) -> 创业板指，其余 -> 上证
+    assert resolve_pair("SH.688981") == "SH.000688"   # 中芯国际 -> 科创50
+    assert resolve_pair("SZ.300750") == "SZ.399006"   # 宁德时代 -> 创业板指
+    assert resolve_pair("SH.600519") == "SH.000001"   # 茅台 -> 上证指数
 
 
 def test_bpr_overlap():

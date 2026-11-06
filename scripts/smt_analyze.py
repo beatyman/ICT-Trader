@@ -21,7 +21,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ict_trader.ict_extras import resolve_pair, fetch_binance_klines  # noqa: E402
+from ict_trader.ict_extras import resolve_pair, fetch_pair_data, fetch_binance_klines  # noqa: E402
 from ict_trader.enhancements import detect_smt  # noqa: E402
 
 
@@ -49,8 +49,8 @@ def main() -> None:
             print(json.dumps({"error": f"failed to fetch {sym}"}, ensure_ascii=False))
             return
 
-    # 相关品种数据
-    cmp_df = fetch_binance_klines(pair, args.interval, 1000)
+    # 相关品种数据（加密 -> Binance，指数 -> Futu）
+    cmp_df, pair = fetch_pair_data(sym, args.interval, 1000)
     if cmp_df is None:
         print(json.dumps({"error": f"failed to fetch pair {pair}"}, ensure_ascii=False))
         return
