@@ -29,6 +29,9 @@ def test_resolve_pair():
     assert resolve_pair("CME_MINI:ES1!") == "NQ"
     assert resolve_pair("ES1!") == "NQ"
     assert resolve_pair("XAUUSD") == "XAGUSD"
+    # 山寨默认 -> ETH 基准
+    assert resolve_pair("SOLUSDT") == "ETHUSDT"
+    assert resolve_pair("DOGEUSDT") == "ETHUSDT"
     assert resolve_pair("UNKNOWN") == ""
 
 

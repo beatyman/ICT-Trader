@@ -3,13 +3,19 @@
 缺口 1：SMT 跨品种背离的自动配对（resolve_pair，来自 CISD Model+）。
 缺口 2：BPR（Balance Price Range，均衡区，来自 LuxAlgo ICT Concepts）。
 缺口 3：VI（Volume Imbalance，量能不平衡，来自 LuxAlgo ICT Concepts）。
+
+另含 fetch_binance_klines：从 Binance data-api 镜像拉 K 线，供 SMT 拉相关品种用
+（ETH -> BTC，山寨 -> ETH）。
 """
 from __future__ import annotations
+
+import json
+import subprocess
 
 import numpy as np
 import pandas as pd
 
-__all__ = ["resolve_pair", "detect_bpr", "detect_vimbalances"]
+__all__ = ["resolve_pair", "detect_bpr", "detect_vimbalances", "fetch_binance_klines"]
 
 
 # CISD Model+ resolvePair() 的自动配对映射（crypto + 主要期货/外汇）
@@ -30,7 +36,14 @@ _PAIR_MAP = {
 
 
 def resolve_pair(symbol: str) -> str:
-    """自动解析相关品种（SMT 用）。未知品种返回空串。
+    """自动解析相关品种（SMT 用）。
+
+    规则（用户约定）：
+      ETH        -> BTC（以太坊对基准比特币）
+      BTC        -> ETH
+      其他山寨   -> ETH（USDT/USD 结尾的加密品种，以太坊作为市场基准）
+      期货/外汇  -> 内置映射（ES->NQ、XAU->XAG 等）
+    未知且非 USDT/USD 结尾 -> 空串。
 
     归一化：去掉交易所前缀、去掉期货 ``1!`` 后缀、转大写。
     """
@@ -41,7 +54,41 @@ def resolve_pair(symbol: str) -> str:
     # 去掉期货连续合约后缀 1!
     if s.endswith("1!"):
         s = s[:-2]
-    return _PAIR_MAP.get(s, "")
+    if s in _PAIR_MAP:
+        return _PAIR_MAP[s]
+    # 山寨默认：USDT/USD 结尾的加密品种 -> ETH 作为市场基准
+    if s.endswith("USDT") or s.endswith("USD"):
+        return "ETHUSDT"
+    return ""
+
+
+def fetch_binance_klines(symbol: str, interval: str = "15m", limit: int = 1000,
+                         drop_forming: bool = True) -> pd.DataFrame | None:
+    """从 Binance data-api 镜像拉 K 线（无代理直连）。
+
+    用于 SMT 拉相关品种：resolve_pair(ETH) -> BTCUSDT，resolve_pair(山寨) -> ETHUSDT。
+    返回 [date, open, high, low, close, volume]；失败返回 None。
+    """
+    sym = (symbol or "").upper()
+    if ":" in sym:
+        sym = sym.split(":")[-1]
+    url = f"https://data-api.binance.vision/api/v3/klines?symbol={sym}&interval={interval}&limit={limit}"
+    try:
+        out = subprocess.run(["curl.exe", "-s", "--max-time", "30", url],
+                             capture_output=True, text=True, encoding="utf-8", timeout=40)
+        data = json.loads(out.stdout)
+    except Exception:
+        return None
+    if not isinstance(data, list) or not data:
+        return None
+    df = pd.DataFrame(data, columns=["ot", "open", "high", "low", "close", "volume",
+                                     "ct", "qv", "n", "tb", "tq", "ig"])
+    df["date"] = pd.to_datetime(df["ot"], unit="ms")
+    for c in ["open", "high", "low", "close", "volume"]:
+        df[c] = df[c].astype(float)
+    if drop_forming and len(df) > 0:
+        df = df.iloc[:-1]
+    return df[["date", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
 
 
 def detect_bpr(fvgs, price: float | None = None) -> tuple[float, float] | None:
