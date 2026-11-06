@@ -82,6 +82,92 @@ class CISD:
         return abs(self.target - self.level) / risk if risk > 0 else 0.0
 
 
+@dataclass
+class PotentialCISD:
+    """CISD 提前预警：在收盘确认前就画出「价格必须收盘在哪才触发」。"""
+    direction: str | None = None     # "bull" / "bear" / None
+    level: float | None = None       # cm_level（确认位）
+    sl: float | None = None          # cm_pivot（止损）
+    confirm_text: str | None = None  # "close above X to confirm" / ...
+
+
+def detect_potential_cisd(df: pd.DataFrame) -> PotentialCISD:
+    """跟踪 candle-model（cm_bias / cm_level / cm_pivot），返回当前 Potential CISD。
+
+    Pine 逻辑（barstate.islast 分支）：
+      cm_bias == -1 且 close < cm_level → Potential CISD+（收盘站上 cm_level 确认）
+      cm_bias ==  1 且 close > cm_level → Potential CISD-（收盘跌破 cm_level 确认）
+    无未来函数：只用已收盘 bar，state 与 detect_cisd 的 candle-model 一致。
+    """
+    if len(df) < 5:
+        return PotentialCISD()
+    close = df["close"].to_numpy(float)
+    open_ = df["open"].to_numpy(float)
+    high = df["high"].to_numpy(float)
+    low = df["low"].to_numpy(float)
+    ctype = _ctype(close, open_)
+
+    bias = 0
+    level: float | None = None
+    pivot: float | None = None
+
+    for t in range(len(df)):
+        ct = ctype[t]
+        if bias == 0:
+            seed = ct
+            if seed == 0:
+                for k in range(t - 1, -1, -1):
+                    if ctype[k] != 0:
+                        seed = ctype[k]
+                        break
+            if seed == 0:
+                continue
+            bias = 1 if seed > 0 else -1
+            level, _ = _leg_extreme_current(open_, ctype, bias, t)
+            pivot = float(high[t]) if bias == 1 else float(low[t])
+
+        if bias == 1 and high[t] > pivot:
+            pivot = float(high[t])
+            if ct == 1:
+                level, _ = _leg_extreme_current(open_, ctype, 1, t)
+            else:
+                p, _ = _leg_extreme_previous(open_, ctype, 1, t)
+                if p is not None:
+                    level = p
+        elif bias == -1 and low[t] < pivot:
+            pivot = float(low[t])
+            if ct == -1:
+                level, _ = _leg_extreme_current(open_, ctype, -1, t)
+            else:
+                p, _ = _leg_extreme_previous(open_, ctype, -1, t)
+                if p is not None:
+                    level = p
+
+        if level is None or pivot is None:
+            continue
+
+        # close back through the level = CISD confirmed → reset leg direction
+        if bias == -1 and close[t] > level:
+            bias = 1
+            pivot = float(high[t])
+            level, _ = _leg_extreme_current(open_, ctype, 1, t)
+        elif bias == 1 and close[t] < level:
+            bias = -1
+            pivot = float(low[t])
+            level, _ = _leg_extreme_current(open_, ctype, -1, t)
+
+    # 最后：当前腿尚未确认 → 输出 Potential CISD
+    if level is None or pivot is None:
+        return PotentialCISD()
+    if bias == -1 and close[-1] < level:
+        return PotentialCISD("bull", float(level), float(pivot),
+                             f"close above {level:.6g} to confirm")
+    if bias == 1 and close[-1] > level:
+        return PotentialCISD("bear", float(level), float(pivot),
+                             f"close below {level:.6g} to confirm")
+    return PotentialCISD()
+
+
 def _legs(df: pd.DataFrame) -> list[CISDLeg]:
     close = df["close"].to_numpy(float)
     open_ = df["open"].to_numpy(float)
