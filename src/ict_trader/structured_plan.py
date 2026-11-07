@@ -94,8 +94,59 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
         "chanlun_htf": {"1d": {"trend": None, "zhongshu": [], "buy_sell_point": None, "beichi": None},
                         "4h": {"trend": None, "zhongshu": [], "buy_sell_point": None, "beichi": None},
                         "1h": {"trend": None, "zhongshu": [], "buy_sell_point": None, "beichi": None}},
+        "metadata": {
+            "data_availability": {},
+            "price_context": {},
+            "structure_context": {},
+            "volatility_context": {},
+        },
         "notes": None,
     }
+
+    # ---- metadata：数据可得性 + 上下文（数据不充分时供 AI 决策） ----
+    md = inp["metadata"]
+    for tf, df in (("15m", df_15m), ("4h", df_4h), ("1h", df_1h), ("1d", df_daily)):
+        if df is not None and len(df):
+            md["data_availability"][tf] = {
+                "bars": int(len(df)),
+                "from": str(df["date"].iloc[0]),
+                "to": str(df["date"].iloc[-1]),
+            }
+        else:
+            md["data_availability"][tf] = {"bars": 0, "from": None, "to": None}
+
+    if df_15m is not None and len(df_15m) >= 2:
+        c = df_15m["close"].astype(float)
+        h = df_15m["high"].astype(float)
+        l = df_15m["low"].astype(float)
+        tr = pd.DataFrame({
+            "hl": h - l,
+            "hc": (h - c.shift(1)).abs(),
+            "lc": (l - c.shift(1)).abs(),
+        }).max(axis=1)
+        atr = float(tr.rolling(14, min_periods=1).mean().iloc[-1])
+        win20 = 20
+        rhi = float(h.tail(win20).max())
+        rlo = float(l.tail(win20).min())
+        pc = md["price_context"]
+        pc["current"] = float(c.iloc[-1])
+        pc["recent_20_high"] = round(rhi, 4)
+        pc["recent_20_low"] = round(rlo, 4)
+        pc["recent_20_range_pct"] = round((rhi - rlo) / rlo * 100, 3) if rlo else None
+        vc = md["volatility_context"]
+        vc["atr_14"] = round(atr, 4)
+        vc["atr_pct"] = round(atr / c.iloc[-1] * 100, 3) if c.iloc[-1] else None
+        # 摆动模式（近 20 根 vs 更早 20 根）
+        hi_now, lo_now = h.tail(win20).max(), l.tail(win20).min()
+        hi_prev, lo_prev = (h.iloc[-2 * win20:-win20].max() if len(h) >= 2 * win20 else h.max(),
+                            l.iloc[-2 * win20:-win20].min() if len(l) >= 2 * win20 else l.min())
+        if hi_now > hi_prev and lo_now > lo_prev:
+            pattern = "higher_highs_higher_lows"
+        elif hi_now < hi_prev and lo_now < lo_prev:
+            pattern = "lower_highs_lower_lows"
+        else:
+            pattern = "range"
+        md["structure_context"]["swing_pattern"] = pattern
 
     # ---- ICT 15m ----
     if df_15m is not None and len(df_15m) >= 30:
@@ -125,6 +176,16 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
                            "low": round(f.bottom, 4), "high": round(f.top, 4),
                            "filled": bool(getattr(f, "mitigated", False))}
                           for f in getattr(res, "fvgs", [])[:3]]
+            # 结构上下文（事件计数）
+            sc = md["structure_context"]
+            kinds = [getattr(e, "kind", "") for e in evts]
+            sc["bos_count"] = kinds.count("BOS")
+            sc["mss_count"] = kinds.count("MSS")
+            sc["choch_count"] = sum(1 for k in kinds if k not in ("BOS", "MSS"))
+            sc["ob_count"] = len(getattr(res, "order_blocks", []))
+            sc["fvg_count"] = len(getattr(res, "fvgs", []))
+            sc["sweep_count"] = len(getattr(res, "sweeps", []))
+            sc["key_level_count"] = len(getattr(res, "key_levels", []))
             # PO3
             win = df_15m[df_15m["date"] >= str(df_15m["date"].iloc[-1])[:10]].reset_index(drop=True)
             if len(win) >= 10:
@@ -396,12 +457,14 @@ def structured_plan(inp: dict) -> dict:
             "current_price": price,
             "analysis_bias": bias,
             "htf_confluence_score": confluence,
+            "htf_confluence_detail": detail,   # 逐项得分（供 AI 决策）
             "summary": "; ".join(summary_parts),
         },
         "long_setups": long_setups,
         "short_setups": short_setups,
         "no_trade_conditions": no_trade,
         "data_gaps": data_gaps,
+        "metadata": inp.get("metadata", {}),   # 数据可得性 + 价格/结构/波动上下文
         "risk_notes": [
             "confidence reflects structural consistency only, not win rate",
             "no profit guarantee; not investment advice",
