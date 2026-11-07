@@ -29,7 +29,8 @@ def main() -> None:
     ap.add_argument("--symbol", required=True)
     ap.add_argument("--market", default="crypto")
     ap.add_argument("--freq", default="15m")
-    ap.add_argument("--bars", type=int, default=40)
+    ap.add_argument("--bars", type=int, default=40, help="ICT chart x_range (recent)")
+    ap.add_argument("--bars-chan", type=int, default=800, help="chanlun chart x_range (longer axis)")
     ap.add_argument("--direction", default=None)
     ap.add_argument("--entry", type=float, default=None)
     ap.add_argument("--sl", type=float, default=None)
@@ -69,10 +70,10 @@ def main() -> None:
                     "--alt-sl", str(args.alt_sl), "--alt-tp", str(args.alt_tp)]
     subprocess.run(ict_cmd, check=True)
 
-    # 2. 缠论辅图（下）
+    # 2. 缠论辅图（下）：更长的时间轴，展示完整的笔/线段/中枢/买卖点结构
     chan_cmd = [PY, str(ROOT / "scripts" / "plot_chanlun.py"),
                 "--csv", args.csv, "--symbol", args.symbol, "--freq", args.freq,
-                "--bars", str(args.bars), "--csv-htf", args.daily_csv,
+                "--bars", str(args.bars_chan), "--csv-htf", args.daily_csv,
                 "--htf-freq", "1d", "--out", str(chan_png)]
     subprocess.run(chan_cmd, check=True)
 
