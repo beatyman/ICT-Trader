@@ -47,6 +47,8 @@ class FusionInput:
     ict_direction: str = WAIT
     price_in_premium: bool = False
     wants_premium_for_short: bool = True
+    chanlun_htf_direction: str = WAIT   # HTF 缠论方向（日线/周线），决定方向
+    chanlun_ltf_bias: str = WAIT        # LTF 缠论（15m/1h）买卖点，只做入场择时
 
 
 @dataclass
@@ -112,7 +114,20 @@ def decide(inp: FusionInput) -> FusionPlan:
         elif (primary == LONG and wy_bear) or (primary == SHORT and wy_bull):
             wy_conf = -1
 
-    net = ichi_conf + wy_conf
+    # 缠论：HTF 决定方向（与 Ichimoku/Wyckoff 同级），LTF 只做入场择时
+    chan_htf_conf = 0
+    if inp.chanlun_htf_direction == primary:
+        chan_htf_conf = 1
+    elif inp.chanlun_htf_direction in (LONG, SHORT):
+        chan_htf_conf = -1
+
+    chan_ltf_conf = 0
+    if inp.chanlun_ltf_bias == primary:
+        chan_ltf_conf = 1
+    elif inp.chanlun_ltf_bias in (LONG, SHORT):
+        chan_ltf_conf = -1
+
+    net = ichi_conf + wy_conf + chan_htf_conf
 
     # ---- 3. final direction ----
     if net < 0:
@@ -129,6 +144,9 @@ def decide(inp: FusionInput) -> FusionPlan:
 
     # ---- 4. position check + entry zone ----
     immediate = True
+    if chan_ltf_conf == -1:
+        # LTF 缠论未对齐（买卖点方向相反），只推迟入场，不翻转方向
+        immediate = False
     if direction == SHORT:
         p.lean = "bearish"
         if (not inp.price_in_premium) and inp.wants_premium_for_short:
@@ -174,6 +192,8 @@ def decide(inp: FusionInput) -> FusionPlan:
     conf = 5 + 1  # ICT is primary, always +1
     conf += ichi_conf
     conf += wy_conf
+    conf += chan_htf_conf
+    conf += chan_ltf_conf
     if not immediate:
         conf = min(conf, 6)
     p.confidence = max(1, min(10, conf))
@@ -193,7 +213,10 @@ def decide(inp: FusionInput) -> FusionPlan:
     elif net == 0:
         parts.append("auxiliaries neutral")
     if not immediate:
-        parts.append("position not ready, wait")
+        if chan_ltf_conf == -1:
+            parts.append("LTF chanlun not aligned, wait for entry")
+        else:
+            parts.append("position not ready, wait")
     p.summary = "; ".join(parts) + "."
     return p
 

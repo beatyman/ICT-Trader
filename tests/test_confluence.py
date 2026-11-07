@@ -101,3 +101,47 @@ def test_ict_wait_is_flat_regardless_of_auxiliaries():
     p = decide(inp)
     assert p.direction == "wait"
     assert p.layers["L3_ict_direction"] == "FAIL"
+
+
+def test_chanlun_htf_confirms_raises_confidence():
+    # ICT short + Ichi short + Wyckoff dist + Chanlun HTF short = 4 aligned -> confidence 9
+    inp = FusionInput(current_price=100, wyckoff_phase="distribution", wyckoff_valid=True,
+                      key_level=110, ichimoku_filter="short", cloud_bottom=90,
+                      cloud_top=110, ict_direction="short", price_in_premium=True,
+                      chanlun_htf_direction="short")
+    p = decide(inp)
+    assert p.direction == "short"
+    assert p.confidence == 9  # 5 + 1 + 1(ichi) + 1(wyck) + 1(chan_htf)
+
+
+def test_chanlun_ltf_opposed_delays_entry_not_flip():
+    # ICT short + aux confirm, but LTF chanlun long -> delay entry, NOT flip to long
+    inp = FusionInput(current_price=100, wyckoff_phase="distribution", wyckoff_valid=True,
+                      key_level=110, ichimoku_filter="short", cloud_bottom=90,
+                      cloud_top=110, ict_direction="short", price_in_premium=True,
+                      chanlun_ltf_bias="long")
+    p = decide(inp)
+    assert p.direction == "short"  # 方向不翻转
+    assert p.position_state == "wait for position"  # LTF 未对齐，等入场
+    assert p.layers["L4_position"] == "FAIL"
+
+
+def test_chanlun_htf_opposes_conflict_is_wait():
+    # ICT short + Ichi long + Chanlun HTF long -> net < 0 -> wait (conflict)
+    inp = FusionInput(current_price=100, wyckoff_phase="distribution", wyckoff_valid=True,
+                      key_level=110, ichimoku_filter="long", cloud_bottom=90,
+                      cloud_top=110, ict_direction="short", price_in_premium=True,
+                      chanlun_htf_direction="long")
+    p = decide(inp)
+    assert p.direction == "wait"
+    assert p.layers["L3_ict_direction"] == "PASS"  # ICT 仍是主方向
+
+
+def test_chanlun_default_neutral_no_effect():
+    # 默认 chanlun=wait 不改变原有结果（回归保护）
+    inp = FusionInput(current_price=100, wyckoff_phase="distribution", wyckoff_valid=True,
+                      key_level=110, ichimoku_filter="short", cloud_bottom=90,
+                      cloud_top=110, ict_direction="short", price_in_premium=True)
+    p = decide(inp)
+    assert p.direction == "short"
+    assert p.confidence == 8  # 与未加 chanlun 时一致
