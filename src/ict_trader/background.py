@@ -43,6 +43,17 @@ class IchimokuBackground:
     reasons: list = field(default_factory=list)
 
 
+@dataclass
+class ChanlunBackground:
+    bias: str = "neutral"                      # long / short / neutral（HTF 方向）
+    position: str = "none"                     # above / inside / below 中枢
+    bsp_type: str = "none"                     # 一买/二买/三买/一卖/二卖/三卖
+    allow_long: bool = False
+    allow_short: bool = False
+    size_factor: float = 0.0
+    reasons: list = field(default_factory=list)
+
+
 def wyckoff_background(df_htf: pd.DataFrame, min_range_atr: float = 2.0) -> WyckoffBackground:
     """Wyckoff 背景（4H/1D）：输出 bias / range_state / phase / allow / size。"""
     b = WyckoffBackground()
@@ -151,4 +162,40 @@ def ichimoku_background(df_htf: pd.DataFrame, thin_cloud_atr: float = 0.5) -> Ic
     if b.cloud_thickness == "thin":
         b.size_factor *= 0.5
         b.reasons.append("thin cloud, size reduced")
+    return b
+
+
+def chanlun_background(df: pd.DataFrame, freq: str = "1d") -> ChanlunBackground:
+    """缠论背景（HTF：日线/周线）：输出 bias / position / bsp / allow / size。
+
+    HTF 缠论决定方向（与 Wyckoff/Ichimoku 同级）；LTF 缠论在 fuse 里做择时。
+    """
+    b = ChanlunBackground()
+    try:
+        from .chanlun import analyze_chanlun
+    except Exception as e:
+        b.reasons.append(f"chanlun unavailable: {e}")
+        return b
+
+    r = analyze_chanlun(df, freq=freq)
+    b.bias = r.bias if r.bias in ("long", "short") else "neutral"
+    b.position = r.position
+    b.bsp_type = r.bsp_type
+
+    if b.position == "inside":
+        # 中枢内：方向未定 → veto
+        b.allow_long = b.allow_short = False
+        b.size_factor = 0.0
+        b.reasons.append("price inside zhongshu, veto")
+    elif b.bias == "long":
+        b.allow_long = True
+        b.size_factor = 1.0 if b.bsp_type in ("2买", "3买") else 0.7
+        b.reasons.append(f"long ({b.bsp_type}, pos={b.position})")
+    elif b.bias == "short":
+        b.allow_short = True
+        b.size_factor = 1.0 if b.bsp_type in ("2卖", "3卖") else 0.7
+        b.reasons.append(f"short ({b.bsp_type}, pos={b.position})")
+    else:
+        b.size_factor = 0.0
+        b.reasons.append("no chanlun bias")
     return b

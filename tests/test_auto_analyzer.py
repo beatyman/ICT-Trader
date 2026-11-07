@@ -14,7 +14,8 @@ from ict_trader.background import wyckoff_background, ichimoku_background  # noq
 from ict_trader.main_strategy import ICTSignal  # noqa: E402
 from ict_trader.fusion import fuse  # noqa: E402
 from ict_trader.scoring import score  # noqa: E402
-from ict_trader.background import WyckoffBackground, IchimokuBackground  # noqa: E402
+from ict_trader.background import (WyckoffBackground, IchimokuBackground,  # noqa: E402
+                                   ChanlunBackground)
 
 
 def _trend_df(n=200, up=True, seed=1):
@@ -65,6 +66,41 @@ def test_fusion_all_align_full_size():
     out = fuse(ict, wy, ichi)
     assert out.action == "enter"
     assert out.size_factor > 0
+
+
+def test_fusion_chanlun_htf_veto():
+    """缠论 HTF 硬性否决：ICT long 但日线缠论 short → avoid。"""
+    ict = ICTSignal(direction="long", confidence=95, entry=100, stop=95, tp1=110, tp2=115)
+    wy = WyckoffBackground(bias="long", allow_long=True, size_factor=1.0)
+    ichi = IchimokuBackground(cloud_state="above", allow_long=True, size_factor=1.0)
+    chan_htf = ChanlunBackground(bias="short", allow_short=True, size_factor=0.7)
+    out = fuse(ict, wy, ichi, chan_htf=chan_htf)
+    assert out.action == "avoid"
+    assert "Chanlun" in out.veto_reason
+
+
+def test_fusion_chanlun_ltf_delays_entry_not_flip():
+    """缠论 LTF 择时：ICT long 但 15m 缠论 short → wait（不翻转方向）。"""
+    ict = ICTSignal(direction="long", confidence=80, entry=100, stop=95, tp1=110, tp2=115)
+    wy = WyckoffBackground(bias="long", allow_long=True, size_factor=1.0)
+    ichi = IchimokuBackground(cloud_state="above", allow_long=True, size_factor=1.0)
+    chan_ltf = ChanlunBackground(bias="short", allow_short=True, size_factor=0.7)
+    out = fuse(ict, wy, ichi, chan_ltf=chan_ltf)
+    assert out.direction == "long"  # 方向不翻转
+    assert out.action == "wait"     # LTF 未对齐，等入场
+
+
+def test_chanlun_background_output():
+    """缠论背景只输出 allow/veto/size，不输出入场价。"""
+    from ict_trader.chanlun import chanpy_available
+    if not chanpy_available():
+        pytest.skip("chan.py not available")
+    from ict_trader.background import chanlun_background
+    df = _trend_df(200, up=True)
+    b = chanlun_background(df, freq="1d")
+    assert hasattr(b, "bias") and hasattr(b, "position") and hasattr(b, "bsp_type")
+    assert hasattr(b, "allow_long") and hasattr(b, "allow_short") and hasattr(b, "size_factor")
+    assert not hasattr(b, "entry") and not hasattr(b, "stop")
 
 
 def test_scoring_outputs_full_json():
