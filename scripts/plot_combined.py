@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""合并 ICT 主图（上）+ 缠论辅图（下）为一张上下图。
+"""合并 ICT 主图（上）+ 日线缠论（中）+ 执行周期缠论（下）为一张三图。
 
-ICT 在上（clean 结构 + 流动性 + 交易计划 + 筹码分布），
-缠论在下（分型/笔/线段/中枢/买卖点 + MACD，可加区间套）。
+每个时间维度各自用「长轴」展示（缠论需要长历史才能画出完整的笔/线段/中枢）：
+  · ICT：短轴（近期结构 + 流动性 + 计划 + 筹码）
+  · 日线缠论：长轴（约 1 年，看大级别笔/线段/中枢 + 买卖点）
+  · 执行周期缠论：长轴（约 8 天 15m，看交易级笔/线段/中枢 + 买卖点）
 
 用法：
   python scripts/plot_combined.py --csv data/eth_15m.csv --daily-csv data/eth_daily.csv \
@@ -23,14 +25,15 @@ PY = sys.executable
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="ICT (top) + Chanlun (bottom) combined chart")
+    ap = argparse.ArgumentParser(description="ICT (top) + daily chanlun (mid) + exec chanlun (bottom)")
     ap.add_argument("--csv", required=True, help="execution timeframe OHLCV CSV")
-    ap.add_argument("--daily-csv", required=True, help="daily OHLCV CSV (chanlun HTF)")
+    ap.add_argument("--daily-csv", required=True, help="daily OHLCV CSV (daily chanlun)")
     ap.add_argument("--symbol", required=True)
     ap.add_argument("--market", default="crypto")
     ap.add_argument("--freq", default="15m")
     ap.add_argument("--bars", type=int, default=40, help="ICT chart x_range (recent)")
-    ap.add_argument("--bars-chan", type=int, default=800, help="chanlun chart x_range (longer axis)")
+    ap.add_argument("--bars-daily", type=int, default=300, help="daily chanlun x_range (long)")
+    ap.add_argument("--bars-chan", type=int, default=800, help="exec chanlun x_range (long)")
     ap.add_argument("--direction", default=None)
     ap.add_argument("--entry", type=float, default=None)
     ap.add_argument("--sl", type=float, default=None)
@@ -47,13 +50,14 @@ def main() -> None:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     ict_png = out.with_name(out.stem + ".ict.png")
-    chan_png = out.with_name(out.stem + ".chan.png")
+    chan_d_png = out.with_name(out.stem + ".chan_d.png")
+    chan_e_png = out.with_name(out.stem + ".chan_e.png")
 
     import pandas as pd
     _df = pd.read_csv(args.csv, parse_dates=["date"])
     trigger_time = args.trigger_time or str(_df["date"].iloc[-1])
 
-    # 1. ICT 主图（上）
+    # 1. ICT 主图（上，短轴）
     ict_cmd = [PY, str(ROOT / "scripts" / "plot_ict_clean.py"),
                "--csv", args.csv, "--symbol", args.symbol,
                "--timeframe", args.freq, "--last-bars", str(args.bars),
@@ -70,28 +74,35 @@ def main() -> None:
                     "--alt-sl", str(args.alt_sl), "--alt-tp", str(args.alt_tp)]
     subprocess.run(ict_cmd, check=True)
 
-    # 2. 缠论辅图（下）：更长的时间轴，展示完整的笔/线段/中枢/买卖点结构
-    chan_cmd = [PY, str(ROOT / "scripts" / "plot_chanlun.py"),
-                "--csv", args.csv, "--symbol", args.symbol, "--freq", args.freq,
-                "--bars", str(args.bars_chan), "--csv-htf", args.daily_csv,
-                "--htf-freq", "1d", "--out", str(chan_png)]
-    subprocess.run(chan_cmd, check=True)
+    # 2. 日线缠论（中，长轴）
+    chan_d_cmd = [PY, str(ROOT / "scripts" / "plot_chanlun.py"),
+                  "--csv", args.daily_csv, "--symbol", args.symbol, "--freq", "1d",
+                  "--bars", str(args.bars_daily), "--out", str(chan_d_png)]
+    subprocess.run(chan_d_cmd, check=True)
 
-    # 3. 上下堆叠
+    # 3. 执行周期缠论（下，长轴）
+    chan_e_cmd = [PY, str(ROOT / "scripts" / "plot_chanlun.py"),
+                  "--csv", args.csv, "--symbol", args.symbol, "--freq", args.freq,
+                  "--bars", str(args.bars_chan), "--out", str(chan_e_png)]
+    subprocess.run(chan_e_cmd, check=True)
+
+    # 4. 三图上下堆叠
     from PIL import Image
-    top = Image.open(ict_png)
-    bottom = Image.open(chan_png)
-    width = max(top.width, bottom.width)
-    top = top.resize((width, int(round(top.height * width / top.width))), Image.LANCZOS)
-    bottom = bottom.resize((width, int(round(bottom.height * width / bottom.width))), Image.LANCZOS)
-    combined = Image.new("RGB", (width, top.height + bottom.height), "white")
-    combined.paste(top, (0, 0))
-    combined.paste(bottom, (0, top.height))
+    imgs = [Image.open(png) for png in (ict_png, chan_d_png, chan_e_png)]
+    width = max(im.width for im in imgs)
+    resized = [im.resize((width, int(round(im.height * width / im.width))), Image.LANCZOS)
+               for im in imgs]
+    total_h = sum(im.height for im in resized)
+    combined = Image.new("RGB", (width, total_h), "white")
+    y = 0
+    for im in resized:
+        combined.paste(im, (0, y))
+        y += im.height
     combined.save(out)
 
-    ict_png.unlink(missing_ok=True)
-    chan_png.unlink(missing_ok=True)
-    print(f"saved {out} ({width}x{combined.height})")
+    for png in (ict_png, chan_d_png, chan_e_png):
+        png.unlink(missing_ok=True)
+    print(f"saved {out} ({width}x{total_h})")
 
 
 if __name__ == "__main__":
