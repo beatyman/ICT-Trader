@@ -651,6 +651,22 @@ def render(args) -> Path:
         atr_val = float((view["high"] - view["low"]).rolling(14, min_periods=1).mean().iloc[-1]) or 1.0
         place_labels(ax, pending_labels, n - 1, atr_val)
     ax.set_ylabel("Price", fontsize=10, labelpad=8)
+    # ---- chip distribution (volume profile) in the right gutter ----
+    if args.show_cyq:
+        try:
+            from ict_trader.cyq import volume_profile
+            vp_prices, vp_density = volume_profile(view, window=len(view), bins=80)
+            if vp_prices and len(vp_prices) > 1:
+                maxd = max(vp_density) or 1.0
+                h = vp_prices[1] - vp_prices[0]
+                for p, d in zip(vp_prices, vp_density):
+                    w = (d / maxd) * (n * 0.18)  # width proportional to chip density
+                    ax.barh(p, w, height=h * 1.1, left=n + 1, color="#4CAF50",
+                            alpha=0.18, edgecolor="none", zorder=0)
+                fig.text(.99, .04, "right gutter = chip distribution (volume profile)",
+                         fontsize=8, ha="right", color="#4CAF50", alpha=.7)
+        except Exception:
+            pass
     ax.grid(True, color="#e6e6e6", linewidth=.7)
     ax.set_axisbelow(True)
     ax.tick_params(labelsize=9)
@@ -713,6 +729,8 @@ def main() -> None:
     ap.add_argument("--show-structure", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--show-killzones", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--show-eq", action=argparse.BooleanOptionalAction, default=False)
+    ap.add_argument("--show-cyq", action=argparse.BooleanOptionalAction, default=False,
+                    help="draw the chip distribution (volume profile) in the right gutter")
     ap.add_argument("--show-amd", action=argparse.BooleanOptionalAction, default=False,
                     help="draw Accumulation / Manipulation / Distribution (Power of 3) zones")
     ap.add_argument("--show-po3", action=argparse.BooleanOptionalAction, default=False,
