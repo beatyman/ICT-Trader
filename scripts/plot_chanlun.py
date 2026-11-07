@@ -58,6 +58,8 @@ def main() -> None:
     ap.add_argument("--freq", default="15m", help="execution timeframe freq (1m/5m/15m/1h/1d)")
     ap.add_argument("--htf-freq", default="1d", help="HTF freq (only with --csv-htf)")
     ap.add_argument("--bars", type=int, default=150, help="x_range (bars to show)")
+    ap.add_argument("--rugd", action="store_true", default=False,
+                    help="red up / green down (A股/港股)；default = green up (国际/加密)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -75,9 +77,11 @@ def main() -> None:
         lv_specs = [(htf_type, df_htf), (kl_type, df)]  # 高周期在前
 
     chan = _build_chan(args.symbol, lv_specs)
-    plot_config = {"plot_kline": True, "plot_bi": True, "plot_seg": True,
-                   "plot_zs": True, "plot_bsp": True, "plot_macd": True}
-    plot_para = {"figure": {"x_range": args.bars}}
+    plot_config = {"plot_kline": True, "plot_kline_combine": True, "plot_bi": True,
+                   "plot_seg": True, "plot_zs": True, "plot_bsp": True, "plot_macd": True}
+    plot_para = {"figure": {"x_range": args.bars},
+                 "kl": {"rugd": args.rugd},          # rugd=False: 绿涨红跌
+                 "bi": {"show_num": True}}           # 笔编号
     driver = CPlotDriver(chan, plot_config=plot_config, plot_para=plot_para)
 
     out = Path(args.out)
