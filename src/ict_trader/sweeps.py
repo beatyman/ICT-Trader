@@ -261,11 +261,20 @@ def score_key_levels(levels: Iterable[KeyLevel], sessions: Iterable,
     """
     atr_arr = _atr(df)
     tol = max(float(np.nanmedian(atr_arr)) * 0.3, 1e-9) if len(atr_arr) else 1e-9
+    atr_med = float(np.nanmedian(atr_arr)) if len(atr_arr) else 1.0
     session_prices = [float(s.price) for s in sessions]
 
     vol = df["volume"].to_numpy(float) if "volume" in df else None
     vol_sma = (pd.Series(vol).rolling(20, min_periods=1).mean().to_numpy()
                if vol is not None else None)
+
+    # 筹码/成交量密集度（key level = 流动性，用成交量分布精确化）
+    try:
+        from .cyq import volume_profile, chip_density_at
+        chip_prices, chip_density = volume_profile(df)
+        chip_tol = atr_med * 0.5
+    except Exception:
+        chip_prices, chip_density = [], []
 
     for k in levels:
         score = 0.0
@@ -284,6 +293,13 @@ def score_key_levels(levels: Iterable[KeyLevel], sessions: Iterable,
         if (vol is not None and vol_sma is not None
                 and 0 <= k.known_at < len(vol_sma) and vol_sma[k.known_at] > 0):
             if vol[k.known_at] >= 1.5 * vol_sma[k.known_at]:
+                score += 1.0
+        # chip concentration（筹码密集区 = 流动性密集）
+        if chip_prices:
+            dens = chip_density_at(chip_prices, chip_density, k.price, chip_tol)
+            if dens >= 0.15:
+                score += 2.0
+            elif dens >= 0.10:
                 score += 1.0
         k.quality = round(score, 2)
 
