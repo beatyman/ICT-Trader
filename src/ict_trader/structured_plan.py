@@ -82,10 +82,21 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
         "timestamp": str(df_15m["date"].iloc[-1]) if df_15m is not None and len(df_15m) else None,
         "current_price": float(df_15m["close"].iloc[-1]) if df_15m is not None and len(df_15m) else None,
         "account": {"risk_per_trade_pct": 1, "max_leverage": None},
-        "ict_trader_15m": {"htf_bias": None, "market_structure": None,
-                           "liquidity": {"bsl": [], "ssl": [], "sweep": None},
-                           "order_blocks": [], "fvg": [], "killzone": None,
-                           "po3_phase": None},
+        "ict_trader_15m": {
+            "htf_bias": None,               # L5-03 方向（1D/4H 对齐）
+            "htf_aligned": False,           # 1D/4H 是否同向
+            "market_structure": None,       # BOS / CHoCH / MSS
+            "structure_direction": None,    # bullish / bearish
+            "liquidity": {"bsl": [], "ssl": [], "sweep": None,
+                          "nearest_bsl": None, "nearest_ssl": None, "dol": None},
+            "order_blocks": [],             # 仅 active（未 mitigated）
+            "fvg": [],                      # 仅 active（未 filled）
+            "premium_discount": None,       # premium / discount / equilibrium
+            "killzone": None,
+            "po3_phase": None,
+            "po3_range": {"high": None, "low": None},
+            "grade": {"grade": None, "hits": 0, "enabled": 0},
+        },
         "wyckoff": {"phase": None, "events": [], "volume_note": None,
                     "range": {"low": None, "high": None}},
         "ichimoku": {"tenkan": None, "kijun": None, "senkou_a": None, "senkou_b": None,
@@ -156,26 +167,83 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
             res = analyze(df_15m, ICTConfig(mode="historical", show_sessions=False,
                                             show_htf_cisd=False, cisd_all=True, cisd_min_grade=0))
             ict = inp["ict_trader_15m"]
-            # 结构：最近一个 BOS/CHoCH/MSS（ICTResult.events，非 structure）
+            # ---- 用 audit() 取完整 ICT 决策数据（L5-03 方向 / L5-06 溢价折价 / Grade）----
+            aud = {}
+            try:
+                from .rules import audit
+                aud = audit(df_15m, daily=df_daily, market=market, res=res)
+            except Exception:
+                pass
+            rules = aud.get("rules", []) if isinstance(aud, dict) else []
+
+            def _rule(rid):
+                for r in rules:
+                    if r.get("rule_id") == rid:
+                        return r
+                return None
+
+            # HTF 偏向（L5-03 方向 + 是否 PASS）
+            l5_03 = _rule("L5-03")
+            if l5_03:
+                v = l5_03.get("value")
+                if isinstance(v, dict):
+                    d = v.get("direction")
+                    # 归一化 short/long -> bearish/bullish
+                    ict["htf_bias"] = {"short": "bearish", "long": "bullish"}.get(d, d)
+                ict["htf_aligned"] = l5_03.get("status") == "PASS"
+
+            # 结构：最近一个 BOS/CHoCH/MSS + 方向（ICTResult.events）
             evts = getattr(res, "events", [])
             if evts:
                 last = evts[-1]
                 ict["market_structure"] = last.kind if hasattr(last, "kind") else None
-            # 流动性：BSL/SSL + sweep
+                if hasattr(last, "direction"):
+                    ict["structure_direction"] = last.direction
+
+            # 流动性：BSL/SSL + sweep + 最近位 + DOL
             liq = ict["liquidity"]
-            liq["bsl"] = [round(k.price, 4) for k in res.key_levels if getattr(k, "name", "") in ("BSL", "EQH")]
-            liq["ssl"] = [round(k.price, 4) for k in res.key_levels if getattr(k, "name", "") in ("SSL", "EQL")]
+            bsl = sorted(round(k.price, 4) for k in res.key_levels
+                         if getattr(k, "name", "") in ("BSL", "EQH"))
+            ssl = sorted(round(k.price, 4) for k in res.key_levels
+                         if getattr(k, "name", "") in ("SSL", "EQL"))
+            liq["bsl"] = bsl
+            liq["ssl"] = ssl
             liq["sweep"] = "ssl" if any(getattr(s, "direction", "") == "bull" for s in res.sweeps) else \
                            "bsl" if any(getattr(s, "direction", "") == "bear" for s in res.sweeps) else None
-            # OB + FVG（OrderBlock/FVG 用 bottom/top，非 low/high）
+            price = float(df_15m["close"].iloc[-1])
+            above = [p for p in bsl if p > price]
+            below = [p for p in ssl if p < price]
+            liq["nearest_bsl"] = min(above) if above else None
+            liq["nearest_ssl"] = max(below) if below else None
+            # DOL：最近未扫流动性目标（空→下方 ssl，多→上方 bsl）
+            from .sweeps import nearest_key_target
+            unswept = [k for k in res.key_levels if not getattr(k, "swept", False)]
+            liq["dol"] = round(nearest_key_target(unswept, price, False), 4) if unswept else None
+
+            # OB + FVG：只留 active（未 mitigated/filled）
             ict["order_blocks"] = [{"type": "bullish" if ob.direction == "bull" else "bearish",
                                     "low": round(ob.bottom, 4), "high": round(ob.top, 4),
                                     "mitigated": bool(ob.mitigated)}
-                                   for ob in getattr(res, "order_blocks", [])[:3]]
+                                   for ob in getattr(res, "order_blocks", [])
+                                   if not getattr(ob, "mitigated", True)][:5]
             ict["fvg"] = [{"type": "bullish" if f.direction == "bull" else "bearish",
                            "low": round(f.bottom, 4), "high": round(f.top, 4),
                            "filled": bool(getattr(f, "mitigated", False))}
-                          for f in getattr(res, "fvgs", [])[:3]]
+                          for f in getattr(res, "fvgs", [])
+                          if not getattr(f, "mitigated", True)][:5]
+
+            # 溢价/折价（L5-06 zone）
+            l5_06 = _rule("L5-06")
+            if l5_06:
+                v = l5_06.get("value")
+                if isinstance(v, dict):
+                    ict["premium_discount"] = v.get("zone")
+
+            # Grade
+            g = aud.get("grade", {}) if isinstance(aud, dict) else {}
+            ict["grade"] = {"grade": g.get("grade"), "hits": g.get("hits", 0),
+                            "enabled": g.get("enabled", 0)}
+
             # 结构上下文（事件计数）
             sc = md["structure_context"]
             kinds = [getattr(e, "kind", "") for e in evts]
@@ -186,13 +254,16 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
             sc["fvg_count"] = len(getattr(res, "fvgs", []))
             sc["sweep_count"] = len(getattr(res, "sweeps", []))
             sc["key_level_count"] = len(getattr(res, "key_levels", []))
-            # PO3
+
+            # PO3（阶段 + 区间）
             win = df_15m[df_15m["date"] >= str(df_15m["date"].iloc[-1])[:10]].reset_index(drop=True)
             if len(win) >= 10:
                 po3, _ = detect_po3(win, accumulate_bars=20)
                 ict["po3_phase"] = {"ACCUMULATING": "accumulation", "MANIPULATED": "manipulation",
                                     "DISTRIBUTING": "distribution", "INVALID": None}.get(
                                         getattr(po3, "state", ""), None)
+                ict["po3_range"] = {"high": round(float(po3.range_high), 4),
+                                    "low": round(float(po3.range_low), 4)}
         except Exception:
             pass
 
@@ -270,9 +341,17 @@ def _collect_gaps(inp: dict) -> list[str]:
 
 
 def _htf_bias(inp: dict) -> tuple[str, int, dict]:
-    """返回 (analysis_bias, htf_confluence_score, detail)。"""
-    score = 0
-    detail: dict[str, int] = {}
+    """返回 (analysis_bias, htf_confluence_score, detail)。
+
+    ICT 主方向（权重 3），缠论/Ichimoku/Wyckoff 辅助投票。
+    ICT 有方向时以 ICT 为准；ICT 无方向时退化为辅助票决定。
+    """
+    # ICT 主方向
+    ict_bias = _get(inp, "ict_trader_15m", "htf_bias")
+    ict_sign = {"bullish": 1, "long": 1, "bearish": -1, "short": -1}.get(ict_bias or "", 0)
+    detail: dict[str, int] = {"ict_htf": ict_sign * 3}
+
+    score = ict_sign * 3  # ICT 权重 3（主）
     # 缠论 1d/4h/1h（1d 权重 2）
     weights = {"1d": 2, "4h": 1, "1h": 1}
     for tf, w in weights.items():
@@ -288,10 +367,15 @@ def _htf_bias(inp: dict) -> tuple[str, int, dict]:
     detail["wyckoff"] = wp
     score += wp
 
-    # 归一化到 0-100 的 confluence score（用 |score| 表示共振强度，不分多空）
-    max_score = sum(weights.values()) + 2 + 1  # 缠论(4) + ichimoku(2) + wyckoff(1) = 7
+    max_score = 3 + sum(weights.values()) + 2 + 1  # ICT(3) + 缠论(4) + ichimoku(2) + wyckoff(1) = 10
     confluence = int(round(max(0.0, min(1.0, abs(score) / max_score if max_score else 0.0)) * 100))
-    bias = "bullish" if score > 0 else "bearish" if score < 0 else "neutral"
+
+    # 方向：ICT 主，ICT 无方向时用辅助票
+    if ict_sign != 0:
+        bias = "bullish" if ict_sign > 0 else "bearish"
+    else:
+        aux = score  # ict_sign=0，score 只剩辅助票
+        bias = "bullish" if aux > 0 else "bearish" if aux < 0 else "neutral"
     return bias, confluence, detail
 
 
@@ -334,34 +418,45 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
     price = _num(inp.get("current_price"))
     if price is None:
         return None
-    zone = _ob_fvg_zone(inp, direction)
-    liq = _liquidity_levels(inp, direction)
+    liq = _get(inp, "ict_trader_15m", "liquidity") or {}
+    nearest_bsl = _num(liq.get("nearest_bsl"))
+    nearest_ssl = _num(liq.get("nearest_ssl"))
+    dol = _num(liq.get("dol"))
+    atr = _num(_get(inp, "metadata", "volatility_context", "atr_14")) or (price * 0.005)
+    tp_pool = _liquidity_levels(inp, direction)
 
     status = "valid" if bias == direction else "conditional"
     setup_type = "trend_pullback" if kind == "A" else "sweep_reversal"
 
-    if zone:
-        entry_low, entry_high = zone
+    # 入场：A=顺势回踩（sell the rally / buy the dip 到最近流动性），B=扫单反转（追）
+    if kind == "A":
+        if direction == "short":
+            # 反弹到最近 BSL 阻力（sell the rally）
+            entry = nearest_bsl if nearest_bsl and nearest_bsl > price else price * 1.005
+            entry_low, entry_high = price, entry
+            sl = entry + 0.5 * atr
+        else:
+            # 回踩到最近 SSL 支撑（buy the dip）
+            entry = nearest_ssl if nearest_ssl and nearest_ssl < price else price * 0.995
+            entry_low, entry_high = entry, price
+            sl = entry - 0.5 * atr
     else:
-        # 无 OB/FVG → 用当前价 ± 小缓冲做触发条件
         buf = price * 0.002
-        entry_low, entry_high = (price - buf, price + buf) if direction == "long" else (price - buf, price + buf)
+        entry_low, entry_high = price - buf, price + buf
+        sl = price - 0.5 * atr if direction == "long" else price + 0.5 * atr
 
-    # SL：结构失效点之外（OB/FVG 之外 / sweep 极值之外）
-    if zone:
-        sl = zone[0] - (zone[1] - zone[0]) * 0.5 if direction == "long" else zone[1] + (zone[1] - zone[0]) * 0.5
-    else:
-        sl = price * (0.985 if direction == "long" else 1.015)
-
-    # TP：流动性池/中枢/云层（跳过 RR<1 的过近目标）
-    tp_vals = [v for v in liq if _rr(price, sl, v, direction) >= 1.0][:3]
+    # TP：DOL / 最近流动性池 / 中枢 / 云层（跳过 RR<1 的过近目标）
+    entry_mid = (entry_low + entry_high) / 2
+    tp_vals = [v for v in tp_pool if _rr(entry_mid, sl, v, direction) >= 1.0][:3]
+    if dol is not None and dol not in tp_vals:
+        tp_vals.insert(0, dol)
     tps = []
-    if tp_vals:
-        for i, lv in enumerate(tp_vals, 1):
-            tps.append({"label": f"TP{i}", "level": round(lv, 4),
-                        "rr": _rr(price, sl, lv, direction)})
+    for i, lv in enumerate(tp_vals[:3], 1):
+        tps.append({"label": f"TP{i}", "level": round(lv, 4),
+                    "rr": _rr(entry_mid, sl, lv, direction)})
     if not tps:
-        tps = [{"label": "TP1", "level": round(sl + (price - sl) * 2 if direction == "long" else sl - (sl - price) * 2, 4),
+        tps = [{"label": "TP1",
+                "level": round(sl + (entry_mid - sl) * 2 if direction == "long" else sl - (sl - entry_mid) * 2, 4),
                 "rr": 2.0}]
 
     # 置信度：confluence + setup + 共振
@@ -380,10 +475,19 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
         sweep = _get(inp, "ict_trader_15m", "liquidity", "sweep")
         inv = (f"no MSS after {sweep} sweep, or {inv}" if sweep else f"no confirmed sweep, or {inv}")
 
+    g = _get(inp, "ict_trader_15m", "grade") or {}
     rationale = {
-        "ict_15m": [f"market structure: {_get(inp, 'ict_trader_15m', 'market_structure') or 'n/a'}",
-                    f"PO3: {_get(inp, 'ict_trader_15m', 'po3_phase') or 'n/a'}",
-                    f"killzone: {_get(inp, 'ict_trader_15m', 'killzone') or 'n/a'}"],
+        "ict_15m": [
+            f"HTF bias: {_get(inp, 'ict_trader_15m', 'htf_bias') or 'n/a'} "
+            f"(aligned={_get(inp, 'ict_trader_15m', 'htf_aligned')})",
+            f"structure: {_get(inp, 'ict_trader_15m', 'market_structure') or 'n/a'} "
+            f"{_get(inp, 'ict_trader_15m', 'structure_direction') or ''}",
+            f"liquidity: sweep={_get(inp, 'ict_trader_15m', 'liquidity', 'sweep') or 'none'}, "
+            f"nearest_bsl={nearest_bsl}, nearest_ssl={nearest_ssl}, DOL={dol}",
+            f"PD: {_get(inp, 'ict_trader_15m', 'premium_discount') or 'n/a'}, "
+            f"PO3: {_get(inp, 'ict_trader_15m', 'po3_phase') or 'n/a'}, "
+            f"grade: {g.get('grade') or 'n/a'} ({g.get('hits', 0)}/{g.get('enabled', 0)})",
+        ],
         "wyckoff": [f"phase: {_get(inp, 'wyckoff', 'phase') or 'n/a'}"],
         "ichimoku": [f"cloud: {_get(inp, 'ichimoku', 'cloud_bias') or 'n/a'} / "
                      f"price {_get(inp, 'ichimoku', 'price_vs_cloud') or 'n/a'} cloud"],
@@ -391,13 +495,19 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
                         f"4h: {_get(inp, 'chanlun_htf', '4h', 'trend') or 'n/a'}, "
                         f"1h: {_get(inp, 'chanlun_htf', '1h', 'trend') or 'n/a'}"],
     }
+    if kind == "A":
+        trigger = (f"price rallies into {round(entry_low, 4)}-{round(entry_high, 4)} (sell the rally)"
+                   if direction == "short"
+                   else f"price dips into {round(entry_low, 4)}-{round(entry_high, 4)} (buy the dip)")
+    else:
+        trigger = f"close {'above' if direction == 'long' else 'below'} {round(entry_high if direction == 'long' else entry_low, 4)}"
     return {
         "id": f"{'L' if direction == 'long' else 'S'}{idx}",
         "status": status,
         "setup_type": setup_type,
         "timeframe_confluence": [tf for tf in ("1d", "4h", "1h", "15m")],
         "entry_zone": {"low": round(entry_low, 4), "high": round(entry_high, 4)},
-        "entry_trigger": f"close {'above' if direction == 'long' else 'below'} {round(entry_high if direction == 'long' else entry_low, 4)}",
+        "entry_trigger": trigger,
         "sl": round(sl, 4),
         "tp": tps,
         "confidence": conf,

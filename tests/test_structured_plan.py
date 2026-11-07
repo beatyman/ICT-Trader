@@ -69,6 +69,7 @@ def test_bearish_alignment_gives_short_setup():
 
 def test_neutral_htf_gives_no_trade():
     inp = _inp()
+    inp["ict_trader_15m"]["htf_bias"] = None  # ICT 也无方向
     for tf in ("1d", "4h", "1h"):
         inp["chanlun_htf"][tf]["trend"] = "range"
     inp["wyckoff"]["phase"] = None
@@ -77,6 +78,16 @@ def test_neutral_htf_gives_no_trade():
     out = structured_plan(inp)
     assert out["meta"]["analysis_bias"] == "neutral"
     assert any("neutral" in c.lower() for c in out["no_trade_conditions"])
+
+
+def test_ict_primary_overrides_auxiliary_conflict():
+    # ICT 主方向空，但 Wyckoff 吸筹(多)冲突 → 仍是空方向，不翻转
+    inp = _inp()
+    inp["ict_trader_15m"]["htf_bias"] = "bearish"
+    inp["wyckoff"]["phase"] = "accumulation"  # 与空冲突
+    out = structured_plan(inp)
+    assert out["meta"]["analysis_bias"] == "bearish"  # ICT 主，不翻转
+    assert out["meta"]["htf_confluence_detail"]["ict_htf"] == -3
 
 
 def test_data_gaps_reported():
