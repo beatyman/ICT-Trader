@@ -73,8 +73,12 @@ class ChanlunResult:
     reasons: list = field(default_factory=list)
 
 
-def df_to_klus(df: pd.DataFrame):
-    """OHLCV DataFrame -> chan.py CKLine_Unit 列表（按时间正序）。"""
+def df_to_klus(df: pd.DataFrame, auto: bool = False):
+    """OHLCV DataFrame -> chan.py CKLine_Unit 列表（按时间正序）。
+
+    auto=True：把 00:00 的 bar 当作「当日收盘」（日线/周线，区间套用），
+    auto=False：保留精确时刻（分钟级，单周期用）。
+    """
     _ensure_chanpy()
     from Common.CEnum import DATA_FIELD
     from Common.CTime import CTime
@@ -86,7 +90,7 @@ def df_to_klus(df: pd.DataFrame):
         dt = pd.Timestamp(r["date"]).to_pydatetime()
         klus.append(CKLine_Unit({
             DATA_FIELD.FIELD_TIME: CTime(dt.year, dt.month, dt.day, dt.hour, dt.minute,
-                                         auto=False),  # 保留精确时刻，日线用 00:00
+                                         auto=auto),
             DATA_FIELD.FIELD_OPEN: float(r["open"]),
             DATA_FIELD.FIELD_CLOSE: float(r["close"]),
             DATA_FIELD.FIELD_HIGH: float(r["high"]),
