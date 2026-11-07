@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ict_trader.structured_plan import structured_plan  # noqa: E402
+from ict_trader.ai_prompt import build_ai_prompt  # noqa: E402
 
 
 def _inp(**over):
@@ -101,3 +102,13 @@ def test_missing_current_price_is_no_trade():
     inp["current_price"] = None
     out = structured_plan(inp)
     assert any("current_price" in c for c in out["no_trade_conditions"])
+
+
+def test_ai_prompt_self_contained():
+    """AI 提示词自包含：含方法论文本 + 完整 JSON + 输出字段契约。"""
+    inp = _inp()
+    p = build_ai_prompt(inp)
+    assert "ICT" in p and "缠论" in p and "Ichimoku" in p and "Wyckoff" in p
+    assert '"direction"' in p and '"entry_zone"' in p and '"confidence"' in p
+    assert '"symbol": "XAUUSD"' in p  # 数据已内联
+    assert "只输出" in p  # 输出约束
