@@ -86,6 +86,12 @@ def main() -> None:
                  "zs": {"show_text": True}}                    # 中枢标注
     driver = CPlotDriver(chan, plot_config=plot_config, plot_para=plot_para)
 
+    # chan.py 无 K_240M，4h/1h 都用 K_60M；把标题里的周期名改回实际 freq
+    for ax in driver.figure.axes:
+        t = ax.get_title()
+        if t:
+            ax.set_title(t.replace("60M", args.freq.upper()))
+
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     driver.figure.savefig(out, facecolor="white", bbox_inches="tight", dpi=110)
