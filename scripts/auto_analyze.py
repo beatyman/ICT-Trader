@@ -24,11 +24,32 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ict_trader.background import wyckoff_background, ichimoku_background  # noqa: E402
+from ict_trader.background import (wyckoff_background, ichimoku_background,  # noqa: E402
+                                   chanlun_background)
 from ict_trader.main_strategy import ict_signal  # noqa: E402
 from ict_trader.fusion import fuse  # noqa: E402
 from ict_trader.scoring import score  # noqa: E402
 from ict_trader.feedback import TradeRecord, feedback_score, attribution, discover_problems  # noqa: E402
+
+
+def _infer_freq(df: pd.DataFrame) -> str:
+    """从时间间隔推断 K 线周期。"""
+    if len(df) < 2:
+        return "15m"
+    secs = pd.Series(pd.to_datetime(df["date"])).diff().median().total_seconds()
+    if secs < 60:
+        return "1m"
+    if secs < 300:
+        return "5m"
+    if secs < 900:
+        return "15m"
+    if secs < 1800:
+        return "30m"
+    if secs < 3600:
+        return "1h"
+    if secs < 14400:
+        return "4h"
+    return "1d"
 
 
 def analyze_once(df_exec: pd.DataFrame, df_daily: pd.DataFrame, df_htf: pd.DataFrame,
@@ -37,7 +58,10 @@ def analyze_once(df_exec: pd.DataFrame, df_daily: pd.DataFrame, df_htf: pd.DataF
     ict = ict_signal(df_exec, df_daily, market)
     wy = wyckoff_background(df_htf)
     ichi = ichimoku_background(df_htf)
-    fused = fuse(ict, wy, ichi)
+    # 缠论：HTF（日线）决定方向，LTF（执行周期）做入场择时
+    chan_htf = chanlun_background(df_daily, freq="1d")
+    chan_ltf = chanlun_background(df_exec, freq=_infer_freq(df_exec))
+    fused = fuse(ict, wy, ichi, chan_htf, chan_ltf)
     return score(ict, wy, ichi, fused, symbol=symbol, timestamp=timestamp)
 
 
