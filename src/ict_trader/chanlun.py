@@ -27,8 +27,8 @@ __all__ = ["ChanlunResult", "analyze_chanlun", "df_to_klus", "FREQ_MAP", "chanpy
 FREQ_MAP = {"1m": "K_1M", "5m": "K_5M", "15m": "K_15M", "30m": "K_30M",
             "1h": "K_60M", "4h": "K_60M", "1d": "K_DAY", "1w": "K_WEEK"}
 
-# chan.py 是 ICT-Trader 的兄弟目录（同在 external/ 下）
-_DEFAULT_CHANPY = os.path.join(os.path.dirname(__file__), "..", "..", "..", "chan.py")
+# chan.py 已 vendored 进本项目（vendor/chan.py），不依赖项目外目录
+_DEFAULT_CHANPY = os.path.join(os.path.dirname(__file__), "..", "..", "vendor", "chan.py")
 
 
 def _chanpy_dir() -> str:
