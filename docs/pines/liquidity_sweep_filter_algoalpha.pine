@@ -1,0 +1,29 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AlgoAlpha
+
+//@version=6
+indicator("Liquidity Sweep Filter [AlgoAlpha]", "AlgoAlpha - Liquidity Filter", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500, max_bars_back=5000)
+
+// ══════════════════════════════════════════════════════════
+// 参考基准（流动性扫单 + 成交量分布，~90% 已被引擎覆盖）
+//
+//   已覆盖：
+//     · 扫单检测（BSL/SSL：影线突破 + 收回）→ concepts.py detect_sweeps
+//     · 成交量分布 + POC             → cyq.py volume_profile + vp_anatomy.py
+//     · 趋势带（EMA ± 偏差）          → synapse.py super_trend（SuperTrend 家族）
+//
+//   唯一细微差异（如需要可移植）：
+//     · 扫单量累积：被扫的摆动水平对应的成交量被累计，
+//       用归一化成交量(nvol)把扫单分成 major / minor
+//       （nvol > 阈值 = 大额清算扫单）
+// ══════════════════════════════════════════════════════════
+
+// ── 核心 ──
+// 下降趋势中记录 swing highs（作为上方阻力流动性），突破 = 空头扫单
+// 上升趋势中记录 swing lows（作为下方支撑流动性），跌破 = 多头扫单
+// 被扫水平累计成交量 + 归一化成交量 → major/minor 分类
+// 成交量分布 + POC 用于识别成交密集区
+
+// ══════════════════════════════════════════════════════════
+// (完整逻辑见原始脚本；扫单 + 成交量分布已移植到 concepts.py + cyq.py)
+// ══════════════════════════════════════════════════════════
