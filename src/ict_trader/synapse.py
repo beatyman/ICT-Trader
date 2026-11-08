@@ -91,9 +91,11 @@ def adx(df: pd.DataFrame, length: int = 14) -> np.ndarray:
     tr_s = _wilder(tr, length)
     plus_s = _wilder(plus_dm, length)
     minus_s = _wilder(minus_dm, length)
-    di_plus = np.where(tr_s > 0, 100.0 * plus_s / tr_s, 0.0)
-    di_minus = np.where(tr_s > 0, 100.0 * minus_s / tr_s, 0.0)
-    dx = np.where(di_plus + di_minus > 0, 100.0 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0.0)
+    safe_tr = np.where(tr_s > 0, tr_s, 1.0)
+    di_plus = np.where(tr_s > 0, 100.0 * plus_s / safe_tr, 0.0)
+    di_minus = np.where(tr_s > 0, 100.0 * minus_s / safe_tr, 0.0)
+    di_sum = di_plus + di_minus
+    dx = np.where(di_sum > 0, 100.0 * np.abs(di_plus - di_minus) / np.where(di_sum > 0, di_sum, 1.0), 0.0)
     return _wilder(dx, length)
 
 

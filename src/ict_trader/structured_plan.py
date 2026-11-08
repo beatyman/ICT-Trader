@@ -277,18 +277,44 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
                                         getattr(po3, "state", ""), None)
                 ict["po3_range"] = {"high": round(float(po3.range_high), 4),
                                     "low": round(float(po3.range_low), 4)}
+                # AMD fib 外延目标（派发目标，锚定操纵腿）
+                if po3.sweep_direction in ("bull", "bear") and po3.manipulation_extreme is not None:
+                    from .amd import po3_fib_target
+                    try:
+                        tgt, _, _ = po3_fib_target(float(po3.range_high), float(po3.range_low),
+                                                   float(po3.manipulation_extreme),
+                                                   po3.sweep_direction, fib=1.5)
+                        ict["po3_fib_target"] = round(tgt, 4)
+                    except Exception:
+                        ict["po3_fib_target"] = None
         except Exception:
             pass
 
     # ---- Wyckoff ----
     if df_15m is not None and len(df_15m) >= 30:
         try:
-            from .wyckoff import detect_wyckoff
+            from .wyckoff import detect_wyckoff, atr
+            from .wyckoff_quality import effort_ratio, spring_score
             st, _ = detect_wyckoff(df_15m)
             if st.direction != 0:
                 inp["wyckoff"]["phase"] = "accumulation" if st.direction == 1 else "distribution"
                 inp["wyckoff"]["range"] = {"low": round(float(st.range_bottom), 4),
                                            "high": round(float(st.range_top), 4)}
+            # 量价 effort ratio（努力与结果）
+            eff = effort_ratio(df_15m)
+            inp["wyckoff"]["effort_ratio"] = round(float(eff.iloc[-1]), 2)
+            # Spring/UTAD 质量分（深度 + 努力 + 速度）
+            if st.spring_confirmed and st.spring_bar >= 0:
+                try:
+                    a = float(atr(df_15m, 14).iloc[-1])
+                    depth_atr = abs(st.climax_side - st.spring_extreme) / max(a, 1e-9)
+                    spring_eff = float(eff.iloc[st.spring_bar])
+                    climax_eff = float(eff.iloc[st.climax_bar]) if st.climax_bar >= 0 else 1.0
+                    bars_since = max(0, len(df_15m) - 1 - st.spring_bar)
+                    inp["wyckoff"]["spring_quality"] = spring_score(depth_atr, spring_eff,
+                                                                   climax_eff, bars_since)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -376,6 +402,34 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
     except Exception as e:
         inp["levels"] = None
         inp["notes"] = f"{inp.get('notes') or ''} levels error: {type(e).__name__}: {e}".strip()
+
+    # ---- 成交量分布形状（POC/VAH/VAL + D/B/P/Double Zone）----
+    try:
+        from .cyq import volume_profile
+        from .vp_anatomy import poc_vah_val, classify_profile, KIND_NAME
+        prices, density = volume_profile(df_15m, window=200, bins=50)
+        poc, vah, val = poc_vah_val(prices, density, pct=0.7)
+        kind, _, _ = classify_profile(density)
+        if inp.get("levels"):
+            inp["levels"]["value_area"] = {"poc": round(poc, 4), "vah": round(vah, 4),
+                                           "val": round(val, 4)}
+        inp["profile_shape"] = KIND_NAME.get(kind, "unknown")
+    except Exception as e:
+        inp["profile_shape"] = None
+        inp["notes"] = f"{inp.get('notes') or ''} profile error: {type(e).__name__}: {e}".strip()
+
+    # ---- 图表形态（双顶/双底/头肩/楔形）----
+    try:
+        from .patterns import detect_patterns
+        pats = detect_patterns(df_15m, left=5, right=5, min_rr=0.8)
+        inp["patterns"] = [
+            {"type": p.type, "direction": p.direction, "entry": round(p.entry, 4),
+             "target": round(p.target, 4), "rr": round(p.rr, 2), "bar": p.bars}
+            for p in pats[-5:]
+        ]
+    except Exception as e:
+        inp["patterns"] = None
+        inp["notes"] = f"{inp.get('notes') or ''} patterns error: {type(e).__name__}: {e}".strip()
 
     # ---- 订单流（资金流方向）+ 动量（自适应 RSI + 背离）----
     try:
@@ -468,18 +522,23 @@ def _liquidity_levels(inp: dict, direction: str) -> list[float]:
     lvl = _get(inp, "levels") or {}
     cam = lvl.get("camarilla") or {}
     vb = lvl.get("vwap_band") or {}
+    va = lvl.get("value_area") or {}
     if direction == "long":
         lv = [_num(x) for x in (liq.get("bsl") or [])]
         lv += [_get(inp, "chanlun_htf", "1h", "zhongshu", 0, "high")]
         lv += [_get(inp, "ichimoku", "senkou_a"), _get(inp, "ichimoku", "senkou_b")]
         lv += [_num(cam.get("H3")), _num(cam.get("H4")), _num(vb.get("upper")),
                _num(lvl.get("vwap")), _num(lvl.get("trendline_resistance"))]
+        lv += [_num(va.get("vah")), _num(va.get("poc"))]
+        lv += [_num(_get(inp, "ict_trader_15m", "po3_fib_target"))]
     else:
         lv = [_num(x) for x in (liq.get("ssl") or [])]
         lv += [_get(inp, "chanlun_htf", "1h", "zhongshu", 0, "low")]
         lv += [_get(inp, "ichimoku", "senkou_a"), _get(inp, "ichimoku", "senkou_b")]
         lv += [_num(cam.get("L3")), _num(cam.get("L4")), _num(vb.get("lower")),
                _num(lvl.get("vwap")), _num(lvl.get("trendline_support"))]
+        lv += [_num(va.get("val")), _num(va.get("poc"))]
+        lv += [_num(_get(inp, "ict_trader_15m", "po3_fib_target"))]
     price = _num(inp.get("current_price"))
     out = [v for v in lv if v is not None]
     if direction == "long" and price is not None:
@@ -584,6 +643,22 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
             conf += 5    # 背离确认方向
         elif (direction == "long" and bear_div) or (direction == "short" and bull_div):
             conf -= 10   # 背离冲突（动能衰竭反向）
+    # 图表形态（反转形态）确认：方向一致加分，冲突减分
+    pats = _get(inp, "patterns") or []
+    for p in pats:
+        p_dir = p.get("direction")
+        if p_dir == direction:
+            conf += 5
+            break
+        elif p_dir in ("long", "short") and p_dir != direction:
+            conf -= 5
+            break
+    # Wyckoff spring/UTAD 质量：高质量反转确认方向
+    sq = _num(_get(inp, "wyckoff", "spring_quality"))
+    if sq is not None and sq >= 70:
+        wp_dir = "long" if _get(inp, "wyckoff", "phase") == "accumulation" else "short"
+        if wp_dir == direction:
+            conf += 5
     conf = max(0, min(100, conf))
 
     inv = (f"close below {round(sl, 4)} invalidates long" if direction == "long"
@@ -724,6 +799,8 @@ def structured_plan(inp: dict) -> dict:
             "levels": inp.get("levels"),       # 关键价位层级（Camarilla/VWAP带/主趋势线）
             "orderflow": inp.get("orderflow"), # 资金流（std_of 买压/卖压）
             "momentum": inp.get("momentum"),   # 动量（自适应RSI + 最近背离）
+            "profile_shape": inp.get("profile_shape"),  # 成交量分布形状（D/B/P/Double Zone）
+            "patterns": inp.get("patterns"),    # 图表形态（双顶/双底/头肩/楔形）
             "summary": "; ".join(summary_parts),
         },
         "long_setups": long_setups,
