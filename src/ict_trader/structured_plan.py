@@ -68,6 +68,153 @@ def _rr(entry: float | None, sl: float | None, tp: float | None, direction: str)
 
 # ---------- feature extraction (from engine) ----------
 
+def _build_metadata(df_15m, df_4h, df_1h, df_daily) -> dict:
+    """数据层：多周期可得性 + 价格/结构/波动上下文（纯函数，无副作用）。"""
+    import pandas as pd
+    md = {"data_availability": {}, "price_context": {}, "structure_context": {},
+          "volatility_context": {}}
+    for tf, df in (("15m", df_15m), ("4h", df_4h), ("1h", df_1h), ("1d", df_daily)):
+        if df is not None and len(df):
+            md["data_availability"][tf] = {
+                "bars": int(len(df)),
+                "from": str(df["date"].iloc[0]),
+                "to": str(df["date"].iloc[-1]),
+            }
+        else:
+            md["data_availability"][tf] = {"bars": 0, "from": None, "to": None}
+
+    if df_15m is not None and len(df_15m) >= 2:
+        c = df_15m["close"].astype(float)
+        h = df_15m["high"].astype(float)
+        l = df_15m["low"].astype(float)
+        tr = pd.DataFrame({
+            "hl": h - l,
+            "hc": (h - c.shift(1)).abs(),
+            "lc": (l - c.shift(1)).abs(),
+        }).max(axis=1)
+        atr = float(tr.rolling(14, min_periods=1).mean().iloc[-1])
+        win20 = 20
+        rhi = float(h.tail(win20).max())
+        rlo = float(l.tail(win20).min())
+        pc = md["price_context"]
+        pc["current"] = float(c.iloc[-1])
+        pc["recent_20_high"] = round(rhi, 4)
+        pc["recent_20_low"] = round(rlo, 4)
+        pc["recent_20_range_pct"] = round((rhi - rlo) / rlo * 100, 3) if rlo else None
+        vc = md["volatility_context"]
+        vc["atr_14"] = round(atr, 4)
+        vc["atr_pct"] = round(atr / c.iloc[-1] * 100, 3) if c.iloc[-1] else None
+        hi_now, lo_now = h.tail(win20).max(), l.tail(win20).min()
+        hi_prev, lo_prev = (h.iloc[-2 * win20:-win20].max() if len(h) >= 2 * win20 else h.max(),
+                            l.iloc[-2 * win20:-win20].min() if len(l) >= 2 * win20 else l.min())
+        if hi_now > hi_prev and lo_now > lo_prev:
+            pattern = "higher_highs_higher_lows"
+        elif hi_now < hi_prev and lo_now < lo_prev:
+            pattern = "lower_highs_lower_lows"
+        else:
+            pattern = "range"
+        md["structure_context"]["swing_pattern"] = pattern
+    return md
+
+
+def _build_auxiliary(inp: dict, df_15m, df_daily) -> None:
+    """特征层（纯函数）：regime / levels / profile_shape / patterns / orderflow / momentum。
+
+    就地填充 inp，不返回；每块独立 try/except，失败置 null 并记 notes。
+    """
+    def _note(key, e):
+        inp["notes"] = f"{inp.get('notes') or ''} {key} error: {type(e).__name__}: {e}".strip()
+
+    # 市场状态
+    try:
+        from .synapse import regime_classify
+        reg = regime_classify(df_15m)
+        last = reg.iloc[-1]
+        inp["regime"] = {"label": str(last["regime_label"]),
+                         "score": round(float(last["regime_score"]), 1),
+                         "adx": round(float(last["adx"]), 1),
+                         "chop": round(float(last["chop"]), 1),
+                         "r2": round(float(last["r2"]), 3)}
+    except Exception as e:
+        inp["regime"] = None
+        _note("regime", e)
+
+    # 关键价位层级
+    try:
+        from .camarilla import camarilla_pivots, vwap_band
+        from .trendlines import detect_pivots, falling_resistance, rising_support
+        lv: dict = {"camarilla": None, "vwap": None, "vwap_band": None,
+                    "trendline_resistance": None, "trendline_support": None}
+        d_last = df_daily.iloc[-1]
+        lv["camarilla"] = camarilla_pivots(float(d_last["high"]), float(d_last["low"]),
+                                           float(d_last["close"]))
+        vb = vwap_band(df_15m)
+        lv["vwap"] = round(float(vb["vwap"].iloc[-1]), 4)
+        lv["vwap_band"] = {"upper": round(float(vb["upper"].iloc[-1]), 4),
+                           "lower": round(float(vb["lower"].iloc[-1]), 4)}
+        hi = df_15m["high"].to_numpy(float)
+        lo = df_15m["low"].to_numpy(float)
+        hvals, hbars = detect_pivots(hi, left=5, right=5, kind="high")
+        lvals, lbars = detect_pivots(lo, left=5, right=5, kind="low")
+        last_bar = len(df_15m) - 1
+        fr = falling_resistance(hvals, hbars, min_touches=2, max_viol=2)
+        if fr is not None:
+            lv["trendline_resistance"] = round(fr.at(last_bar), 4)
+        rs = rising_support(lvals, lbars, min_touches=2, max_viol=2)
+        if rs is not None:
+            lv["trendline_support"] = round(rs.at(last_bar), 4)
+        inp["levels"] = lv
+    except Exception as e:
+        inp["levels"] = None
+        _note("levels", e)
+
+    # 成交量分布形状
+    try:
+        from .cyq import volume_profile
+        from .vp_anatomy import poc_vah_val, classify_profile, KIND_NAME
+        prices, density = volume_profile(df_15m, window=200, bins=50)
+        poc, vah, val = poc_vah_val(prices, density, pct=0.7)
+        kind, _, _ = classify_profile(density)
+        if inp.get("levels"):
+            inp["levels"]["value_area"] = {"poc": round(poc, 4), "vah": round(vah, 4),
+                                           "val": round(val, 4)}
+        inp["profile_shape"] = KIND_NAME.get(kind, "unknown")
+    except Exception as e:
+        inp["profile_shape"] = None
+        _note("profile", e)
+
+    # 图表形态
+    try:
+        from .patterns import detect_patterns
+        pats = detect_patterns(df_15m, left=5, right=5, min_rr=0.8)
+        inp["patterns"] = [
+            {"type": p.type, "direction": p.direction, "entry": round(p.entry, 4),
+             "target": round(p.target, 4), "rr": round(p.rr, 2), "bar": p.bars}
+            for p in pats[-5:]
+        ]
+    except Exception as e:
+        inp["patterns"] = None
+        _note("patterns", e)
+
+    # 订单流 + 动量
+    try:
+        from .orderflow import standardized_order_flow
+        from .adaptive_rsi import adaptive_rsi, detect_divergence
+        stdof = standardized_order_flow(df_15m)
+        inp["orderflow"] = {"std_of": round(float(stdof.iloc[-1]), 2)}
+        ar = adaptive_rsi(df_15m)
+        inp["momentum"] = {"rsi_regime": int(ar["regime"].iloc[-1]),
+                           "osc": round(float(ar["osc"].iloc[-1]), 1),
+                           "recent_divergence": None}
+        divs = detect_divergence(df_15m, ar["osc"].to_numpy(), left=15, right=15)
+        recent = [d.kind for d in divs if d.bar >= len(df_15m) - 60]
+        inp["momentum"]["recent_divergence"] = recent[-1] if recent else None
+    except Exception as e:
+        inp["orderflow"] = None
+        inp["momentum"] = None
+        _note("orderflow/momentum", e)
+
+
 def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "crypto",
                           df_1h=None) -> dict:
     """从 OHLCV DataFrame + 引擎算出「输入 JSON」（ICT/Wyckoff/Ichimoku/缠论特征）。"""
@@ -115,50 +262,9 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
         "notes": None,
     }
 
-    # ---- metadata：数据可得性 + 上下文（数据不充分时供 AI 决策） ----
+    # ---- metadata：数据可得性 + 上下文（数据层，纯函数）----
+    inp["metadata"] = _build_metadata(df_15m, df_4h, df_1h, df_daily)
     md = inp["metadata"]
-    for tf, df in (("15m", df_15m), ("4h", df_4h), ("1h", df_1h), ("1d", df_daily)):
-        if df is not None and len(df):
-            md["data_availability"][tf] = {
-                "bars": int(len(df)),
-                "from": str(df["date"].iloc[0]),
-                "to": str(df["date"].iloc[-1]),
-            }
-        else:
-            md["data_availability"][tf] = {"bars": 0, "from": None, "to": None}
-
-    if df_15m is not None and len(df_15m) >= 2:
-        c = df_15m["close"].astype(float)
-        h = df_15m["high"].astype(float)
-        l = df_15m["low"].astype(float)
-        tr = pd.DataFrame({
-            "hl": h - l,
-            "hc": (h - c.shift(1)).abs(),
-            "lc": (l - c.shift(1)).abs(),
-        }).max(axis=1)
-        atr = float(tr.rolling(14, min_periods=1).mean().iloc[-1])
-        win20 = 20
-        rhi = float(h.tail(win20).max())
-        rlo = float(l.tail(win20).min())
-        pc = md["price_context"]
-        pc["current"] = float(c.iloc[-1])
-        pc["recent_20_high"] = round(rhi, 4)
-        pc["recent_20_low"] = round(rlo, 4)
-        pc["recent_20_range_pct"] = round((rhi - rlo) / rlo * 100, 3) if rlo else None
-        vc = md["volatility_context"]
-        vc["atr_14"] = round(atr, 4)
-        vc["atr_pct"] = round(atr / c.iloc[-1] * 100, 3) if c.iloc[-1] else None
-        # 摆动模式（近 20 根 vs 更早 20 根）
-        hi_now, lo_now = h.tail(win20).max(), l.tail(win20).min()
-        hi_prev, lo_prev = (h.iloc[-2 * win20:-win20].max() if len(h) >= 2 * win20 else h.max(),
-                            l.iloc[-2 * win20:-win20].min() if len(l) >= 2 * win20 else l.min())
-        if hi_now > hi_prev and lo_now > lo_prev:
-            pattern = "higher_highs_higher_lows"
-        elif hi_now < hi_prev and lo_now < lo_prev:
-            pattern = "lower_highs_lower_lows"
-        else:
-            pattern = "range"
-        md["structure_context"]["swing_pattern"] = pattern
 
     # ---- ICT 15m ----
     if df_15m is not None and len(df_15m) >= 30:
@@ -363,98 +469,8 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
     except Exception as e:
         inp["notes"] = f"chanlun error: {type(e).__name__}: {e}"
 
-    # ---- 市场状态（regime：ADX + 震荡指数 + R²线性度）----
-    try:
-        from .synapse import regime_classify
-        reg = regime_classify(df_15m)
-        last = reg.iloc[-1]
-        inp["regime"] = {
-            "label": str(last["regime_label"]),
-            "score": round(float(last["regime_score"]), 1),
-            "adx": round(float(last["adx"]), 1),
-            "chop": round(float(last["chop"]), 1),
-            "r2": round(float(last["r2"]), 3),
-        }
-    except Exception as e:
-        inp["regime"] = None
-        inp["notes"] = f"{inp.get('notes') or ''} regime error: {type(e).__name__}: {e}".strip()
-
-    # ---- 关键价位层级（Camarilla / VWAP 带 / 主趋势线）----
-    try:
-        from .camarilla import camarilla_pivots, vwap_band
-        from .trendlines import detect_pivots, falling_resistance, rising_support
-        lv: dict = {"camarilla": None, "vwap": None, "vwap_band": None,
-                    "trendline_resistance": None, "trendline_support": None}
-        d_last = df_daily.iloc[-1]
-        lv["camarilla"] = camarilla_pivots(float(d_last["high"]), float(d_last["low"]),
-                                           float(d_last["close"]))
-        vb = vwap_band(df_15m)
-        lv["vwap"] = round(float(vb["vwap"].iloc[-1]), 4)   # 20-bar 滚动 VWAP（更贴近当前价）
-        lv["vwap_band"] = {"upper": round(float(vb["upper"].iloc[-1]), 4),
-                           "lower": round(float(vb["lower"].iloc[-1]), 4)}
-        hi = df_15m["high"].to_numpy(float)
-        lo = df_15m["low"].to_numpy(float)
-        hvals, hbars = detect_pivots(hi, left=5, right=5, kind="high")
-        lvals, lbars = detect_pivots(lo, left=5, right=5, kind="low")
-        last_bar = len(df_15m) - 1
-        fr = falling_resistance(hvals, hbars, min_touches=2, max_viol=2)
-        if fr is not None:
-            lv["trendline_resistance"] = round(fr.at(last_bar), 4)
-        rs = rising_support(lvals, lbars, min_touches=2, max_viol=2)
-        if rs is not None:
-            lv["trendline_support"] = round(rs.at(last_bar), 4)
-        inp["levels"] = lv
-    except Exception as e:
-        inp["levels"] = None
-        inp["notes"] = f"{inp.get('notes') or ''} levels error: {type(e).__name__}: {e}".strip()
-
-    # ---- 成交量分布形状（POC/VAH/VAL + D/B/P/Double Zone）----
-    try:
-        from .cyq import volume_profile
-        from .vp_anatomy import poc_vah_val, classify_profile, KIND_NAME
-        prices, density = volume_profile(df_15m, window=200, bins=50)
-        poc, vah, val = poc_vah_val(prices, density, pct=0.7)
-        kind, _, _ = classify_profile(density)
-        if inp.get("levels"):
-            inp["levels"]["value_area"] = {"poc": round(poc, 4), "vah": round(vah, 4),
-                                           "val": round(val, 4)}
-        inp["profile_shape"] = KIND_NAME.get(kind, "unknown")
-    except Exception as e:
-        inp["profile_shape"] = None
-        inp["notes"] = f"{inp.get('notes') or ''} profile error: {type(e).__name__}: {e}".strip()
-
-    # ---- 图表形态（双顶/双底/头肩/楔形）----
-    try:
-        from .patterns import detect_patterns
-        pats = detect_patterns(df_15m, left=5, right=5, min_rr=0.8)
-        inp["patterns"] = [
-            {"type": p.type, "direction": p.direction, "entry": round(p.entry, 4),
-             "target": round(p.target, 4), "rr": round(p.rr, 2), "bar": p.bars}
-            for p in pats[-5:]
-        ]
-    except Exception as e:
-        inp["patterns"] = None
-        inp["notes"] = f"{inp.get('notes') or ''} patterns error: {type(e).__name__}: {e}".strip()
-
-    # ---- 订单流（资金流方向）+ 动量（自适应 RSI + 背离）----
-    try:
-        from .orderflow import standardized_order_flow
-        from .adaptive_rsi import adaptive_rsi, detect_divergence
-        stdof = standardized_order_flow(df_15m)
-        inp["orderflow"] = {"std_of": round(float(stdof.iloc[-1]), 2)}
-        ar = adaptive_rsi(df_15m)
-        inp["momentum"] = {
-            "rsi_regime": int(ar["regime"].iloc[-1]),
-            "osc": round(float(ar["osc"].iloc[-1]), 1),
-            "recent_divergence": None,
-        }
-        divs = detect_divergence(df_15m, ar["osc"].to_numpy(), left=15, right=15)
-        recent = [d.kind for d in divs if d.bar >= len(df_15m) - 60]
-        inp["momentum"]["recent_divergence"] = recent[-1] if recent else None
-    except Exception as e:
-        inp["orderflow"] = None
-        inp["momentum"] = None
-        inp["notes"] = f"{inp.get('notes') or ''} orderflow/momentum error: {type(e).__name__}: {e}".strip()
+    # ---- 辅助特征层（regime / levels / profile_shape / patterns / orderflow / momentum）----
+    _build_auxiliary(inp, df_15m, df_daily)
 
     return inp
 
