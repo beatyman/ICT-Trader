@@ -5,14 +5,13 @@
 // Author:  Willy | WillyAlgoTrader
 // Version: 1.7.1
 //
-// 参考基准（已吸收进 ICT-Trader 引擎）：
-//   - HTF 扫单 + CISD + OB/FVG/IFVG/Breaker/Unicorn 入场 PD 阵列
-//   - 溢价/折价、Killzone、SMT、ATR 波动率过滤
-//   - 风险预设（Conservative/Balanced/Aggressive/Scalping）+ TP1 后保本
-//   - Setup 汇合评分 0-100 + 完整交易引擎（限价单→成交→TP1/TP2/TP3→BE→SL→反转）
-// 已移植到：src/ict_trader/{structured_plan,trade_risk,trade_decision,timemachine}.py
-
+// NOTE: Full verbatim reference. Already absorbed into ICT-Trader:
+//   · Setup confluence score 0-100 (OB/FVG/IFVG/Breaker/Unicorn/bias/SMT/PD)
+//     → src/ict_trader/structured_plan.py  (setup_score)
+//   · Break-even after TP1 → scripts/trade_decision.py  (be action)
+//   · HTF sweep + CISD + OB/FVG/IFVG/Breaker/Unicorn → concepts.py + cisd.py + po3.py
 // ══════════════════════════════════════════════════════════
+
 indicator(
      title               = "HTF Sweep CISD Setups [WillyAlgoTrader]",
      shorttitle          = "Sweep CISD",
@@ -298,6 +297,2015 @@ tpLineStyleInput    = input.string("Dashed", "TP Line Style", options = ["Solid"
      tooltip = "Style for TP1/TP2/TP3. On hit, a TP line turns solid teal.")
 
 // ══════════════════════════════════════════════════════════
-// (visual / panel / dashboard / stats / alerts / trade engine 等其余部分
-//  见完整原始脚本；核心策略逻辑已移植到 Python 引擎)
+// INPUT VALIDATION
 // ══════════════════════════════════════════════════════════
+[effSLMult, effTP1m, effTP2m, effTP3m] = switch riskPresetInput
+    "Conservative" => [2.5, 1.0, 2.0, 4.0]
+    "Aggressive"   => [1.0, 1.5, 2.5, 4.0]
+    "Scalping"     => [0.8, 0.8, 1.5, 2.0]
+    "Custom"       => [slMultInput, tp1MultInput, tp2MultInput, tp3MultInput]
+    => [1.5, 1.0, 2.0, 3.0]
+
+string htfTF = autoHtfInput ? (timeframe.in_seconds() < 60 ? "5" : timeframe.in_seconds() <= 60 ? "15" : timeframe.in_seconds() <= 180 ? "30" : timeframe.in_seconds() <= 300 ? "60" : timeframe.in_seconds() <= 900 ? "240" : timeframe.in_seconds() <= 3600 ? "D" : timeframe.in_seconds() <= 14400 ? "W" : "M") : htfManualInput
+
+if barstate.isfirst
+    if effTP1m >= effTP2m or effTP2m >= effTP3m
+        runtime.error("Invalid TP multipliers: required TP1 < TP2 < TP3")
+    if effSLMult <= 0
+        runtime.error("SL Multiplier must be greater than 0")
+    if timeframe.in_seconds(htfTF) <= timeframe.in_seconds(timeframe.period)
+        runtime.error("Higher Timeframe must be greater than the chart timeframe")
+    if minRiskAtrInput > 0 and maxRiskAtrInput > 0 and minRiskAtrInput >= maxRiskAtrInput
+        runtime.error("Min Risk must be lower than Max Risk")
+    if volMinInput >= volMaxInput
+        runtime.error("Min ATR Percentile must be lower than Max ATR Percentile")
+    if maxCtxAgeInput < maxWaitInput
+        runtime.error("Max Context Age must be greater than or equal to Max Bars to Wait")
+    if showPanelInput and panelOffsetInput + panelCountInput * (panelWidthInput + panelGapInput) > 480
+        runtime.error("HTF panel too wide: reduce Offset, Number of Candles, Width or Gap (max 480 bars ahead)")
+
+// ══════════════════════════════════════════════════════════
+// 4. THEME DETECTION & COLORS
+// ══════════════════════════════════════════════════════════
+isDark = switch themeInput
+    "Dark"  => true
+    "Light" => false
+    =>         0.299 * color.r(chart.bg_color) + 0.587 * color.g(chart.bg_color) + 0.114 * color.b(chart.bg_color) < 128
+
+TEXT_COLOR    = isDark ? #E0E0E0 : #1A1A1A
+TEXT_MUTED    = isDark ? color.new(#9E9E9E, 0) : color.new(#757575, 0)
+BULL_TEXT     = isDark ? #00E676 : #00A152
+BEAR_TEXT     = isDark ? #FF5252 : #D32F2F
+NEUTRAL_TEXT  = isDark ? #FFEB3B : #F57F17
+BULL_LABEL_TEXT = #004D25
+BEAR_LABEL_TEXT = #FFFFFF
+TABLE_BG      = isDark ? color.new(#131722, 5) : color.new(#FFFFFF, 5)
+TABLE_BORDER  = isDark ? color.new(#2A2E39, 0) : color.new(#D0D0D0, 0)
+TABLE_ROW_ALT = isDark ? color.new(#1C2030, 0) : color.new(#F0F4F8, 0)
+HEADER_BG     = isDark ? color.new(#0D47A1, 0) : color.new(#1565C0, 0)
+HEADER_BG_BULL = color.new(#0F6E56, 0)
+HEADER_BG_BEAR = color.new(#A32D2D, 0)
+HEADER_TEXT   = #FFFFFF
+LINE_SUBTLE   = isDark ? color.new(#666666, 0) : color.new(#999999, 0)
+WM_COLOR      = isDark ? color.new(#FFFFFF, 80) : color.new(#000000, 80)
+
+// ── Risk palette (muted, theme-aware) ──
+SL_COLOR       = isDark ? color.new(#E57373, 0)  : color.new(#B71C1C, 0)
+TP1_COLOR      = isDark ? color.new(#66BB6A, 30) : color.new(#388E3C, 30)
+TP2_COLOR      = isDark ? color.new(#66BB6A, 40) : color.new(#388E3C, 40)
+TP3_COLOR      = isDark ? color.new(#66BB6A, 0)  : color.new(#388E3C, 0)
+ENTRY_COLOR    = isDark ? color.new(#5C8AAE, 0)  : color.new(#34495E, 0)
+TP_LABEL_COLOR = isDark ? color.new(#66BB6A, 0)  : color.new(#388E3C, 0)
+TP_HIT_COLOR   = isDark ? color.new(#4DB6AC, 0)  : color.new(#00695C, 0)
+BE_COLOR       = isDark ? color.new(#FFA726, 0)  : color.new(#E65100, 0)
+LABEL_TEXT     = isDark ? #1A1A1A : #FFFFFF
+
+// ── Setup layer (zones 80–90% transparency) ──
+int ZONE_TRANSP   = isDark ? 85 : 82
+SETUP_RISK_BG     = color.new(SL_COLOR, ZONE_TRANSP)
+SETUP_REW_BG      = color.new(TP3_COLOR, ZONE_TRANSP)
+SETUP_PREVIEW_BG  = color.new(ENTRY_COLOR, ZONE_TRANSP)
+SETUP_IGNORED_BG  = color.new(LINE_SUBTLE, 88)
+ZONE_BG           = color.new(zoneColorInput, 88)
+ZONE_BORDER       = color.new(zoneColorInput, 65)
+ARRAY_BG          = color.new(LINE_SUBTLE, 80)
+BUY_LIQ_COLOR     = color.new(buyLiqColorInput, 25)
+SELL_LIQ_COLOR    = color.new(sellLiqColorInput, 25)
+
+// ══════════════════════════════════════════════════════════
+// 5. TYPES & FUNCTIONS
+// ══════════════════════════════════════════════════════════
+type HtfBar
+    float o
+    float h
+    float l
+    float c
+    int   t
+    int   b
+    int   hb
+    int   lb
+
+type Liq
+    float p
+    int   b
+    int   idx
+    line  ln
+
+type Trig
+    bool  on     = false
+    float lvl    = na
+    int   lvlBar = na
+    int   anchor = na
+
+// Context logic works in a "bullish" transformed price space:
+// dir = 1 → prices as is; dir = -1 → prices negated (high↔low swapped).
+type Ctx
+    int   dir
+    bool  active   = false
+    int   trigBar  = na
+    int   createdBar = na
+    string why     = ""
+    bool  truncated = false
+    float level    = na
+    int   levelBar = na
+    int   anchor   = na
+    float ext      = na
+    int   extBar   = na
+    bool  inRun  = false
+    float rOpen  = na
+    float rHigh  = na
+    float rLow   = na
+    float rMinC  = na
+    int   rStart = na
+    float rPH    = na
+    float rPL    = na
+    float rPC    = na
+    int   rPBar  = na
+    float kOpen  = na
+    float kHigh  = na
+    float kLow   = na
+    float kMinC  = na
+    int   kStart = na
+    float kPH    = na
+    float kPL    = na
+    float kPC    = na
+    int   kPBar  = na
+    bool  obX    = false
+    int   obBar  = na
+    float xL     = na
+    float xC     = na
+    bool  fvg    = false
+    float fvgTop = na
+    float fvgBot = na
+    int   fvgBar = na
+    bool  ifvg   = false
+    float ifTop  = na
+    float ifBot  = na
+    float ixL    = na
+    float ixC    = na
+    int   ifBar  = na
+    int   ifXBar = na
+    bool  brk    = false
+    int   brBar  = na
+    int   brXBar = na
+    float brTop  = na
+    float brBot  = na
+    float brC    = na
+    float bxL    = na
+    float bxC    = na
+    array<float> oTop
+    array<float> oBot
+    array<int>   oBar
+    array<float> pvP
+    array<int>   pvB
+    array<float> pvL
+    array<float> pvC
+
+// Drawings of one setup (deleted together when the chart budget is exceeded)
+type Gfx
+    array<box>   bx
+    array<line>  ln
+    array<label> lb
+
+// Raw-price setup plan (not transformed)
+type Plan
+    int    dir
+    float  en
+    float  sl
+    float  tp1
+    float  tp2
+    float  tp3
+    int    score
+    string tags
+    bool   conf
+    bool   acc
+    bool   mkt
+    string enSrc
+    string slSrc
+    string tp3Src
+
+// Open position of the single-trade engine
+type Trade
+    int   dir   = 0
+    float entry = na
+    float sl    = na
+    float tp1   = na
+    float tp2   = na
+    float tp3   = na
+    float risk  = na
+    int   bar   = na
+    int   id    = na
+    bool  hit1  = false
+    bool  hit2  = false
+    bool  hit3  = false
+    bool  be    = false
+
+// Closed-trade statistics: one record() for every closing path
+type Stats
+    int          win    = 0
+    int          loss   = 0
+    float        sumR   = 0.0
+    float        grossW = 0.0
+    float        grossL = 0.0
+    string       form   = ""
+    array<int>   times
+    array<bool>  wins
+    array<float> rs
+
+method enter(Trade ts, int d, float en, float sl, float t1, float t2, float t3, int id) =>
+    ts.dir   := d
+    ts.entry := en
+    ts.sl    := sl
+    ts.tp1   := t1
+    ts.tp2   := t2
+    ts.tp3   := t3
+    ts.risk  := math.abs(en - sl)
+    ts.bar   := bar_index
+    ts.id    := id
+    ts.hit1  := false
+    ts.hit2  := false
+    ts.hit3  := false
+    ts.be    := false
+    ts
+
+method clear(Trade ts) =>
+    ts.dir   := 0
+    ts.entry := na
+    ts.sl    := na
+    ts.tp1   := na
+    ts.tp2   := na
+    ts.tp3   := na
+    ts.bar   := na
+    ts.id    := na
+    ts.hit1  := false
+    ts.hit2  := false
+    ts.hit3  := false
+    ts.be    := false
+    ts
+
+method record(Stats st, bool tradeWin, float r) =>
+    float rr = nz(r, 0.0)
+    if tradeWin
+        st.win := st.win + 1
+    else
+        st.loss := st.loss + 1
+    st.sumR := st.sumR + rr
+    if rr > 0
+        st.grossW := st.grossW + rr
+    else
+        st.grossL := st.grossL - rr
+    st.form := st.form + (tradeWin ? "▰" : "▱")
+    if str.length(st.form) > FORM_LEN
+        st.form := str.substring(st.form, str.length(st.form) - FORM_LEN)
+    st.times.push(time)
+    st.wins.push(tradeWin)
+    st.rs.push(rr)
+    while st.times.size() > 0 and st.times.get(0) < time - MS_DAY * STATS_PRUNE_DAYS
+        st.times.shift()
+        st.wins.shift()
+        st.rs.shift()
+    st
+
+roundT(float x, int d) =>
+    d * math.round_to_mintick(d * x)
+
+entryFam(EntryAt e) =>
+    switch e
+        EntryAt.obHL  => FAM_OB
+        EntryAt.obOpen => FAM_OB
+        EntryAt.obMT  => FAM_OB
+        EntryAt.obXHL => FAM_OB
+        EntryAt.obXC  => FAM_OB
+        EntryAt.fvgC  => FAM_FVG
+        EntryAt.fvgCE => FAM_FVG
+        EntryAt.fvgO  => FAM_FVG
+        EntryAt.ifO   => FAM_IFVG
+        EntryAt.ifCE  => FAM_IFVG
+        EntryAt.ifC   => FAM_IFVG
+        EntryAt.ifXHL => FAM_IFVG
+        EntryAt.ifXC  => FAM_IFVG
+        EntryAt.brHL  => FAM_BRK
+        EntryAt.brC   => FAM_BRK
+        EntryAt.brXHL => FAM_BRK
+        EntryAt.brXC  => FAM_BRK
+        EntryAt.uni   => FAM_UNI
+        => FAM_UNI
+
+entryName(EntryAt e) =>
+    switch e
+        EntryAt.obHL  => "Order Block High/Low"
+        EntryAt.obOpen => "CISD / OB Open"
+        EntryAt.obMT  => "Order Block m.t."
+        EntryAt.obXHL => "Crossed Candle High/Low"
+        EntryAt.obXC  => "Crossed Candle Close"
+        EntryAt.fvgC  => "FVG Close"
+        EntryAt.fvgCE => "FVG c.e."
+        EntryAt.fvgO  => "FVG Open"
+        EntryAt.ifO   => "IFVG Open"
+        EntryAt.ifCE  => "IFVG c.e."
+        EntryAt.ifC   => "IFVG Close"
+        EntryAt.ifXHL => "Crossed Candle High/Low"
+        EntryAt.ifXC  => "Crossed Candle Close"
+        EntryAt.brHL  => "Breaker High/Low"
+        EntryAt.brC   => "Breaker Close"
+        EntryAt.brXHL => "Crossed Candle High/Low"
+        EntryAt.brXC  => "Crossed Candle Close"
+        EntryAt.uni   => "Unicorn Close"
+        => ""
+
+stopName(StopAt x) =>
+    switch x
+        StopAt.piv   => "Sweep extreme"
+        StopAt.ob    => "Order Block High/Low"
+        StopAt.cross => "Crossed Candle High/Low"
+        StopAt.fvg   => "FVG Open"
+        StopAt.ifvg  => "IFVG Close"
+        StopAt.brk   => "Breaker High/Low"
+        => ""
+
+famName(int f) =>
+    f == FAM_OB ? "OB / CISD" : f == FAM_FVG ? "FVG" : f == FAM_IFVG ? "IFVG" : f == FAM_BRK ? "Breaker" : "Unicorn"
+
+safeDiv(float num, float den, float fallback = 0.0) =>
+    den != 0 and not na(num) and not na(den) ? num / den : fallback
+
+fmtPrice(float v) =>
+    na(v) ? "—" : str.tostring(v, format.mintick)
+
+formatPctFromEntry(float level, float entry) =>
+    string res = ""
+    if showPctOnLabelsInput and not na(level) and not na(entry) and entry != 0
+        float pct   = (level - entry) / entry * 100.0
+        string sign = pct >= 0 ? "+" : ""
+        res := " (" + sign + str.tostring(pct, "#.##") + "%)"
+    res
+
+sizeFromString(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Normal" ? size.normal : s == "Large" ? size.large : s == "Huge" ? size.huge : size.small
+
+sizeDownFromString(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.tiny : s == "Normal" ? size.small : s == "Large" ? size.normal : s == "Huge" ? size.large : size.tiny
+
+lineStyleFromString(string s) =>
+    s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
+
+buildGauge(float value, float maxVal, int width) =>
+    string result = ""
+    int filled = maxVal <= 0 ? 0 : math.round(math.min(width, math.max(0.0, value / maxVal * width)))
+    for i = 0 to width - 1
+        result += i < filled ? "▰" : "▱"
+    result
+
+periodStats(array<int> tms, array<bool> wns, array<float> rs, int cutoff) =>
+    int   w  = 0
+    int   l  = 0
+    float sr = 0.0
+    float gw = 0.0
+    float gl = 0.0
+    int   n  = array.size(tms)
+    if n > 0
+        for i = 0 to n - 1
+            if array.get(tms, i) >= cutoff
+                float rr = array.get(rs, i)
+                sr += rr
+                if rr > 0
+                    gw += rr
+                else
+                    gl -= rr
+                if array.get(wns, i)
+                    w += 1
+                else
+                    l += 1
+    [w, l, sr, gw, gl]
+
+addItem(string acc, string item) =>
+    acc == "" ? item : acc + ", " + item
+
+rMult(float lvl, float en, float risk, int d) =>
+    na(lvl) or na(en) or na(risk) or risk == 0 ? "" : str.tostring(d * (lvl - en) / risk, "#.#") + "R"
+
+fmtR(float r) =>
+    na(r) ? "—" : (r >= 0 ? "+" : "") + str.tostring(r, "#.##") + "R"
+
+jNum(string k, float v) =>
+    ',"' + k + '":' + (na(v) ? "null" : str.tostring(v, format.mintick))
+jR(string k, float v) =>
+    ',"' + k + '":' + (na(v) ? "null" : str.tostring(v, "#.###"))
+jStr(string k, string v) =>
+    ',"' + k + '":"' + v + '"'
+jEvent(string ev, int id, int side, string body) =>
+    string tid = syminfo.ticker + "-" + str.tostring(nz(id))
+    '{"schema_version":1' + jStr("event", ev) + jStr("event_id", tid + "-" + ev + "-" + str.tostring(time)) + jStr("trade_id", tid) + jStr("order_id", tid) + jStr("side", side == 1 ? "long" : side == -1 ? "short" : "") + jStr("ticker", syminfo.tickerid) + jStr("tf", timeframe.period) + ',"bar_time":' + str.tostring(time) + body + '}'
+
+tfStr(string tf) =>
+    int s = timeframe.in_seconds(tf)
+    s < 60 ? str.tostring(s) + "s" : s < 3600 ? str.tostring(math.round(s / 60)) + "m" : s < 86400 ? str.tostring(math.round(s / 3600)) + "H" : s < 604800 ? str.tostring(math.round(s / 86400)) + "D" : s < 2419200 ? str.tostring(math.round(s / 604800)) + "W" : str.tostring(math.max(1, math.round(s / 2628000))) + "M"
+
+parseLevels(string s) =>
+    array<float> out = array.new<float>()
+    for p in str.split(s, ",")
+        float v = str.tonumber(str.replace_all(p, " ", ""))
+        if not na(v)
+            out.push(v)
+    out
+
+pad2(int v) =>
+    v < 10 ? "0" + str.tostring(v) : str.tostring(v)
+
+inSession(string ss) =>
+    not na(time(timeframe.period, ss, tzInput))
+
+smtAutoSymbol() =>
+    string r = syminfo.root
+    r == "ES" ? "CME_MINI:NQ1!" : r == "NQ" ? "CME_MINI:ES1!" : r == "MES" ? "CME_MINI:MNQ1!" : r == "MNQ" ? "CME_MINI:MES1!" : r == "YM" or r == "RTY" ? "CME_MINI:ES1!" : r == "MYM" or r == "M2K" ? "CME_MINI:MES1!" : ""
+
+newCtx(int d) =>
+    Ctx.new(dir = d, oTop = array.new<float>(), oBot = array.new<float>(), oBar = array.new<int>(), pvP = array.new<float>(), pvB = array.new<int>(), pvL = array.new<float>(), pvC = array.new<float>())
+
+safeX(int x) =>
+    math.max(nz(x, bar_index), bar_index - 9990)
+
+method purge(Gfx g) =>
+    for b in g.bx
+        b.delete()
+    for l in g.ln
+        l.delete()
+    for x in g.lb
+        x.delete()
+    g
+
+zoneBox(int x1, int x2, float a, float b, int d, color bg, color bd) =>
+    box.new(x1, math.max(d * a, d * b), x2, math.min(d * a, d * b), border_color = bd, bgcolor = bg)
+
+method put(Trig t, float lvl, int lb, int anch, int dir) =>
+    if not t.on or (dir == 1 ? lvl < t.lvl : lvl > t.lvl)
+        t.lvl    := lvl
+        t.lvlBar := lb
+    t.anchor := t.on ? math.min(t.anchor, anch) : anch
+    t.on     := true
+    t
+
+method resetFound(Ctx t) =>
+    t.obX  := false
+    t.fvg  := false
+    t.ifvg := false
+    t.brk  := false
+    t
+
+method addPivot(Ctx t, float p, int b, float lw, float cl) =>
+    t.pvP.push(p)
+    t.pvB.push(b)
+    t.pvL.push(lw)
+    t.pvC.push(cl)
+    if t.pvP.size() > 40
+        t.pvP.shift()
+        t.pvB.shift()
+        t.pvL.shift()
+        t.pvC.shift()
+    t
+
+method begin(Ctx t, float lvlT, int lvlBar, int anch) =>
+    t.active   := true
+    t.trigBar  := bar_index
+    t.createdBar := bar_index
+    t.why        := ""
+    t.truncated  := false
+    t.level    := lvlT
+    t.levelBar := lvlBar
+    t.anchor   := anch
+    t.ext      := na
+    t.extBar   := na
+    t.inRun    := false
+    t.rOpen    := na
+    t.rStart   := na
+    t.kOpen    := na
+    t.kHigh    := na
+    t.kLow     := na
+    t.kMinC    := na
+    t.kStart   := na
+    t.kPH      := na
+    t.kPL      := na
+    t.kPC      := na
+    t.kPBar    := na
+    t.oTop.clear()
+    t.oBot.clear()
+    t.oBar.clear()
+    t.resetFound()
+
+// Process one LTF bar (values already transformed into bullish space)
+method advance(Ctx t, int bi, float o, float h, float l, float c, float h1, float l1, float c1, float h2, float l2, bool cnt, float a) =>
+    bool disp   = c - o >= dispAtrInput * nz(a, 0.0)
+    bool newExt = false
+    if cnt and (na(t.ext) or l < t.ext)
+        t.ext    := l
+        t.extBar := bi
+        newExt   := true
+    if c < o
+        if not t.inRun
+            t.inRun  := true
+            t.rOpen  := o
+            t.rHigh  := h
+            t.rLow   := l
+            t.rMinC  := c
+            t.rStart := bi
+            t.rPH    := h1
+            t.rPL    := l1
+            t.rPC    := c1
+            t.rPBar  := bi - 1
+        else
+            t.rHigh := math.max(t.rHigh, h)
+            t.rLow  := math.min(t.rLow, l)
+            t.rMinC := math.min(t.rMinC, c)
+    else
+        t.inRun := false
+    if newExt
+        t.kOpen  := t.rOpen
+        t.kHigh  := t.rHigh
+        t.kLow   := t.rLow
+        t.kMinC  := t.rMinC
+        t.kStart := t.rStart
+        t.kPH    := t.rPH
+        t.kPL    := t.rPL
+        t.kPC    := t.rPC
+        t.kPBar  := t.rPBar
+        t.resetFound()
+    else if t.inRun and t.rStart == t.kStart
+        t.kMinC := t.rMinC
+        t.kLow  := t.rLow
+    if not na(l2) and h < l2 and l2 - h >= minFvgAtrInput * nz(a, 0.0)
+        t.oTop.push(l2)
+        t.oBot.push(h)
+        t.oBar.push(bi - 1)
+    int n = t.oTop.size()
+    if n > 0
+        for j = n - 1 to 0
+            float tp = t.oTop.get(j)
+            int   ob = t.oBar.get(j)
+            bool  rm = false
+            bool inWin = cnt and not na(t.extBar) and bi >= t.extBar
+            if c > tp and inWin and disp
+                t.ifvg   := true
+                t.ifXBar := bi
+                t.ifTop  := tp
+                t.ifBot  := t.oBot.get(j)
+                t.ixL    := l
+                t.ixC    := c
+                t.ifBar  := ob - 1
+                rm := true
+            else if c > tp and not inWin
+                rm := true
+            else if bi - ob > fvgLifeInput
+                rm := true
+            if rm
+                t.oTop.remove(j)
+                t.oBot.remove(j)
+                t.oBar.remove(j)
+    if cnt and not na(t.extBar) and bi >= t.extBar
+        if t.obX and c < t.kLow
+            t.obX := false
+        if t.ifvg and c < t.ifBot
+            t.ifvg := false
+        if t.brk and not na(t.brBot) and c < t.brBot
+            t.brk := false
+        if not t.obX and not na(t.kOpen) and c > t.kOpen and disp
+            t.obX   := true
+            t.obBar := bi
+            t.xL    := l
+            t.xC    := c
+        if bi - 2 >= t.extBar and not na(h2) and l > h2 and l - h2 >= minFvgAtrInput * nz(a, 0.0)
+            t.fvg    := true
+            t.fvgTop := l
+            t.fvgBot := h2
+            t.fvgBar := bi - 1
+        else if t.fvg and c < t.fvgBot
+            t.fvg := false
+        if not t.brk
+            float lv = na
+            float zb = na
+            float zc = na
+            int   zx = na
+            if reqPivotInput
+                int m = t.pvP.size()
+                if m > 0
+                    for j = m - 1 to 0
+                        int pb = t.pvB.get(j)
+                        if pb < t.extBar and pb + pivotLenInput <= bi
+                            lv := t.pvP.get(j)
+                            zb := t.pvL.get(j)
+                            zc := t.pvC.get(j)
+                            zx := pb
+                            break
+            else
+                lv := t.kPH
+                zb := t.kPL
+                zc := t.kPC
+                zx := t.kPBar
+            if not na(lv) and c > lv and disp
+                t.brk    := true
+                t.brXBar := bi
+                t.brBar  := zx
+                t.brTop  := lv
+                t.brBot  := zb
+                t.brC    := zc
+                t.bxL    := l
+                t.bxC    := c
+    t
+
+// ══════════════════════════════════════════════════════════
+// 6. CALCULATIONS
+// ══════════════════════════════════════════════════════════
+int    ENTRY_FAM   = entryFam(entryAtInput)
+string ENTRY_SHORT = entryName(entryAtInput)
+int  WARMUP_BARS = math.max(atrLenInput, 50)
+bool isWarmedUp  = bar_index >= WARMUP_BARS
+
+float atrRaw = ta.atr(atrLenInput)
+float atrS   = nz(atrRaw, 0.0)
+float atrPctRaw = ta.percentrank(atrRaw, volLenInput)
+float atrPct    = nz(atrPctRaw, 50.0)
+
+var array<float> projLevels = parseLevels(projLevelsInput)
+if barstate.isfirst and projLevels.size() > PROJ_LEVELS_MAX
+    runtime.error("Too many measured-move levels: use at most 8")
+var Ctx bull = newCtx(1)
+var Ctx bear = newCtx(-1)
+
+// ── Time & volatility filters ──
+bool inAsia   = inSession(sessAsiaInput)
+bool inLondon = inSession(sessLondonInput)
+bool inNyAm   = inSession(sessNyAmInput)
+bool inNyPm   = inSession(sessNyPmInput)
+bool inBlock1 = inSession(block1SessInput)
+bool inBlock2 = inSession(block2SessInput)
+int  minuteTz = minute(time, tzInput)
+bool anyKz    = kzAsiaInput or kzLondonInput or kzNyAmInput or kzNyPmInput
+bool kzOk     = not anyKz or (kzAsiaInput and inAsia) or (kzLondonInput and inLondon) or (kzNyAmInput and inNyAm) or (kzNyPmInput and inNyPm)
+bool macroOk  = not macroOnlyInput or minuteTz >= 50 or minuteTz < 10
+bool blockOk  = not ((block1Input and inBlock1) or (block2Input and inBlock2))
+bool volFiltOn = volMinInput > 0 or volMaxInput < 100
+bool volReady  = not volFiltOn or not na(atrPctRaw)
+bool volOk     = volReady and (volMinInput == 0 or atrPct >= volMinInput) and (volMaxInput == 100 or atrPct <= volMaxInput)
+bool timeOk   = kzOk and macroOk and blockOk and volOk
+string filterState = not kzOk ? "Outside KZ" : not macroOk ? "Outside macro" : not blockOk ? "News block" : not volReady ? "Volatility warming up" : not volOk ? "Volatility" : "Open"
+
+// ── Previous day high / low ──
+var float dayHi = na
+var float dayLo = na
+var float pdH   = na
+var float pdL   = na
+bool newDay = timeframe.change("D")
+if newDay or na(dayHi)
+    pdH   := dayHi
+    pdL   := dayLo
+    dayHi := high
+    dayLo := low
+else
+    dayHi := math.max(dayHi, high)
+    dayLo := math.min(dayLo, low)
+
+// ── Correlated symbol for SMT (same timeframe, confirmed bars only) ──
+string smtSym   = smtSymbolInput != "" ? smtSymbolInput : smtAutoSymbol()
+bool   smtOn    = smtModeInput != "Off"
+bool   smtAvail = smtOn and smtSym != ""
+[oHi, oLo] = request.security(smtAvail ? smtSym : syminfo.tickerid, timeframe.period, [high, low], gaps = barmerge.gaps_on, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+
+// ── LTF swing points (for breakers) ──
+float pvHi    = ta.pivothigh(high, pivotLenInput, pivotLenInput)
+float pvLo    = ta.pivotlow(low, pivotLenInput, pivotLenInput)
+float lowPl   = low[pivotLenInput]
+float highPl  = high[pivotLenInput]
+float closePl = close[pivotLenInput]
+if not na(pvHi)
+    bull.addPivot(pvHi, bar_index - pivotLenInput, lowPl, closePl)
+if not na(pvLo)
+    bear.addPivot(-pvLo, bar_index - pivotLenInput, -highPl, -closePl)
+
+// ── HTF aggregation state ──
+var HtfBar        cur  = na
+var array<HtfBar> htfs = array.new<HtfBar>()
+var array<Liq>    liqH = array.new<Liq>()
+var array<Liq>    liqL = array.new<Liq>()
+var int   htfCount  = 0
+var bool  bPrevDone = false
+var bool  sPrevDone = false
+var bool  bBodyDone = false
+var bool  sBodyDone = false
+var float accL      = na
+var int   accLBar   = na
+var float accH      = na
+var int   accHBar   = na
+var int   bias      = 0
+int biasPrev = bias
+
+addLiq(array<Liq> arr, float p, int b, int idx, color col) =>
+    line ln = na
+    if showLiqInput
+        ln := line.new(safeX(b), p, bar_index, p, color = col)
+    arr.push(Liq.new(p, b, idx, ln))
+
+scanLiq(array<Liq> arr, bool isHigh) =>
+    float sw  = na
+    int   swB = na
+    int   n   = arr.size()
+    if n > 0
+        for j = n - 1 to 0
+            Liq q = arr.get(j)
+            if htfCount - q.idx >= liqLookbackInput
+                if not na(q.ln)
+                    q.ln.delete()
+                arr.remove(j)
+            else if isHigh ? high > q.p : low < q.p
+                if na(sw) or (isHigh ? q.p > sw : q.p < sw)
+                    sw  := q.p
+                    swB := q.b
+                if not na(q.ln)
+                    if keepSweptInput
+                        q.ln.set_x2(bar_index)
+                        q.ln.set_style(line.style_dotted)
+                    else
+                        q.ln.delete()
+                arr.remove(j)
+    [sw, swB]
+
+// ── HTF aggregation + triggers ──
+Trig bt = Trig.new()
+Trig st = Trig.new()
+
+bool newHtf = timeframe.change(htfTF)
+var bool htfFirstDone = false
+if newHtf or na(cur)
+    if not na(cur) and htfFirstDone
+        if htfs.size() > 0
+            HtfBar p = htfs.last()
+            if waitCloseInput
+                if sweepPrevInput and cur.l < p.l
+                    bt.put(p.l, p.lb, cur.b, 1)
+                if sweepPrevInput and cur.h > p.h
+                    st.put(p.h, p.hb, cur.b, -1)
+                if sweepBodyInput and cur.l < p.l and cur.c > math.min(p.o, p.c) and cur.c <= math.max(p.o, p.c)
+                    bt.put(p.l, p.lb, cur.b, 1)
+                if sweepBodyInput and cur.h > p.h and cur.c < math.max(p.o, p.c) and cur.c >= math.min(p.o, p.c)
+                    st.put(p.h, p.hb, cur.b, -1)
+                if sweepAnyInput and not na(accL)
+                    bt.put(accL, accLBar, cur.b, 1)
+                if sweepAnyInput and not na(accH)
+                    st.put(accH, accHBar, cur.b, -1)
+            if stPivotInput and htfs.size() > 1
+                HtfBar p2 = htfs.get(htfs.size() - 2)
+                if p.l < p2.l and p.l < cur.l
+                    bt.put(p.l, p.lb, p.b, 1)
+                if p.h > p2.h and p.h > cur.h
+                    st.put(p.h, p.hb, p.b, -1)
+            if cur.c > p.h
+                bias := 1
+            else if cur.c < p.l
+                bias := -1
+            else if cur.l < p.l and cur.c > p.l
+                bias := 1
+            else if cur.h > p.h and cur.c < p.h
+                bias := -1
+        htfs.push(cur)
+        if htfs.size() > 300
+            htfs.shift()
+        htfCount += 1
+        addLiq(liqH, cur.h, cur.hb, htfCount, BUY_LIQ_COLOR)
+        addLiq(liqL, cur.l, cur.lb, htfCount, SELL_LIQ_COLOR)
+    if not na(cur)
+        htfFirstDone := true
+    cur := HtfBar.new(open, high, low, close, time, bar_index, bar_index, bar_index)
+    bPrevDone := false
+    sPrevDone := false
+    bBodyDone := false
+    sBodyDone := false
+    accL := na
+    accH := na
+else
+    if high > cur.h
+        cur.h  := high
+        cur.hb := bar_index
+    if low < cur.l
+        cur.l  := low
+        cur.lb := bar_index
+    cur.c := close
+
+// live (intra-HTF-candle) sweeps
+if not waitCloseInput and htfs.size() > 0
+    HtfBar p = htfs.last()
+    if sweepPrevInput and not bPrevDone and low < p.l
+        bt.put(p.l, p.lb, bar_index, 1)
+        bPrevDone := true
+    if sweepPrevInput and not sPrevDone and high > p.h
+        st.put(p.h, p.hb, bar_index, -1)
+        sPrevDone := true
+    if sweepBodyInput and not bBodyDone and cur.l < p.l and close > math.min(p.o, p.c) and close <= math.max(p.o, p.c)
+        bt.put(p.l, p.lb, cur.lb, 1)
+        bBodyDone := true
+    if sweepBodyInput and not sBodyDone and cur.h > p.h and close < math.max(p.o, p.c) and close >= math.min(p.o, p.c)
+        st.put(p.h, p.hb, cur.hb, -1)
+        sBodyDone := true
+
+// sweeps of any untaken HTF high/low
+[swL, swLB] = scanLiq(liqL, false)
+[swH, swHB] = scanLiq(liqH, true)
+if not na(swL)
+    if waitCloseInput
+        if na(accL) or swL < accL
+            accL    := swL
+            accLBar := swLB
+    else if sweepAnyInput
+        bt.put(swL, swLB, bar_index, 1)
+if not na(swH)
+    if waitCloseInput
+        if na(accH) or swH > accH
+            accH    := swH
+            accHBar := swHB
+    else if sweepAnyInput
+        st.put(swH, swHB, bar_index, -1)
+
+// ── LTF context: structure after the HTF trigger ──
+procTrigger(Ctx t, Trig tg, bool allowed) =>
+    bool started = false
+    if tg.on and allowed
+        float lvT = t.dir * tg.lvl
+        if not t.active
+            t.begin(lvT, tg.lvlBar, tg.anchor)
+            started := true
+        else
+            t.trigBar := bar_index
+            if lvT < t.level
+                t.level    := lvT
+                t.levelBar := tg.lvlBar
+    started
+
+runCtx(Ctx t, bool replay) =>
+    if t.active
+        if replay and math.max(bar_index - t.anchor, 0) + preBarsInput > MAX_REPLAY
+            t.truncated := true
+        int n = replay ? math.max(0, math.min(math.max(bar_index - t.anchor, 0) + preBarsInput, MAX_REPLAY, bar_index - 2)) : 0
+        for i = n to 0
+            int  bi  = bar_index - i
+            bool cnt = bi >= t.anchor
+            if t.dir == 1
+                t.advance(bi, open[i], high[i], low[i], close[i], high[i + 1], low[i + 1], close[i + 1], high[i + 2], low[i + 2], cnt, atrS[i])
+            else
+                t.advance(bi, -open[i], -low[i], -high[i], -close[i], -low[i + 1], -high[i + 1], -close[i + 1], -low[i + 2], -high[i + 2], cnt, atrS[i])
+    t
+
+var int bTrigDay  = 0
+var int sTrigDay  = 0
+var int setupsDay = 0
+if newDay
+    bTrigDay  := 0
+    sTrigDay  := 0
+    setupsDay := 0
+bool bStarted = procTrigger(bull, bt, directionInput != "Short only" and (not firstSweepInput or bTrigDay == 0))
+bool sStarted = procTrigger(bear, st, directionInput != "Long only" and (not firstSweepInput or sTrigDay == 0))
+if bStarted
+    bTrigDay += 1
+if sStarted
+    sTrigDay += 1
+runCtx(bull, bStarted)
+runCtx(bear, sStarted)
+if bull.active and (bar_index - bull.trigBar > maxWaitInput or bar_index - bull.createdBar > maxCtxAgeInput)
+    bull.active := false
+if bear.active and (bar_index - bear.trigBar > maxWaitInput or bar_index - bear.createdBar > maxCtxAgeInput)
+    bear.active := false
+
+// ══════════════════════════════════════════════════════════
+// 7. TRADE ENGINE — STATE & MANAGEMENT
+// ══════════════════════════════════════════════════════════
+var Trade tr = Trade.new()
+
+var string actSrcT = ""
+var string pendSrcE = ""
+var string pendSrcS = ""
+var string pendSrcT = ""
+
+var int   orderSeq  = 0
+var int   pendId    = na
+var int   pendDir   = 0
+var float pendEntry = na
+var float pendSL    = na
+var float pendTP1   = na
+var float pendTP2   = na
+var float pendTP3   = na
+var int   pendBar   = na
+
+var Stats stats = Stats.new(times = array.new<int>(), wins = array.new<bool>(), rs = array.new<float>())
+
+var int lastSigDir   = 0
+var int lastSigBar   = na
+var int lastSigScore = na
+
+bool  beActiveAtBarStart = tr.be
+float effectiveSL        = tr.sl
+
+bool canCheckHit = tr.dir != 0 and not na(tr.bar) and bar_index > tr.bar and barstate.isconfirmed
+bool slHitRaw  = canCheckHit and (tr.dir == 1 ? low  <= effectiveSL : high >= effectiveSL)
+bool tp1HitRaw = canCheckHit and (tr.dir == 1 ? high >= tr.tp1   : low  <= tr.tp1)
+bool tp2HitRaw = canCheckHit and (tr.dir == 1 ? high >= tr.tp2   : low  <= tr.tp2)
+bool tp3HitRaw = canCheckHit and (tr.dir == 1 ? high >= tr.tp3   : low  <= tr.tp3)
+
+bool gapSl   = canCheckHit and (tr.dir == 1 ? open <= effectiveSL : open >= effectiveSL)
+bool gapTp   = canCheckHit and (tr.dir == 1 ? open >= tr.tp1 : open <= tr.tp1)
+bool slFirst = slHitRaw and (gapSl or (intrabarModelInput == "Conservative" and not gapTp))
+
+bool tp1FirstTouch = tp1HitRaw and not tr.hit1 and not slFirst
+bool tp2FirstTouch = tp2HitRaw and not tr.hit2 and not slFirst
+bool tp3FirstTouch = tp3HitRaw and not tr.hit3 and not slFirst
+if tp1FirstTouch
+    tr.hit1 := true
+if tp2FirstTouch
+    tr.hit2 := true
+if tp3FirstTouch
+    tr.hit3 := true
+
+bool  beJustActivated = false
+float beLevel         = na
+if beInput and tp1FirstTouch and not tr.be and tr.dir != 0
+    tr.sl        := tr.entry
+    tr.be        := true
+    beJustActivated := true
+    beLevel         := tr.sl
+
+var float hitSL    = na
+var float hitEntry = na
+if slHitRaw
+    hitSL    := effectiveSL
+    hitEntry := tr.entry
+float exitEntry         = tr.entry
+int   exitDir           = tr.dir
+int   exitId            = tr.id
+float exitTP1           = tr.tp1
+float exitTP2           = tr.tp2
+float exitTP3           = tr.tp3
+bool  exitBeActive      = beActiveAtBarStart
+bool  displayTp1Reached = tr.hit1
+bool  displayTp2Reached = tr.hit2
+bool  displayTp3Reached = tr.hit3
+
+bool closeBeyondSl = tr.dir == 1 ? close <= effectiveSL : close >= effectiveSL
+bool tp3Close  = tp3HitRaw and not slFirst
+bool closeBySl = slHitRaw and not tp3Close and (slFirst or not tp1FirstTouch or closeBeyondSl)
+bool evSlHit   = closeBySl and tr.dir != 0
+bool evTp3Hit  = tp3Close and tr.dir != 0
+bool evTp1Hit  = tp1FirstTouch and tr.dir != 0
+bool evTp2Hit  = tp2FirstTouch and tr.dir != 0
+
+float slExitPx  = tr.dir == 1 ? math.min(open, effectiveSL) : math.max(open, effectiveSL)
+float tp3ExitPx = tr.dir == 1 ? math.max(open, tr.tp3) : math.min(open, tr.tp3)
+float closePx   = na
+float closeR    = na
+if (tp3Close or closeBySl) and tr.dir != 0
+    bool tradeWin = tr.hit1
+    closePx := tp3Close ? tp3ExitPx : slExitPx
+    closeR  := safeDiv(tr.dir * (closePx - tr.entry), tr.risk) - costRInput
+    stats.record(tradeWin, closeR)
+    tr.clear()
+
+int   newDir   = 0
+float newEntry = na
+float newSL    = na
+float newTP1   = na
+float newTP2   = na
+float newTP3   = na
+string newSrcE = ""
+string newSrcS = ""
+string newSrcT = ""
+
+bool   evFill       = false
+bool   evFillStop   = false
+bool   evPendCancel = false
+int    cancelDir    = 0
+int    cancelId     = na
+float  cancelEntry  = na
+string cancelWhy    = ""
+int    fillId       = na
+float  fillStopPx   = na
+float  fillStopR    = na
+if pendDir != 0 and tr.dir == 0 and barstate.isconfirmed and bar_index > pendBar
+    bool touched   = pendDir == 1 ? low <= pendEntry : high >= pendEntry
+    bool tp1Before = pendDir == 1 ? high >= pendTP1 : low <= pendTP1
+    string why = bar_index - pendBar > pendExpiryInput ? "expired" : cancelOutInput and not timeOk ? "outside filters (" + filterState + ")" : cancelDayInput and newDay ? "new day" : ""
+    if why != ""
+        evPendCancel := true
+        cancelDir    := pendDir
+        cancelId     := pendId
+        cancelEntry  := pendEntry
+        cancelWhy    := why
+        pendDir      := 0
+    else if touched
+        float fillPx = pendDir == 1 ? math.min(open, pendEntry) : math.max(open, pendEntry)
+        newDir      := pendDir
+        newEntry    := fillPx
+        newSrcE     := pendSrcE + (fillPx != pendEntry ? " · gap fill" : "")
+        newSrcS     := pendSrcS
+        newSrcT     := pendSrcT
+        actSrcT     := newSrcT
+        newSL       := pendSL
+        newTP1      := pendTP1
+        newTP2      := pendTP2
+        newTP3      := pendTP3
+        tr.enter(pendDir, fillPx, pendSL, pendTP1, pendTP2, pendTP3, pendId)
+        fillId      := pendId
+        evFill      := true
+        pendDir     := 0
+        bool gapStop   = newDir * (fillPx - newSL) <= 0
+        bool stopTouch = newDir == 1 ? low <= newSL : high >= newSL
+        bool stopClose = newDir == 1 ? close <= newSL : close >= newSL
+        if gapStop or (intrabarModelInput == "Conservative" ? stopTouch : stopClose)
+            evFillStop := true
+            hitSL      := newSL
+            hitEntry   := newEntry
+            fillStopPx := gapStop ? fillPx : newSL
+            fillStopR  := (gapStop ? 0.0 : safeDiv(newDir * (newSL - fillPx), tr.risk)) - costRInput
+            stats.record(false, fillStopR)
+            tr.clear()
+    else if tp1Before
+        evPendCancel := true
+        cancelDir    := pendDir
+        cancelId     := pendId
+        cancelEntry  := pendEntry
+        cancelWhy    := "TP1 reached before fill"
+        pendDir      := 0
+
+// ══════════════════════════════════════════════════════════
+// 8. SIGNAL LOGIC — setup build, plan, draw
+// ══════════════════════════════════════════════════════════
+var array<Gfx>   setupGfx  = array.new<Gfx>()
+var array<label> markLbls  = array.new<label>()
+
+addGfx(Gfx g) =>
+    setupGfx.push(g)
+    while setupGfx.size() > maxSetupsInput
+        setupGfx.shift().purge()
+    true
+
+addMark(label l) =>
+    markLbls.push(l)
+    while markLbls.size() > 3 * maxSetupsInput
+        markLbls.shift().delete()
+    true
+
+var array<line>  extLn  = array.new<line>()
+var array<float> extLvl = array.new<float>()
+var array<int>   extDir = array.new<int>()
+
+bool canForm = isWarmedUp and timeOk and (barstate.isconfirmed or showPreviewInput) and (maxPerDayInput == 0 or setupsDay < maxPerDayInput)
+
+buildSetup(Ctx t) =>
+    bool  uni  = false
+    float uTop = na
+    if t.brk and t.fvg
+        float ovT = math.min(t.brTop, t.fvgTop)
+        float ovB = math.max(t.brBot, t.fvgBot)
+        if ovT > ovB
+            uni  := true
+            uTop := ovT
+    bool fvgOb = t.fvg and t.obX and t.fvgTop > t.kOpen and t.fvgBar >= t.obBar - 1
+    string miss = ""
+    if reqObInput and not t.obX
+        miss := addItem(miss, "CISD")
+    if reqFvgInput and not t.fvg
+        miss := addItem(miss, "FVG")
+    if reqFvgObInput and not fvgOb
+        miss := addItem(miss, "FVG after OB")
+    if reqIfvgInput and not t.ifvg
+        miss := addItem(miss, "IFVG")
+    if reqBrkInput and not t.brk
+        miss := addItem(miss, "Breaker")
+    if reqUniInput and not uni
+        miss := addItem(miss, "Unicorn")
+    float e = switch entryAtInput
+        EntryAt.obHL  => t.obX ? t.kHigh : na
+        EntryAt.obOpen   => t.obX ? t.kOpen : na
+        EntryAt.obMT  => t.obX ? (t.kOpen + t.kMinC) / 2 : na
+        EntryAt.obXHL => t.obX ? t.xL : na
+        EntryAt.obXC  => t.obX ? t.xC : na
+        EntryAt.fvgC  => t.fvg ? t.fvgTop : na
+        EntryAt.fvgCE => t.fvg ? (t.fvgTop + t.fvgBot) / 2 : na
+        EntryAt.fvgO  => t.fvg ? t.fvgBot : na
+        EntryAt.ifO   => t.ifvg ? t.ifTop : na
+        EntryAt.ifCE  => t.ifvg ? (t.ifTop + t.ifBot) / 2 : na
+        EntryAt.ifC   => t.ifvg ? t.ifBot : na
+        EntryAt.ifXHL => t.ifvg ? t.ixL : na
+        EntryAt.ifXC  => t.ifvg ? t.ixC : na
+        EntryAt.brHL  => t.brk ? t.brTop : na
+        EntryAt.brC   => t.brk ? t.brC : na
+        EntryAt.brXHL => t.brk ? t.bxL : na
+        EntryAt.brXC  => t.brk ? t.bxC : na
+        EntryAt.uni    => uni ? uTop : na
+        => na
+    float xl = ENTRY_FAM == FAM_IFVG ? (t.ifvg ? t.ixL : na) : ENTRY_FAM == FAM_BRK ? (t.brk ? t.bxL : na) : (t.obX ? t.xL : na)
+    float s = switch stopAtInput
+        StopAt.piv  => t.ext
+        StopAt.ob   => t.obX ? t.kLow : na
+        StopAt.cross    => xl
+        StopAt.fvg  => t.fvg ? t.fvgBot : na
+        StopAt.ifvg => t.ifvg ? t.ifBot : na
+        StopAt.brk  => t.brk ? t.brBot : na
+        => t.ext
+    string sSrc = stopName(stopAtInput)
+    if na(s)
+        s    := t.ext
+        sSrc := "Sweep extreme (fallback)"
+    if stopBufferInput > 0
+        sSrc := sSrc + " + " + str.tostring(stopBufferInput) + " ATR"
+    s := s - stopBufferInput * atrS
+    float cT = t.dir == 1 ? close : -close
+    int cb = switch ENTRY_FAM
+        FAM_OB   => t.obBar
+        FAM_FVG  => t.fvg ? t.fvgBar + 1 : na
+        FAM_IFVG => t.ifXBar
+        FAM_BRK  => t.brXBar
+        => (t.brk and t.fvg) ? math.max(t.brXBar, t.fvgBar + 1) : na
+    bool stale = false
+    if skipStaleInput and entryModeInput == "Limit" and not na(e) and not na(cb)
+        int nBk = math.min(bar_index - cb - 1, 400)
+        if nBk > 0
+            for i = 1 to nBk
+                float lw = t.dir == 1 ? low[i] : -high[i]
+                if lw <= e
+                    stale := true
+                    break
+    bool stopOk = slModeInput != "Structure" or (not na(s) and e > s and cT > s)
+    string why = na(t.extBar) ? "Tracking structure" : miss != "" ? "Waiting: " + miss : na(e) ? "Waiting: " + famName(ENTRY_FAM) : stale ? "Skipped: entry already traded" : not stopOk ? "Blocked: price beyond structure stop" : ""
+    [why == "", e, s, uni, why, sSrc]
+
+planSetup(Ctx t, float e, float s, bool uni, string sSrc) =>
+    int   d    = t.dir
+    float cT   = d == 1 ? close : -close
+    float lT   = d == 1 ? low : -high
+    bool  mkt  = entryModeInput == "Market" or cT <= e
+    float en   = mkt ? cT : e
+    float sl   = slModeInput == "Wick-Anchored" ? math.min(lT - atrS * 0.25, en - atrS * 0.5) : slModeInput == "ATR" ? en - atrS * effSLMult : s
+    string slSrc = slModeInput == "Wick-Anchored" ? "Wick + 0.25 ATR" : slModeInput == "ATR" ? "ATR ×" + str.tostring(effSLMult) : sSrc
+    float risk  = en - sl
+    float riskA = safeDiv(risk, atrS)
+    string why = not (risk > 0 and cT > sl) ? "Blocked: price beyond stop" : atrS <= 0 ? "No data: ATR unavailable" : minRiskAtrInput > 0 and riskA < minRiskAtrInput ? "Blocked: risk " + str.tostring(riskA, "#.##") + " ATR < min " + str.tostring(minRiskAtrInput) : maxRiskAtrInput > 0 and riskA > maxRiskAtrInput ? "Blocked: risk " + str.tostring(riskA, "#.##") + " ATR > max " + str.tostring(maxRiskAtrInput) : ""
+    string tags = ""
+    float rH = na
+    float rL = na
+    if pdModeInput == "Previous day"
+        rH := pdH
+        rL := pdL
+    else if not na(cur)
+        rH := cur.h
+        rL := cur.l
+        int n = math.min(pdCandlesInput - 1, htfs.size())
+        if n > 0
+            for i = htfs.size() - n to htfs.size() - 1
+                rH := math.max(rH, htfs.get(i).h)
+                rL := math.min(rL, htfs.get(i).l)
+    bool pdGood = false
+    if not na(rH) and not na(rL)
+        float eq = d * (rH + rL) / 2
+        pdGood := en < eq
+        if pdGood
+            tags := d == 1 ? "Discount" : "Premium"
+    if why == "" and pdModeInput != "Off" and not pdGood
+        why := "Blocked: entry not in " + (d == 1 ? "discount" : "premium")
+    float tp1 = en + risk * effTP1m
+    float tp2 = en + risk * effTP2m
+    float tp3 = en + risk * effTP3m
+    string tp3Src = str.tostring(effTP3m) + "R"
+    if why == "" and tpModeInput != "Fixed R"
+        array<float>  cands = array.new<float>()
+        array<string> cTags = array.new<string>()
+        array<Liq> src = d == 1 ? liqH : liqL
+        for q in src
+            float v = d * q.p
+            if v > en
+                cands.push(v)
+                cTags.push(d == 1 ? "HTF high" : "HTF low")
+        if pdLiqInput
+            float pv = d == 1 ? (dayHi <= pdH ? pdH : na) : (dayLo >= pdL ? -pdL : na)
+            if not na(pv) and pv > en
+                cands.push(pv)
+                cTags.push(d == 1 ? "PDH" : "PDL")
+        float  pick    = na
+        string pickTag = ""
+        if cands.size() > 0
+            array<int> ord = cands.sort_indices(order.ascending)
+            for k in ord
+                float v = cands.get(k)
+                if tpModeInput == "Nearest HTF liquidity" or (safeDiv(v - en, risk) >= minRRInput and v > tp1)
+                    pick    := v
+                    pickTag := cTags.get(k)
+                    break
+        float pickRR = safeDiv(pick - en, risk)
+        if not na(pick) and pickRR >= minRRInput and pick > tp1
+            tp3    := pick
+            tp2    := (tp1 + tp3) / 2
+            tp3Src := pickTag + " " + str.tostring(pickRR, "#.#") + "R"
+            tags   := tags + (tags != "" ? " · " : "") + "DOL " + str.tostring(pickRR, "#.#") + "R"
+        else if cands.size() == 0 and noLiqFallbackInput
+            tp3Src := str.tostring(effTP3m) + "R (no liquidity)"
+        else
+            why := na(pick) ? "Blocked: no liquidity ≥ " + str.tostring(minRRInput) + "R beyond TP1" : "Blocked: DOL " + str.tostring(pickRR, "#.#") + "R < min " + str.tostring(minRRInput) + "R or inside TP1"
+    bool smt      = false
+    bool smtKnown = false
+    if why == "" and smtOn
+        int a0 = bar_index - nz(t.levelBar, bar_index)
+        int w  = math.max(2, pivotLenInput)
+        if smtAvail and a0 > w and a0 <= MAX_REPLAY
+            float ref = na
+            for i = a0 - w to math.min(a0 + w, MAX_REPLAY)
+                float v = d == 1 ? oLo[i] : -oHi[i]
+                if not na(v)
+                    ref := na(ref) ? v : math.min(ref, v)
+            float nw = na
+            for i = 0 to a0 - w - 1
+                float v = d == 1 ? oLo[i] : -oHi[i]
+                if not na(v)
+                    nw := na(nw) ? v : math.min(nw, v)
+            smtKnown := not na(ref) and not na(nw)
+            smt      := smtKnown and nw > ref
+        if smt
+            tags := tags + (tags != "" ? " · " : "") + "SMT"
+        else if smtModeInput == "Required"
+            why := smtKnown ? "Blocked: no SMT divergence" : "No data: SMT unavailable"
+        else if not smtKnown
+            tags := tags + (tags != "" ? " · " : "") + "SMT n/a"
+    if t.truncated
+        tags := tags + (tags != "" ? " · " : "") + "partial history"
+    en  := roundT(en, d)
+    sl  := roundT(sl, d)
+    tp1 := roundT(tp1, d)
+    tp2 := roundT(tp2, d)
+    tp3 := roundT(tp3, d)
+    if why == "" and not (sl < en and en < tp1 and tp1 < tp2 and tp2 < tp3)
+        why := "Blocked: levels collapse after tick rounding"
+    int score = (t.obX ? 15 : 0) + (t.fvg ? 15 : 0) + (t.ifvg ? 15 : 0) + (t.brk ? 15 : 0) + (uni ? 10 : 0) + (bias == d ? 10 : 0) + (smt ? 10 : 0) + (pdGood ? 10 : 0)
+    [why == "", en, sl, tp1, tp2, tp3, tags, score, mkt, why, slSrc, tp3Src]
+
+drawSetup(Ctx t, float en, float sl, float tp1, float tp2, float tp3, string tags, color rewBg) =>
+    int   d    = t.dir
+    float tBox = rewardBoxInput == "TP1" ? tp1 : rewardBoxInput == "TP2" ? tp2 : tp3
+    float anc  = projModeInput == "Projected" and t.obX and not na(t.kOpen) and t.kOpen > sl ? t.kOpen : en
+    float u    = anc - sl
+    int   x1   = drawFromConfInput ? bar_index : na(t.kStart) ? t.extBar : math.min(t.kStart, t.extBar)
+    int   x2   = math.max(x1 + setupWidthInput, bar_index)
+    string lblSize = sizeFromString(labelFontSizeInput)
+    Gfx g = Gfx.new(array.new<box>(), array.new<line>(), array.new<label>())
+    g.bx.push(zoneBox(x1, x2, en, sl, d, SETUP_RISK_BG, color(na)))
+    g.bx.push(zoneBox(x1, x2, en, tBox, d, rewBg, color(na)))
+    if showProjInput and projLevels.size() > 0 and u > 0
+        g.ln.push(line.new(x1, d * sl, x1, d * math.max(tBox, anc + projLevels.max() * u), color = LINE_SUBTLE, style = line.style_dotted))
+        for k in projLevels
+            float y = d * (anc + k * u)
+            g.ln.push(line.new(x1, y, x2, y, color = LINE_SUBTLE, style = line.style_dotted))
+            g.lb.push(label.new(x1, y, str.tostring(k), color = color(na), style = label.style_label_right, textcolor = TEXT_MUTED, size = lblSize))
+    if showZonesInput
+        int xz = x2 + zoneExtendInput
+        int f  = ENTRY_FAM
+        if f == FAM_OB and t.obX
+            g.bx.push(zoneBox(t.kStart, xz, t.kHigh, t.kLow, d, ZONE_BG, ZONE_BORDER))
+        else if f == FAM_FVG and t.fvg
+            g.bx.push(zoneBox(t.fvgBar - 1, xz, t.fvgTop, t.fvgBot, d, ZONE_BG, ZONE_BORDER))
+        else if f == FAM_IFVG and t.ifvg
+            g.bx.push(zoneBox(t.ifBar, xz, t.ifTop, t.ifBot, d, ZONE_BG, ZONE_BORDER))
+        else if f == FAM_BRK and t.brk and not na(t.brBar)
+            g.bx.push(zoneBox(t.brBar, xz, t.brTop, t.brBot, d, ZONE_BG, ZONE_BORDER))
+        else if f == FAM_UNI and t.brk and t.fvg and not na(t.brBar)
+            g.bx.push(zoneBox(math.min(t.brBar, t.fvgBar - 1), xz, math.min(t.brTop, t.fvgTop), math.max(t.brBot, t.fvgBot), d, ZONE_BG, ZONE_BORDER))
+        if t.fvg and f != FAM_FVG and f != FAM_UNI
+            g.bx.push(zoneBox(t.fvgBar - 1, x1, t.fvgTop, t.fvgBot, d, ARRAY_BG, color(na)))
+        if t.ifvg and f != FAM_IFVG and not na(t.ifBar)
+            g.bx.push(zoneBox(t.ifBar, x1, t.ifTop, t.ifBot, d, ARRAY_BG, color(na)))
+    g.ln.push(line.new(safeX(t.levelBar), d * t.level, x2, d * t.level, color = d == 1 ? SELL_LIQ_COLOR : BUY_LIQ_COLOR))
+    if showCisdInput and t.obX and not na(t.kStart)
+        g.ln.push(line.new(t.kStart, d * t.kOpen, t.obBar, d * t.kOpen, color = LINE_SUBTLE))
+        g.lb.push(label.new(t.obBar, d * t.kOpen, (d == 1 ? "+" : "-") + "cisd", color = color(na), style = label.style_label_left, textcolor = TEXT_MUTED, size = lblSize))
+    if showExtLineInput
+        extLn.push(line.new(t.extBar, d * t.ext, x2, d * t.ext, color = LINE_SUBTLE))
+        extLvl.push(d * t.ext)
+        extDir.push(d)
+        if extLn.size() > EXT_LINES_MAX
+            extLn.shift().delete()
+            extLvl.shift()
+            extDir.shift()
+    if showTagsInput and tags != ""
+        g.lb.push(label.new(x2, d * tBox, tags, color = color(na), style = label.style_label_left, textcolor = TEXT_MUTED, size = lblSize))
+    addGfx(g)
+
+trySetup(Ctx t) =>
+    Plan out = na
+    if t.active
+        if not canForm
+            t.why := not isWarmedUp ? "Warming up" : not timeOk ? "Blocked: " + filterState : maxPerDayInput > 0 and setupsDay >= maxPerDayInput ? "Blocked: daily signal cap reached" : "Waiting for bar close"
+        else if biasOnlyInput and bias != t.dir
+            t.why := "Blocked: against HTF bias"
+        else
+            [ok, e, s, uni, why1, sSrc] = buildSetup(t)
+            if not ok
+                t.why := why1
+            else
+                [ok2, en, sl, tp1, tp2, tp3, tags, score, mkt, why2, slSrc, tp3Src] = planSetup(t, e, s, uni, sSrc)
+                if not ok2
+                    t.why := why2
+                else
+                    int  d     = t.dir
+                    bool conf  = barstate.isconfirmed
+                    bool fresh = tr.dir == -d and tr.bar == bar_index
+                    bool acc   = conf and d != tr.dir and d != pendDir and not fresh
+                    string enSrc = mkt ? (entryModeInput == "Market" ? "Market" : "Market (limit already traded)") : ENTRY_SHORT
+                    t.why := acc ? "" : not conf ? "Preview: bar not closed" : fresh ? "Ignored: opposite trade opened this bar" : "Ignored: same-direction trade or order open"
+                    out := Plan.new(d, d * en, d * sl, d * tp1, d * tp2, d * tp3, score, tags, conf, acc, mkt, enSrc, slSrc, tp3Src)
+                    t.active := false
+    out
+
+drawPlan(Ctx t, Plan pl) =>
+    if not na(pl) and showSetupsInput and (pl.acc or not pl.conf or showIgnoredInput)
+        int   d  = pl.dir
+        color bg = not pl.conf ? SETUP_PREVIEW_BG : pl.acc ? SETUP_REW_BG : SETUP_IGNORED_BG
+        drawSetup(t, d * pl.en, d * pl.sl, d * pl.tp1, d * pl.tp2, d * pl.tp3, pl.tags, bg)
+    true
+
+Plan bullPlan = trySetup(bull)
+Plan bearPlan = trySetup(bear)
+
+bool evConflict = false
+if not na(bullPlan) and bullPlan.acc and not na(bearPlan) and bearPlan.acc
+    evConflict := true
+    if conflictInput == "Follow HTF bias" and bias == 1
+        bearPlan.acc := false
+    else if conflictInput == "Follow HTF bias" and bias == -1
+        bullPlan.acc := false
+    else
+        bullPlan.acc := false
+        bearPlan.acc := false
+    if not bullPlan.acc
+        bull.why := "Skipped: long & short on the same bar"
+    if not bearPlan.acc
+        bear.why := "Skipped: long & short on the same bar"
+drawPlan(bull, bullPlan)
+drawPlan(bear, bearPlan)
+
+Plan sig = not na(bullPlan) and bullPlan.acc ? bullPlan : not na(bearPlan) and bearPlan.acc ? bearPlan : na
+int  sigDir = na(sig) ? 0 : sig.dir
+if sigDir != 0
+    setupsDay += 1
+
+// ══════════════════════════════════════════════════════════
+// 9. TRADE ENGINE — REVERSAL & ENTRIES
+// ══════════════════════════════════════════════════════════
+bool reverseToShort = sigDir == -1 and tr.dir == 1
+bool reverseToLong  = sigDir ==  1 and tr.dir == -1
+bool  evReversal    = false
+bool  revWin        = false
+int   revDir        = 0
+int   revId         = na
+float revR          = na
+if reverseToShort or reverseToLong
+    evReversal := true
+    revDir     := tr.dir
+    revId      := tr.id
+    bool tradeWin = tr.hit1
+    revWin := tradeWin
+    revR   := safeDiv(tr.dir * (close - tr.entry), tr.risk) - costRInput
+    stats.record(tradeWin, revR)
+    tr.clear()
+
+if sigDir != 0 and pendDir == -sigDir
+    evPendCancel := true
+    cancelDir    := pendDir
+    cancelId     := pendId
+    cancelEntry  := pendEntry
+    cancelWhy    := "opposite signal"
+    pendDir      := 0
+
+bool evLongEntry  = false
+bool evShortEntry = false
+bool evNewPending = false
+int sigId = na
+if sigDir != 0 and tr.dir == 0
+    orderSeq     += 1
+    sigId        := orderSeq
+    lastSigDir   := sigDir
+    lastSigBar   := bar_index
+    lastSigScore := sig.score
+    float riskNow = sigDir * (sig.en - sig.sl)
+    if sig.mkt and riskNow > 0
+        newDir      := sigDir
+        newEntry    := sig.en
+        newSrcE     := sig.enSrc
+        newSrcS     := sig.slSrc
+        newSrcT     := sig.tp3Src
+        actSrcT     := newSrcT
+        newSL       := sig.sl
+        newTP1      := sig.tp1
+        newTP2      := sig.tp2
+        newTP3      := sig.tp3
+        tr.enter(sigDir, sig.en, sig.sl, sig.tp1, sig.tp2, sig.tp3, sigId)
+        evLongEntry  := sigDir == 1
+        evShortEntry := sigDir == -1
+    else if riskNow > 0
+        pendDir   := sigDir
+        pendEntry := sig.en
+        pendSL    := sig.sl
+        pendTP1   := sig.tp1
+        pendTP2   := sig.tp2
+        pendTP3   := sig.tp3
+        pendBar   := bar_index
+        pendId    := sigId
+        pendSrcE  := sig.enSrc
+        pendSrcS  := sig.slSrc
+        pendSrcT  := sig.tp3Src
+        evNewPending := true
+bool evAnyEntry = evLongEntry or evShortEntry or evFill
+
+// ══════════════════════════════════════════════════════════
+// 10. PLOTS & VISUALS
+// ══════════════════════════════════════════════════════════
+if extLn.size() > 0
+    for j = extLn.size() - 1 to 0
+        float lv = extLvl.get(j)
+        int   dd = extDir.get(j)
+        if (dd == 1 and low < lv) or (dd == -1 and high > lv)
+            extLn.get(j).set_x2(bar_index)
+            extLn.remove(j)
+            extLvl.remove(j)
+            extDir.remove(j)
+        else if barstate.islast
+            extLn.get(j).set_x2(bar_index + setupWidthInput)
+
+int htfCloseT = time_close(htfTF)
+countdownStr() =>
+    string out = "n/a"
+    if barstate.isrealtime and not na(htfCloseT)
+        int secs = math.floor((htfCloseT - timenow) / 1000)
+        if secs >= 0
+            int hh = math.floor(secs / 3600)
+            int mm = math.floor((secs % 3600) / 60)
+            int ss = secs % 60
+            out := (hh > 0 ? str.tostring(hh) + ":" + pad2(mm) : pad2(mm)) + ":" + pad2(ss)
+    out
+
+var array<box>   pBodies = array.new<box>()
+var array<line>  pWicks  = array.new<line>()
+var array<line>  pSwH    = array.new<line>()
+var array<line>  pSwL    = array.new<line>()
+var array<label> pTimes  = array.new<label>()
+var line  pCisdLn = na
+var label pCisdLb = na
+var label pTopLb  = na
+var label pBotLb  = na
+var line  prevHiLn = na
+var line  prevLoLn = na
+
+if barstate.islast
+    if showLiqInput
+        for q in liqH
+            if not na(q.ln)
+                q.ln.set_x2(bar_index + LINE_UPDATE_BARS)
+        for q in liqL
+            if not na(q.ln)
+                q.ln.set_x2(bar_index + LINE_UPDATE_BARS)
+
+    if showPrevHtfInput and htfs.size() > 0
+        HtfBar ph = htfs.last()
+        int    xPh = safeX(ph.b)
+        if na(prevHiLn)
+            prevHiLn := line.new(xPh, ph.h, bar_index + LINE_UPDATE_BARS, ph.h, color = LINE_SUBTLE)
+            prevLoLn := line.new(xPh, ph.l, bar_index + LINE_UPDATE_BARS, ph.l, color = LINE_SUBTLE)
+        else
+            line.set_xy1(prevHiLn, xPh, ph.h)
+            line.set_xy2(prevHiLn, bar_index + LINE_UPDATE_BARS, ph.h)
+            line.set_xy1(prevLoLn, xPh, ph.l)
+            line.set_xy2(prevLoLn, bar_index + LINE_UPDATE_BARS, ph.l)
+
+    if showPanelInput and not na(cur)
+        string pSize = sizeFromString(labelFontSizeInput)
+        int    nP    = panelCountInput
+        if pBodies.size() == 0
+            for i = 0 to nP - 1
+                pBodies.push(box.new(bar_index, close, bar_index, close, border_color = color(na), bgcolor = color(na)))
+                pWicks.push(line.new(bar_index, close, bar_index, close, color = color(na)))
+                pSwH.push(line.new(bar_index, close, bar_index, close, color = color(na)))
+                pSwL.push(line.new(bar_index, close, bar_index, close, color = color(na)))
+                pTimes.push(label.new(bar_index, close, "", color = color(na), style = label.style_label_down, textcolor = TEXT_MUTED, size = pSize))
+            pCisdLn := line.new(bar_index, close, bar_index, close, color = color(na))
+            pCisdLb := label.new(bar_index, close, "", color = color(na), style = label.style_label_left, textcolor = TEXT_MUTED, size = pSize)
+            pTopLb  := label.new(bar_index, close, "", color = color(na), style = label.style_label_down, textcolor = TEXT_MUTED, size = size.normal)
+            pBotLb  := label.new(bar_index, close, "", color = color(na), style = label.style_label_up, textcolor = TEXT_MUTED, size = size.normal)
+        array<HtfBar> cs = array.new<HtfBar>()
+        int nComp = math.min(nP - 1, htfs.size())
+        if nComp > 0
+            for i = htfs.size() - nComp to htfs.size() - 1
+                cs.push(htfs.get(i))
+        cs.push(cur)
+        float hi = cur.h
+        float lo = cur.l
+        for cb in cs
+            hi := math.max(hi, cb.h)
+            lo := math.min(lo, cb.l)
+        float  pad     = (hi - lo) * 0.08
+        int    stepX   = panelWidthInput + panelGapInput
+        int    half    = math.floor(panelWidthInput / 2)
+        string tfmt    = timeframe.in_seconds(htfTF) >= 86400 ? "MMM dd" : "HH:mm"
+        int    dnStart = na
+        int    upStart = na
+        bool   inDn    = false
+        bool   inUp    = false
+        int    cDir    = 0
+        int    cFrom   = na
+        float  cLvl    = na
+        for i = 0 to nP - 1
+            box   bx = pBodies.get(i)
+            line  wk = pWicks.get(i)
+            line  sh = pSwH.get(i)
+            line  sl = pSwL.get(i)
+            label tl = pTimes.get(i)
+            if i < cs.size()
+                HtfBar cb = cs.get(i)
+                int   x  = bar_index + panelOffsetInput + i * stepX
+                int   xm = x + half
+                color cc = cb.c >= cb.o ? panelUpColorInput : panelDnColorInput
+                if not na(dnStart) and cb.c > cs.get(dnStart).o
+                    cDir    := 1
+                    cLvl    := cs.get(dnStart).o
+                    cFrom   := dnStart
+                    dnStart := na
+                if not na(upStart) and cb.c < cs.get(upStart).o
+                    cDir    := -1
+                    cLvl    := cs.get(upStart).o
+                    cFrom   := upStart
+                    upStart := na
+                if cb.c < cb.o
+                    if not inDn
+                        dnStart := i
+                    inDn := true
+                    inUp := false
+                else if cb.c > cb.o
+                    if not inUp
+                        upStart := i
+                    inUp := true
+                    inDn := false
+                line.set_xy1(wk, xm, cb.h)
+                line.set_xy2(wk, xm, cb.l)
+                line.set_color(wk, LINE_SUBTLE)
+                box.set_lefttop(bx, x, math.max(cb.o, cb.c))
+                box.set_rightbottom(bx, x + panelWidthInput - 1, math.min(cb.o, cb.c))
+                box.set_bgcolor(bx, cc)
+                box.set_border_color(bx, cc)
+                label.set_xy(tl, xm, cb.h)
+                label.set_text(tl, panelTimesInput ? str.format_time(cb.t, tfmt, tzInput) : "")
+                HtfBar pv = cs.get(math.max(i - 1, 0))
+                int   xpm = x - stepX + half
+                bool  swH = i > 0 and cb.h > pv.h
+                bool  swL = i > 0 and cb.l < pv.l
+                line.set_xy1(sh, xpm, swH ? pv.h : cb.h)
+                line.set_xy2(sh, x + panelWidthInput, swH ? pv.h : cb.h)
+                line.set_color(sh, swH ? BUY_LIQ_COLOR : color(na))
+                line.set_xy1(sl, xpm, swL ? pv.l : cb.l)
+                line.set_xy2(sl, x + panelWidthInput, swL ? pv.l : cb.l)
+                line.set_color(sl, swL ? SELL_LIQ_COLOR : color(na))
+            else
+                box.set_bgcolor(bx, color(na))
+                box.set_border_color(bx, color(na))
+                line.set_color(wk, color(na))
+                line.set_color(sh, color(na))
+                line.set_color(sl, color(na))
+                label.set_text(tl, "")
+        int xEnd = bar_index + panelOffsetInput + cs.size() * stepX
+        bool showC = panelCisdInput and cDir != 0
+        int  xs    = bar_index + panelOffsetInput + nz(cFrom) * stepX
+        line.set_xy1(pCisdLn, xs, nz(cLvl, close))
+        line.set_xy2(pCisdLn, xEnd, nz(cLvl, close))
+        line.set_color(pCisdLn, showC ? TEXT_MUTED : color(na))
+        label.set_xy(pCisdLb, xEnd, nz(cLvl, close))
+        label.set_text(pCisdLb, showC ? (cDir == 1 ? "+" : "-") + "CISD" : "")
+        int    xc  = bar_index + panelOffsetInput + math.round(cs.size() * stepX / 2)
+        string cd  = panelCountdownInput ? "(" + countdownStr() + ")" : ""
+        string tfs = tfStr(htfTF)
+        label.set_xy(pTopLb, xc, hi + pad)
+        label.set_text(pTopLb, cd != "" ? tfs + "\n" + cd : tfs)
+        label.set_xy(pBotLb, xc, lo - pad)
+        label.set_text(pBotLb, cd != "" ? cd + "\n" + tfs : tfs)
+
+// ══════════════════════════════════════════════════════════
+// 11. LABELS & SHAPES
+// ══════════════════════════════════════════════════════════
+string signalSize = sizeFromString(signalFontSizeInput)
+
+string sigInfo = ""
+if sigDir != 0
+    sigInfo := "\nEntry: " + sig.enSrc + "\nStop: " + sig.slSrc + "\nTP3: " + sig.tp3Src + "\nScore: " + str.tostring(sig.score) + "/100\nATR pct: " + str.tostring(atrPct, "#") + "\nSL: " + fmtPrice(sig.sl) + " | TP1: " + fmtPrice(sig.tp1) + (sig.tags != "" ? "\n" + sig.tags : "")
+
+if showSignalsInput and sigDir != 0 and evNewPending
+    string ordTip = (sigDir == 1 ? "Buy" : "Sell") + " limit order placed @ " + fmtPrice(sig.en) + " — not an entry yet.\nThe entry is marked " + (sigDir == 1 ? "▲ BUY" : "▼ SELL") + " when the order fills." + sigInfo
+    addMark(label.new(bar_index, sigDir == 1 ? low : high, "", yloc = sigDir == 1 ? yloc.belowbar : yloc.abovebar, color = color.new(sigDir == 1 ? BULL_TEXT : BEAR_TEXT, 15), style = label.style_diamond, size = size.tiny, tooltip = ordTip))
+
+if showSignalsInput and (evLongEntry or evShortEntry)
+    string mktTip = (sigDir == 1 ? "Long" : "Short") + " entry — market @ " + fmtPrice(sig.en) + sigInfo
+    addMark(label.new(bar_index, sigDir == 1 ? low : high, sigDir == 1 ? "▲ BUY" : "▼ SELL", color = sigDir == 1 ? bullColorInput : bearColorInput, textcolor = sigDir == 1 ? BULL_LABEL_TEXT : BEAR_LABEL_TEXT, style = sigDir == 1 ? label.style_label_up : label.style_label_down, size = signalSize, tooltip = mktTip))
+
+if showSignalsInput and evFill
+    string fillTip = (newDir == 1 ? "Long" : "Short") + " entry — limit filled @ " + fmtPrice(newEntry) + "\nEntry: " + newSrcE + "\nStop: " + newSrcS + "\nTP3: " + newSrcT + "\nSL: " + fmtPrice(newSL) + " | TP1: " + fmtPrice(newTP1) + (evFillStop ? "\nStopped out on the fill bar" : "")
+    addMark(label.new(bar_index, newDir == 1 ? low : high, newDir == 1 ? "▲ BUY" : "▼ SELL", color = newDir == 1 ? bullColorInput : bearColorInput, textcolor = newDir == 1 ? BULL_LABEL_TEXT : BEAR_LABEL_TEXT, style = newDir == 1 ? label.style_label_up : label.style_label_down, size = signalSize, tooltip = fillTip))
+
+var string lastEvent    = ""
+var int    lastEventBar = na
+string evText = ""
+if evTp3Hit
+    evText := "TP3 " + fmtR(closeR)
+if evSlHit
+    evText := (exitBeActive ? "BE stop " : "SL ") + fmtR(closeR)
+if evPendCancel
+    evText := "Order cancelled · " + cancelWhy
+if evFill
+    evText := "Limit filled @ " + fmtPrice(newEntry)
+if evFillStop
+    evText := "Stopped on the fill bar " + fmtR(fillStopR)
+if evConflict
+    evText := "Long & short on the same bar — skipped"
+if evReversal
+    evText := "Reversal close " + fmtR(revR)
+if sigDir != 0
+    evText := (sigDir == 1 ? "Long " : "Short ") + (sig.mkt ? "market @ " : "limit placed @ ") + fmtPrice(sig.en)
+if evText != "" and barstate.isconfirmed
+    lastEvent    := evText
+    lastEventBar := bar_index
+
+string outSize  = sizeFromString(labelFontSizeInput)
+int    busySide = sigDir != 0 ? -sigDir : evFill ? -newDir : 0
+markSide(int tradeDir) =>
+    int side = tradeDir == 1 ? 1 : -1
+    busySide == side ? -side : side
+
+mkMark(int side, string txt, color tc, string tip) =>
+    addMark(label.new(bar_index, side == 1 ? high : low, txt, yloc = side == 1 ? yloc.abovebar : yloc.belowbar, color = color(na), style = side == 1 ? label.style_label_down : label.style_label_up, textcolor = tc, size = outSize, tooltip = tip))
+
+if showOutcomeInput and barstate.isconfirmed
+    if evTp3Hit or evSlHit
+        string oTxt = (evTp3Hit ? "TP3 " : exitBeActive ? "BE " : "SL ") + fmtR(closeR)
+        mkMark(markSide(exitDir), oTxt, closeR > 0 ? TP_HIT_COLOR : closeR < 0 ? SL_COLOR : TEXT_MUTED, "Exit " + fmtPrice(closePx) + " · result " + fmtR(closeR) + (exitDir == 1 ? " (long)" : " (short)"))
+    if evFillStop
+        mkMark(markSide(newDir), "SL " + fmtR(fillStopR), SL_COLOR, "Stopped out on the limit fill bar @ " + fmtPrice(fillStopPx))
+    if evReversal
+        mkMark(markSide(revDir), "REV " + fmtR(revR), revR > 0 ? TP_HIT_COLOR : revR < 0 ? SL_COLOR : TEXT_MUTED, "Closed by an opposite signal " + (revWin ? "after TP1" : "before TP1") + " @ " + fmtPrice(close))
+    if evPendCancel and not showPendingInput
+        mkMark(markSide(cancelDir), "✕ " + cancelWhy, TEXT_MUTED, (cancelDir == 1 ? "Long" : "Short") + " limit @ " + fmtPrice(cancelEntry) + " cancelled")
+
+// ══════════════════════════════════════════════════════════
+// 12. SL/TP LINES & LABELS
+// ══════════════════════════════════════════════════════════
+var line  entryLine  = na
+var line  slLine     = na
+var line  tp1Line    = na
+var line  tp2Line    = na
+var line  tp3Line    = na
+var label entryLabel = na
+var label slLabel    = na
+var label tp1Label   = na
+var label tp2Label   = na
+var label tp3Label   = na
+
+string lblFont = sizeFromString(labelFontSizeInput)
+
+if showSlTpInput and not evAnyEntry
+    if displayTp1Reached and tp1FirstTouch and not na(tp1Line)
+        line.set_color(tp1Line, TP_HIT_COLOR)
+        line.set_style(tp1Line, line.style_solid)
+        if showSlTpLabelsInput and not na(tp1Label)
+            label.set_text(tp1Label, "TP1 ✓ " + fmtPrice(exitTP1) + " · " + rMult(exitTP1, exitEntry, tr.risk, exitDir) + formatPctFromEntry(exitTP1, exitEntry))
+            label.set_color(tp1Label, TP_HIT_COLOR)
+    if displayTp2Reached and tp2FirstTouch and not na(tp2Line)
+        line.set_color(tp2Line, TP_HIT_COLOR)
+        line.set_style(tp2Line, line.style_solid)
+        if showSlTpLabelsInput and not na(tp2Label)
+            label.set_text(tp2Label, "TP2 ✓ " + fmtPrice(exitTP2) + " · " + rMult(exitTP2, exitEntry, tr.risk, exitDir) + formatPctFromEntry(exitTP2, exitEntry))
+            label.set_color(tp2Label, TP_HIT_COLOR)
+    if displayTp3Reached and tp3FirstTouch and not na(tp3Line)
+        line.set_color(tp3Line, TP_HIT_COLOR)
+        line.set_style(tp3Line, line.style_solid)
+        if showSlTpLabelsInput and not na(tp3Label)
+            label.set_text(tp3Label, "TP3 ✓ " + fmtPrice(exitTP3) + " · " + actSrcT + formatPctFromEntry(exitTP3, exitEntry))
+            label.set_color(tp3Label, TP_HIT_COLOR)
+
+if showSlTpInput and evAnyEntry
+    line.delete(entryLine)
+    line.delete(slLine)
+    line.delete(tp1Line)
+    line.delete(tp2Line)
+    line.delete(tp3Line)
+    label.delete(entryLabel)
+    label.delete(slLabel)
+    label.delete(tp1Label)
+    label.delete(tp2Label)
+    label.delete(tp3Label)
+    int xA = bar_index
+    int xB = bar_index + LINE_FORWARD_BARS
+    entryLine := line.new(xA, newEntry, xB, newEntry, color = ENTRY_COLOR, style = lineStyleFromString(entryLineStyleInput), width = 1)
+    slLine    := line.new(xA, newSL, xB, newSL, color = SL_COLOR, style = lineStyleFromString(slLineStyleInput), width = 2)
+    tp1Line   := line.new(xA, newTP1, xB, newTP1, color = TP1_COLOR, style = lineStyleFromString(tpLineStyleInput), width = 1)
+    tp2Line   := line.new(xA, newTP2, xB, newTP2, color = TP2_COLOR, style = lineStyleFromString(tpLineStyleInput), width = 1)
+    tp3Line   := line.new(xA, newTP3, xB, newTP3, color = TP3_COLOR, style = lineStyleFromString(tpLineStyleInput), width = 1)
+    if showSlTpLabelsInput
+        int xL = xB + LABEL_OFFSET_BARS
+        float rk = math.abs(newEntry - newSL)
+        entryLabel := label.new(xL, newEntry, "ENTRY " + fmtPrice(newEntry) + " · " + newSrcE, color = ENTRY_COLOR, textcolor = LABEL_TEXT, style = label.style_label_left, size = lblFont)
+        slLabel    := label.new(xL, newSL, "SL " + fmtPrice(newSL) + " · " + newSrcS + formatPctFromEntry(newSL, newEntry), color = SL_COLOR, textcolor = LABEL_TEXT, style = label.style_label_left, size = lblFont)
+        tp1Label   := label.new(xL, newTP1, "TP1 " + fmtPrice(newTP1) + " · " + rMult(newTP1, newEntry, rk, newDir) + formatPctFromEntry(newTP1, newEntry), color = TP_LABEL_COLOR, textcolor = LABEL_TEXT, style = label.style_label_left, size = lblFont)
+        tp2Label   := label.new(xL, newTP2, "TP2 " + fmtPrice(newTP2) + " · " + rMult(newTP2, newEntry, rk, newDir) + formatPctFromEntry(newTP2, newEntry), color = TP_LABEL_COLOR, textcolor = LABEL_TEXT, style = label.style_label_left, size = lblFont)
+        tp3Label   := label.new(xL, newTP3, "TP3 " + fmtPrice(newTP3) + " · " + newSrcT + formatPctFromEntry(newTP3, newEntry), color = TP_LABEL_COLOR, textcolor = LABEL_TEXT, style = label.style_label_left, size = lblFont)
+
+if showSlTpInput and beJustActivated and tr.dir != 0 and not evAnyEntry
+    if not na(slLine)
+        line.set_color(slLine, color.new(SL_COLOR, BE_DIM_TRANSP))
+    if showSlTpLabelsInput
+        if not na(slLabel)
+            label.set_color(slLabel, color.new(SL_COLOR, 85))
+            label.set_textcolor(slLabel, TEXT_MUTED)
+            label.set_text(slLabel, "SL " + fmtPrice(effectiveSL) + " · inactive (BE)")
+        if not na(entryLabel)
+            label.set_text(entryLabel, "ENTRY " + fmtPrice(tr.entry) + "  → SL (BE)")
+            label.set_color(entryLabel, BE_COLOR)
+
+if showSlTpInput and tr.dir != 0 and not na(slLine)
+    int xU = bar_index + LINE_UPDATE_BARS
+    line.set_x2(entryLine, xU)
+    line.set_x2(slLine, xU)
+    line.set_x2(tp1Line, xU)
+    line.set_x2(tp2Line, xU)
+    line.set_x2(tp3Line, xU)
+    if showSlTpLabelsInput and not na(slLabel)
+        label.set_x(entryLabel, xU + LABEL_OFFSET_BARS)
+        label.set_x(slLabel, xU + LABEL_OFFSET_BARS)
+        label.set_x(tp1Label, xU + LABEL_OFFSET_BARS)
+        label.set_x(tp2Label, xU + LABEL_OFFSET_BARS)
+        label.set_x(tp3Label, xU + LABEL_OFFSET_BARS)
+
+var line  pEnLine = na
+var line  pSlLine = na
+var line  pTpLine = na
+var label pEnLbl  = na
+var label pSlLbl  = na
+var label pTpLbl  = na
+var bool  pLive   = false
+
+if pLive and evPendCancel
+    line.set_color(pEnLine, LINE_SUBTLE)
+    line.delete(pSlLine)
+    line.delete(pTpLine)
+    label.delete(pSlLbl)
+    label.delete(pTpLbl)
+    if not na(pEnLbl)
+        label.set_text(pEnLbl, "LIMIT ✕ " + cancelWhy)
+        label.set_textcolor(pEnLbl, TEXT_MUTED)
+    addGfx(Gfx.new(array.new<box>(), array.from(pEnLine), na(pEnLbl) ? array.new<label>() : array.from(pEnLbl)))
+    pLive := false
+if pLive and evFill
+    line.delete(pEnLine)
+    line.delete(pSlLine)
+    line.delete(pTpLine)
+    label.delete(pEnLbl)
+    label.delete(pSlLbl)
+    label.delete(pTpLbl)
+    pLive := false
+if showPendingInput and evNewPending
+    int xA = bar_index
+    int xB = bar_index + LINE_UPDATE_BARS
+    pEnLine := line.new(xA, pendEntry, xB, pendEntry, color = ENTRY_COLOR, style = line.style_dashed, width = 1)
+    pSlLine := line.new(xA, pendSL, xB, pendSL, color = color.new(SL_COLOR, 40), style = line.style_dotted, width = 1)
+    pTpLine := line.new(xA, pendTP1, xB, pendTP1, color = TP1_COLOR, style = line.style_dotted, width = 1)
+    pEnLbl  := na
+    pSlLbl  := na
+    pTpLbl  := na
+    if showSlTpLabelsInput
+        int xL = xB + LABEL_OFFSET_BARS
+        pEnLbl := label.new(xL, pendEntry, "LIMIT " + fmtPrice(pendEntry), color = color(na), textcolor = ENTRY_COLOR, style = label.style_label_left, size = lblFont)
+        pSlLbl := label.new(xL, pendSL, "SL (planned) " + fmtPrice(pendSL) + " · " + pendSrcS, color = color(na), textcolor = SL_COLOR, style = label.style_label_left, size = lblFont)
+        pTpLbl := label.new(xL, pendTP1, "TP1 (planned) " + fmtPrice(pendTP1) + " · cancels the order if reached first", color = color(na), textcolor = TP_LABEL_COLOR, style = label.style_label_left, size = lblFont)
+    pLive := true
+if pLive and pendDir != 0
+    int xP = bar_index + LINE_UPDATE_BARS
+    line.set_x2(pEnLine, xP)
+    line.set_x2(pSlLine, xP)
+    line.set_x2(pTpLine, xP)
+    if not na(pEnLbl)
+        int left = math.max(0, pendExpiryInput - (bar_index - pendBar))
+        label.set_x(pEnLbl, xP + LABEL_OFFSET_BARS)
+        label.set_text(pEnLbl, "LIMIT " + (pendDir == 1 ? "LONG " : "SHORT ") + fmtPrice(pendEntry) + " · " + pendSrcE + " · " + str.tostring(left) + " bars left")
+    if not na(pSlLbl)
+        label.set_x(pSlLbl, xP + LABEL_OFFSET_BARS)
+    if not na(pTpLbl)
+        label.set_x(pTpLbl, xP + LABEL_OFFSET_BARS)
+
+// ══════════════════════════════════════════════════════════
+// 13. DASHBOARD
+// ══════════════════════════════════════════════════════════
+dashPos = switch dashPosInput
+    "Top Left"     => position.top_left
+    "Top Right"    => position.top_right
+    "Bottom Left"  => position.bottom_left
+    "Bottom Right" => position.bottom_right
+    "Middle Right" => position.middle_right
+    => position.top_right
+
+dashRow(table tb, int r, string k, string v, color vc, string tip, string fs) =>
+    color rb = r % 2 == 0 ? TABLE_BG : TABLE_ROW_ALT
+    table.cell(tb, 0, r, k, text_color = TEXT_MUTED, text_size = fs, bgcolor = rb, text_halign = text.align_left, tooltip = tip)
+    table.cell(tb, 1, r, v, text_color = vc, text_size = fs, bgcolor = rb, text_halign = text.align_right)
+    r + 1
+
+dashDivider(table tb, int r, string txt, string fs) =>
+    table.cell(tb, 0, r, txt, text_color = TEXT_MUTED, bgcolor = TABLE_ROW_ALT, text_size = fs, text_halign = text.align_center)
+    table.merge_cells(tb, 0, r, 1, r)
+    r + 1
+
+var table dashTable = na
+var int   dashRows  = 0
+
+if showDashInput and barstate.islast
+    string dashFontSize    = sizeFromString(dashFontSizeInput)
+    string dashFontSizeSub = sizeDownFromString(dashFontSizeInput)
+    int nowRows    = showNowSecInput    ? 4 : 0
+    int marketRows = showMarketSecInput ? 5 : 0
+    int setupRows  = showSetupSecInput  ? 5 : 0
+    int tradeRows  = showTradeSecInput  ? (tr.dir != 0 ? 8 : 2) : 0
+    int statsRows  = showStatsSecInput  ? 8 : 0
+    int totalRows  = 2 + nowRows + marketRows + setupRows + tradeRows + statsRows
+    if na(dashTable) or totalRows != dashRows
+        if not na(dashTable)
+            table.delete(dashTable)
+        dashTable := table.new(dashPos, 2, totalRows, bgcolor = TABLE_BG, border_color = TABLE_BORDER, border_width = 1, frame_color = TABLE_BORDER, frame_width = 1)
+        dashRows  := totalRows
+
+    string biasWord = bias == 1 ? "Bullish" : bias == -1 ? "Bearish" : "Neutral"
+    color  biasCol  = bias == 1 ? BULL_TEXT : bias == -1 ? BEAR_TEXT : TEXT_MUTED
+    color  headerBg = bias == 1 ? HEADER_BG_BULL : bias == -1 ? HEADER_BG_BEAR : HEADER_BG
+    int r = 0
+    table.cell(dashTable, 0, r, "◆ " + INDICATOR_SHORT + " · " + biasWord, text_color = HEADER_TEXT, bgcolor = headerBg, text_size = dashFontSize, text_halign = text.align_center)
+    table.merge_cells(dashTable, 0, r, 1, r)
+    r += 1
+
+    if showNowSecInput
+        r := dashDivider(dashTable, r, "— Now —", dashFontSizeSub)
+        string stageStr = "Waiting for HTF trigger"
+        color  stageCol = TEXT_MUTED
+        string nextStr  = "Filters: " + filterState
+        string whyTip   = "Long: " + (not bull.active ? "no trigger" : bull.why == "" ? "tracking structure" : bull.why) + "\nShort: " + (not bear.active ? "no trigger" : bear.why == "" ? "tracking structure" : bear.why)
+        if tr.dir != 0
+            stageStr := (tr.dir == 1 ? "LONG" : "SHORT") + " · position open" + (tr.hit2 ? " · TP2 ✓" : tr.hit1 ? " · TP1 ✓" : "")
+            stageCol := tr.dir == 1 ? BULL_TEXT : BEAR_TEXT
+            string nt = not tr.hit1 ? "TP1 " + fmtPrice(tr.tp1) + (beInput ? " (then stop → entry)" : "") : not tr.hit2 ? "TP2 " + fmtPrice(tr.tp2) : "TP3 " + fmtPrice(tr.tp3)
+            nextStr  := "Next: " + nt + " · stop " + fmtPrice(tr.sl) + (tr.be ? " (BE)" : "")
+        else if pendDir != 0
+            int left = math.max(0, pendExpiryInput - (bar_index - nz(pendBar, bar_index)))
+            stageStr := (pendDir == 1 ? "LONG" : "SHORT") + " LIMIT · waiting for entry"
+            stageCol := NEUTRAL_TEXT
+            nextStr  := "Entry " + fmtPrice(pendEntry) + " · " + str.tostring(left) + " bars left · cancels at TP1 " + fmtPrice(pendTP1)
+        else if bull.active or bear.active
+            Ctx c = bull.active and (not bear.active or bull.trigBar >= bear.trigBar) ? bull : bear
+            stageStr := c.dir == 1 ? "Sell-side swept @ " + fmtPrice(c.level) + " → long setup" : "Buy-side swept @ " + fmtPrice(-c.level) + " → short setup"
+            stageCol := c.dir == 1 ? BULL_TEXT : BEAR_TEXT
+            nextStr  := c.why == "" ? "Tracking structure" : c.why
+        color nextCol = str.startswith(nextStr, "Blocked") or str.startswith(nextStr, "No data") ? NEUTRAL_TEXT : TEXT_COLOR
+        string lastEvStr = lastEvent == "" ? "—" : lastEvent + " (" + str.tostring(bar_index - nz(lastEventBar, bar_index)) + ")"
+        r := dashRow(dashTable, r, "Stage", stageStr, stageCol, "What the indicator is doing now: waiting for an HTF trigger, building a setup, a pending limit order, or an open position.", dashFontSize)
+        r := dashRow(dashTable, r, "Next", nextStr, nextCol, whyTip, dashFontSize)
+        r := dashRow(dashTable, r, "Last", lastEvStr, TEXT_MUTED, "Last trade / order event (bars ago).", dashFontSize)
+
+    if showMarketSecInput
+        r := dashDivider(dashTable, r, "— Market —", dashFontSizeSub)
+        string lastStr = lastSigDir == 0 ? "—" : (lastSigDir == 1 ? "Long" : "Short") + " · " + str.tostring(nz(lastSigScore)) + " (" + str.tostring(bar_index - nz(lastSigBar, bar_index)) + ")"
+        color  lastCol = lastSigDir == 1 ? BULL_TEXT : lastSigDir == -1 ? BEAR_TEXT : TEXT_MUTED
+        r := dashRow(dashTable, r, "HTF Bias", biasWord, biasCol, "Bias from the last closed HTF candle: close beyond the previous range, or a sweep that closed back inside.", dashFontSize)
+        r := dashRow(dashTable, r, "Pair", tfStr(timeframe.period) + " → " + tfStr(htfTF), TEXT_COLOR, "Chart timeframe → paired higher timeframe.", dashFontSize)
+        r := dashRow(dashTable, r, "HTF Close", countdownStr(), TEXT_COLOR, "Time left in the current HTF candle (realtime only).", dashFontSize)
+        r := dashRow(dashTable, r, "Last Signal", lastStr, lastCol, "Last accepted signal · score (bars ago).", dashFontSize)
+
+    if showSetupSecInput
+        r := dashDivider(dashTable, r, "— Setup —", dashFontSizeSub)
+        string stopStr = slModeInput == "Structure" ? "Structure · " + stopName(stopAtInput) : slModeInput
+        color  filtCol = filterState == "Open" ? BULL_TEXT : NEUTRAL_TEXT
+        r := dashRow(dashTable, r, "Model", famName(ENTRY_FAM) + " · " + ENTRY_SHORT, TEXT_COLOR, "Entry PD array and price.", dashFontSize)
+        r := dashRow(dashTable, r, "Entry", entryModeInput, TEXT_COLOR, "Limit: pending order at the PD array. Market: close of the signal bar.", dashFontSize)
+        r := dashRow(dashTable, r, "Stop", stopStr, TEXT_COLOR, "SL mode and structure stop location.", dashFontSize)
+        r := dashRow(dashTable, r, "Filters", filterState, filtCol, "Time / news / volatility filters on the current bar.", dashFontSize)
+
+    if showTradeSecInput
+        r := dashDivider(dashTable, r, "— Trade —", dashFontSizeSub)
+        if tr.dir != 0
+            float riskPct = not na(tr.entry) and tr.entry != 0 and not na(tr.sl) ? math.abs(tr.entry - tr.sl) / tr.entry * 100 : 0.0
+            color rrColor = effTP1m >= 1.5 ? BULL_TEXT : effTP1m >= 1.0 ? NEUTRAL_TEXT : BEAR_TEXT
+            color riskPctColor = riskPct > 3.0 ? BEAR_TEXT : riskPct > 1.0 ? NEUTRAL_TEXT : BULL_TEXT
+            string slStr  = tr.be ? "BE @ " + fmtPrice(tr.sl) : fmtPrice(tr.sl)
+            string tp1Str = (tr.hit1 ? "✓ " : "") + fmtPrice(tr.tp1)
+            string tp2Str = (tr.hit2 ? "✓ " : "") + fmtPrice(tr.tp2)
+            string tp3Str = (tr.hit3 ? "✓ " : "") + fmtPrice(tr.tp3)
+            r := dashRow(dashTable, r, "Entry", (tr.dir == 1 ? "Long @ " : "Short @ ") + fmtPrice(tr.entry), tr.dir == 1 ? BULL_TEXT : BEAR_TEXT, "Entry price of the open trade.", dashFontSize)
+            r := dashRow(dashTable, r, "SL", slStr, tr.be ? BE_COLOR : SL_COLOR, "Stop-loss. 'BE @' once moved to break-even after TP1.", dashFontSize)
+            r := dashRow(dashTable, r, "TP1", tp1Str, tr.hit1 ? TP_HIT_COLOR : TP_LABEL_COLOR, "First target. Touching it makes the trade a win.", dashFontSize)
+            r := dashRow(dashTable, r, "TP2", tp2Str, tr.hit2 ? TP_HIT_COLOR : TP_LABEL_COLOR, "Second target (does not close the trade).", dashFontSize)
+            r := dashRow(dashTable, r, "TP3", tp3Str, tr.hit3 ? TP_HIT_COLOR : TP_LABEL_COLOR, "Final target; closes the trade.", dashFontSize)
+            r := dashRow(dashTable, r, "R:R", str.tostring(effTP1m, "#.#") + "R", rrColor, "Risk:Reward at TP1 (from the actual SL distance).", dashFontSize)
+            r := dashRow(dashTable, r, "SL Dist", str.tostring(riskPct, "#.##") + "%", riskPctColor, "Distance from entry to the current stop in % of entry price (0 after break-even).", dashFontSize)
+        else
+            string flatStr = pendDir != 0 ? "Pending " + (pendDir == 1 ? "long" : "short") + " @ " + fmtPrice(pendEntry) + " · " + str.tostring(bar_index - nz(pendBar, bar_index)) + " bars" : "Flat · waiting for signal"
+            table.cell(dashTable, 0, r, flatStr, text_color = pendDir != 0 ? NEUTRAL_TEXT : TEXT_MUTED, bgcolor = TABLE_BG, text_size = dashFontSize, text_halign = text.align_center)
+            table.merge_cells(dashTable, 0, r, 1, r)
+            r += 1
+
+    if showStatsSecInput
+        string periodTag = statsPeriodInput == "24 Hours" ? "24H" : statsPeriodInput == "30 Days" ? "30D" : "All-Time"
+        int cutoff = statsPeriodInput == "24 Hours" ? time - MS_DAY : time - MS_DAY * 30
+        int   pWins   = stats.win
+        int   pLosses = stats.loss
+        float pSumR   = stats.sumR
+        float pGrossW = stats.grossW
+        float pGrossL = stats.grossL
+        if statsPeriodInput != "All-Time"
+            [pw, pl, psr, pgw, pgl] = periodStats(stats.times, stats.wins, stats.rs, cutoff)
+            pWins   := pw
+            pLosses := pl
+            pSumR   := psr
+            pGrossW := pgw
+            pGrossL := pgl
+        int pTotal  = pWins + pLosses
+        float winRate = pTotal > 0 ? pWins / float(pTotal) * 100.0 : 0.0
+        string dashWR = pTotal > 0 ? str.tostring(winRate, "#.#") + "%  " + buildGauge(winRate, 100, 8) : "—"
+        color  wrCol  = pTotal == 0 ? TEXT_MUTED : winRate >= 55.0 ? BULL_TEXT : winRate >= 45.0 ? NEUTRAL_TEXT : BEAR_TEXT
+        r := dashDivider(dashTable, r, "— Stats · " + periodTag + " —", dashFontSizeSub)
+        r := dashRow(dashTable, r, "Trades", pTotal > 0 ? str.tostring(pTotal) : "—", pTotal > 0 ? TEXT_COLOR : TEXT_MUTED, "Closed trades in the period (resets on chart reload).", dashFontSize)
+        r := dashRow(dashTable, r, "Wins", pTotal > 0 ? str.tostring(pWins) : "—", pTotal > 0 ? BULL_TEXT : TEXT_MUTED, "TP3, break-even stop after TP1, or reversal after TP1.", dashFontSize)
+        r := dashRow(dashTable, r, "Losses", pTotal > 0 ? str.tostring(pLosses) : "—", pTotal > 0 ? BEAR_TEXT : TEXT_MUTED, "SL hit or reversal before TP1.", dashFontSize)
+        r := dashRow(dashTable, r, "Win Rate", dashWR, wrCol, "TP1 hit rate: a trade is a WIN once TP1 is touched (not a profit rate — see Net R). Intrabar conflict model: " + intrabarModelInput + ".", dashFontSize)
+        float  avgR  = pTotal > 0 ? pSumR / pTotal : na
+        string netStr = pTotal > 0 ? fmtR(pSumR) + " · avg " + fmtR(avgR) : "—"
+        color  netCol = pTotal == 0 ? TEXT_MUTED : pSumR > 0 ? BULL_TEXT : pSumR < 0 ? BEAR_TEXT : NEUTRAL_TEXT
+        float  pf     = pGrossL > 0 ? pGrossW / pGrossL : na
+        string pfStr  = pTotal == 0 ? "—" : na(pf) ? (pGrossW > 0 ? "∞" : "—") : str.tostring(pf, "#.##")
+        color  pfCol  = pTotal == 0 or na(pf) ? TEXT_MUTED : pf >= 1.5 ? BULL_TEXT : pf >= 1.0 ? NEUTRAL_TEXT : BEAR_TEXT
+        r := dashRow(dashTable, r, "Net R", netStr, netCol, "Realized result in R of the full position at the exit price (TP3 / SL / BE / reversal close), gap-aware, minus Cost per Trade. Partial exits are not modelled.", dashFontSize)
+        r := dashRow(dashTable, r, "Profit F.", pfStr, pfCol, "Gross winning R / gross losing R in the period.", dashFontSize)
+        r := dashRow(dashTable, r, "Form", stats.form == "" ? "—" : stats.form, stats.form == "" ? TEXT_MUTED : TEXT_COLOR, "▰ = win · ▱ = loss (newest right). Not filtered by period.", dashFontSize)
+
+    table.cell(dashTable, 0, r, INDICATOR_SHORT + " · " + INDICATOR_VERSION, text_color = TEXT_MUTED, bgcolor = TABLE_BG, text_size = dashFontSizeSub, text_halign = text.align_center)
+    table.merge_cells(dashTable, 0, r, 1, r)
+
+// ══════════════════════════════════════════════════════════
+// 14. WATERMARK — WillyAlgoTrader
+// ══════════════════════════════════════════════════════════
+var table wmTable = table.new(position.bottom_center, 1, 1, bgcolor = color.new(color.black, 100), border_color = color.new(color.black, 100), border_width = 0, frame_color = color.new(color.black, 100), frame_width = 0)
+if barstate.islast and showWatermarkInput
+    table.cell(wmTable, 0, 0, "WillyAlgoTrader", text_color = WM_COLOR, text_size = size.normal, text_halign = text.align_center, bgcolor = color.new(color.black, 100))
+
+// ══════════════════════════════════════════════════════════
+// 15. ALERTS (order: management → closures → reversal → entries → info)
+// ══════════════════════════════════════════════════════════
+string tick     = syminfo.tickerid
+string tfAlert  = timeframe.period
+string aPrice   = str.tostring(close, format.mintick)
+string aTime    = str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone)
+
+if beJustActivated and alertTpInput
+    string tBe = "🛡️ BREAK-EVEN | " + tick + " | SL moved to entry: " + fmtPrice(beLevel)
+    alert(webhookInput ? jEvent("be", exitId, exitDir, jNum("sl", beLevel)) : tBe, alert.freq_once_per_bar_close)
+if evTp1Hit and alertTpInput
+    string tTp1 = "🎯 TP1 HIT | " + tick + " | TF: " + tfAlert + " | TP1: " + fmtPrice(exitTP1) + " | Entry: " + fmtPrice(exitEntry)
+    alert(webhookInput ? jEvent("tp1", exitId, exitDir, jNum("price", exitTP1) + jNum("entry", exitEntry)) : tTp1, alert.freq_once_per_bar_close)
+if evTp2Hit and alertTpInput
+    string tTp2 = "🎯🎯 TP2 HIT | " + tick + " | TF: " + tfAlert + " | TP2: " + fmtPrice(exitTP2) + " | Entry: " + fmtPrice(exitEntry)
+    alert(webhookInput ? jEvent("tp2", exitId, exitDir, jNum("price", exitTP2) + jNum("entry", exitEntry)) : tTp2, alert.freq_once_per_bar_close)
+
+if evTp3Hit and alertSlInput
+    string tTp3 = "🏆 TP3 HIT | " + tick + " | " + (exitDir == 1 ? "Long" : "Short") + " | Entry: " + fmtPrice(exitEntry) + " | Exit: " + fmtPrice(closePx) + " | " + fmtR(closeR)
+    alert(webhookInput ? jEvent("tp3", exitId, exitDir, jNum("price", closePx) + jNum("entry", exitEntry) + jR("r", closeR)) : tTp3, alert.freq_once_per_bar_close)
+if evSlHit and alertSlInput
+    string tSl = (exitBeActive ? "🛡️ BE STOP-OUT | " : "🛑 SL HIT | ") + tick + " | " + (exitDir == 1 ? "Long" : "Short") + " | Entry: " + fmtPrice(hitEntry) + " | SL: " + fmtPrice(hitSL) + " | Exit: " + fmtPrice(closePx) + " | " + fmtR(closeR)
+    alert(webhookInput ? jEvent("sl", exitId, exitDir, jStr("reason", exitBeActive ? "be_stop" : "sl") + jNum("price", closePx) + jNum("entry", hitEntry) + jR("r", closeR)) : tSl, alert.freq_once_per_bar_close)
+
+if evReversal and alertSlInput
+    string revResStr = revWin ? "Closed after TP1 (win)" : "Closed before TP1 (loss)"
+    string tRev = "🔄 REVERSAL → " + (revDir == 1 ? "SHORT" : "LONG") + " | " + tick + " | TF: " + tfAlert + " | " + revResStr + " | Exit: " + aPrice + " | " + fmtR(revR)
+    alert(webhookInput ? jEvent("reversal_close", revId, revDir, jStr("result", revWin ? "win" : "loss") + jNum("price", close) + jR("r", revR)) : tRev, alert.freq_once_per_bar_close)
+
+if evPendCancel and alertFillInput
+    string tCan = "⚪ ORDER CANCELLED | " + tick + " | " + (cancelDir == 1 ? "Long" : "Short") + " limit @ " + fmtPrice(cancelEntry) + " | " + cancelWhy
+    alert(webhookInput ? jEvent("cancel", cancelId, cancelDir, jNum("entry", cancelEntry) + jStr("reason", cancelWhy)) : tCan, alert.freq_once_per_bar_close)
+if sigDir != 0
+    string sMode = sig.mkt ? "market" : "limit"
+    string sBody = jStr("type", sMode) + jNum("price", close) + jNum("entry", sig.en) + jNum("sl", sig.sl) + jNum("tp1", sig.tp1) + jNum("tp2", sig.tp2) + jNum("tp3", sig.tp3) + jR("rr_tp1", effTP1m) + ',"score":' + str.tostring(sig.score)
+    string sHead   = sig.mkt ? (sigDir == 1 ? "🟢 LONG ENTRY" : "🔴 SHORT ENTRY") : (sigDir == 1 ? "🕓 LONG LIMIT PLACED" : "🕓 SHORT LIMIT PLACED")
+    string textSig = sHead + " | " + tick + " | TF: " + tfAlert + " | Price: " + aPrice + " | Entry (" + sMode + "): " + fmtPrice(sig.en) + " | SL: " + fmtPrice(sig.sl) + " | TP1: " + fmtPrice(sig.tp1) + " | TP2: " + fmtPrice(sig.tp2) + " | TP3: " + fmtPrice(sig.tp3) + " | R:R: " + str.tostring(effTP1m, "#.#") + " | Score: " + str.tostring(sig.score) + " | Time: " + aTime
+    alert(webhookInput ? jEvent("order", sigId, sigDir, sBody) : textSig, alert.freq_once_per_bar_close)
+if evFill and alertFillInput
+    string tFill = (newDir == 1 ? "🟢 LONG ENTRY" : "🔴 SHORT ENTRY") + " (limit filled) | " + tick + " | Entry: " + fmtPrice(newEntry) + " | SL: " + fmtPrice(newSL) + " | TP1: " + fmtPrice(newTP1)
+    alert(webhookInput ? jEvent("fill", fillId, newDir, jNum("entry", newEntry) + jNum("sl", newSL) + jNum("tp1", newTP1) + jNum("tp2", newTP2) + jNum("tp3", newTP3)) : tFill, alert.freq_once_per_bar_close)
+if evFillStop and alertSlInput
+    string tFs = "🛑 SL HIT | " + tick + " | " + (newDir == 1 ? "Long" : "Short") + " | Entry: " + fmtPrice(hitEntry) + " | Exit: " + fmtPrice(fillStopPx) + " | " + fmtR(fillStopR) + " | stopped on the fill bar"
+    alert(webhookInput ? jEvent("sl", fillId, newDir, jStr("reason", "fill_bar_stop") + jNum("price", fillStopPx) + jNum("entry", hitEntry) + jR("r", fillStopR)) : tFs, alert.freq_once_per_bar_close)
+
+if bias != biasPrev and barstate.isconfirmed and alertBiasInput and sigDir == 0
+    string tBias = (bias == 1 ? "▲ HTF BIAS BULLISH" : bias == -1 ? "▼ HTF BIAS BEARISH" : "HTF BIAS NEUTRAL") + " | " + tick + " | HTF: " + tfStr(htfTF) + " | Price: " + aPrice
+    alert(webhookInput ? jEvent("bias", 0, bias, jStr("htf", htfTF) + jNum("price", close)) : tBias, alert.freq_once_per_bar_close)
+if alertSweepInput and barstate.isconfirmed and sigDir == 0
+    if bStarted
+        string tSwL = "🧲 HTF SWEEP | " + tick + " | Sell-side @ " + fmtPrice(bull.level) + " | looking for long"
+        alert(webhookInput ? jEvent("sweep", 0, 1, jNum("level", bull.level)) : tSwL, alert.freq_once_per_bar_close)
+    if sStarted
+        string tSwS = "🧲 HTF SWEEP | " + tick + " | Buy-side @ " + fmtPrice(-bear.level) + " | looking for short"
+        alert(webhookInput ? jEvent("sweep", 0, -1, jNum("level", -bear.level)) : tSwS, alert.freq_once_per_bar_close)
