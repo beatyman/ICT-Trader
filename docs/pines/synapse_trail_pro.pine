@@ -1,0 +1,44 @@
+//@version=6
+// ══════════════════════════════════════════════════════════
+// SYNAPSE TRAIL PRO [WillyAlgoTrader]
+// ══════════════════════════════════════════════════════════
+// Author:  Willy | WillyAlgoTrader
+// Version: 1.4.0
+//
+// 参考基准（已吸收进 ICT-Trader 引擎 → src/ict_trader/synapse.py）
+//
+//   · SuperTrend 家族 ATR 棘轮轨迹（EMA ± ATR×mult，方向翻转 = 信号）
+//   · 市场状态分类：ADX(40%) + 震荡指数 Choppiness(35%) + R²线性度(25%)
+//     → Trending(≥60) / Choppy(<35) / Mixed
+//
+// 定位：辅助层「市场状态 / 波动结构」——独立于 ICT 主信号，做「该不该交易」过滤。
+//   Choppy 状态 → NO_TRADE（符合「宁缺毋滥」哲学）。
+// ══════════════════════════════════════════════════════════
+
+// ── 核心输入 ──
+atrLenInput = input.int(13, "ATR Length")
+baseMultInput = input.float(1.618, "Base ATR Multiplier")
+trailLenInput = input.int(21, "Trail EMA Length")
+useRatchetInput = input.bool(true, "Ratchet Trail (never loosens)")
+
+adxLenInput = input.int(14, "ADX Length")
+choppinessLenInput = input.int(14, "Choppiness Length")
+regimeLenInput = input.int(50, "R² Regression Length")
+
+// ── 核心计算 ──
+trailCenter = ta.ema(close, trailLenInput)
+rawUpper = trailCenter + atr * mult
+rawLower = trailCenter - atr * mult
+// 棘轮：多头时下轨只升不降；空头时上轨只降不升
+// 方向翻转 dir 由 -1→+1 = 买入，+1→-1 = 卖出
+
+// 市场状态：
+adxScore = min(adx / 50 * 100, 100)
+chopScore = 100 - choppiness_index
+r2Score = r_squared * 100
+regimeScore = adxScore * 0.40 + chopScore * 0.35 + r2Score * 0.25
+// isTrending = regimeScore >= 60; isChoppy = regimeScore < 35
+
+// ══════════════════════════════════════
+// (完整逻辑见原始脚本；核心已移植到 synapse.py)
+// ══════════════════════════════════════
