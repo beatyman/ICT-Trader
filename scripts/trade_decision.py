@@ -47,9 +47,15 @@ def save_state(path: Path, state: dict) -> None:
 
 
 def find_entry_setup(plan: dict, price: float, min_conf: int) -> dict | None:
-    """返回当前价已进入 entry_zone 的、status=valid 且置信度达标的首个 setup。"""
+    """返回当前价已进入 entry_zone 的、status=valid 且置信度达标的首个 setup。
+
+    额外硬门：risk_check 必须 PASS（结构化计划里 R:R < 2.0 的 setup 会被 BLOCK）。
+    """
     for s in plan.get("short_setups", []) + plan.get("long_setups", []):
         if s.get("status") != "valid":
+            continue
+        rc = s.get("risk_check") or {}
+        if rc.get("status") == "BLOCK":
             continue
         if s.get("confidence", 0) < min_conf:
             continue

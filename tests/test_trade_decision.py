@@ -31,6 +31,18 @@ def test_no_position_valid_setup_in_zone_is_open():
     assert "entry zone" in reason
 
 
+def test_no_position_risk_blocked_is_wait():
+    """risk_check BLOCK（R:R < 2.0）的 setup 不开仓，即使价格在入场区内。"""
+    s = {"id": "S1", "status": "valid", "confidence": 90,
+         "entry_zone": {"low": 2230.0, "high": 2240.0},
+         "sl": 2245.0, "tp": [{"level": 2200.0, "rr": 1.37}],
+         "risk_check": {"status": "BLOCK", "reasons": ["reward:risk 1.37 < min 2.0"]}}
+    plan = {"short_setups": [s], "long_setups": []}
+    st = {"position": None}
+    action, _ = decide(st, plan, price=2235.0, timestamp="t", min_conf=50)
+    assert action == "wait"
+
+
 def test_long_position_hold_then_tp_sl():
     st = {"position": {"direction": "long", "sl": 100.0, "tp1": 110.0}}
     # hold：100 < price < 110

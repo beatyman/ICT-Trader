@@ -332,6 +332,71 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
     except Exception as e:
         inp["notes"] = f"chanlun error: {type(e).__name__}: {e}"
 
+    # ---- 市场状态（regime：ADX + 震荡指数 + R²线性度）----
+    try:
+        from .synapse import regime_classify
+        reg = regime_classify(df_15m)
+        last = reg.iloc[-1]
+        inp["regime"] = {
+            "label": str(last["regime_label"]),
+            "score": round(float(last["regime_score"]), 1),
+            "adx": round(float(last["adx"]), 1),
+            "chop": round(float(last["chop"]), 1),
+            "r2": round(float(last["r2"]), 3),
+        }
+    except Exception as e:
+        inp["regime"] = None
+        inp["notes"] = f"{inp.get('notes') or ''} regime error: {type(e).__name__}: {e}".strip()
+
+    # ---- 关键价位层级（Camarilla / VWAP 带 / 主趋势线）----
+    try:
+        from .camarilla import camarilla_pivots, vwap_band
+        from .trendlines import detect_pivots, falling_resistance, rising_support
+        lv: dict = {"camarilla": None, "vwap": None, "vwap_band": None,
+                    "trendline_resistance": None, "trendline_support": None}
+        d_last = df_daily.iloc[-1]
+        lv["camarilla"] = camarilla_pivots(float(d_last["high"]), float(d_last["low"]),
+                                           float(d_last["close"]))
+        vb = vwap_band(df_15m)
+        lv["vwap"] = round(float(vb["vwap"].iloc[-1]), 4)   # 20-bar 滚动 VWAP（更贴近当前价）
+        lv["vwap_band"] = {"upper": round(float(vb["upper"].iloc[-1]), 4),
+                           "lower": round(float(vb["lower"].iloc[-1]), 4)}
+        hi = df_15m["high"].to_numpy(float)
+        lo = df_15m["low"].to_numpy(float)
+        hvals, hbars = detect_pivots(hi, left=5, right=5, kind="high")
+        lvals, lbars = detect_pivots(lo, left=5, right=5, kind="low")
+        last_bar = len(df_15m) - 1
+        fr = falling_resistance(hvals, hbars, min_touches=2, max_viol=2)
+        if fr is not None:
+            lv["trendline_resistance"] = round(fr.at(last_bar), 4)
+        rs = rising_support(lvals, lbars, min_touches=2, max_viol=2)
+        if rs is not None:
+            lv["trendline_support"] = round(rs.at(last_bar), 4)
+        inp["levels"] = lv
+    except Exception as e:
+        inp["levels"] = None
+        inp["notes"] = f"{inp.get('notes') or ''} levels error: {type(e).__name__}: {e}".strip()
+
+    # ---- 订单流（资金流方向）+ 动量（自适应 RSI + 背离）----
+    try:
+        from .orderflow import standardized_order_flow
+        from .adaptive_rsi import adaptive_rsi, detect_divergence
+        stdof = standardized_order_flow(df_15m)
+        inp["orderflow"] = {"std_of": round(float(stdof.iloc[-1]), 2)}
+        ar = adaptive_rsi(df_15m)
+        inp["momentum"] = {
+            "rsi_regime": int(ar["regime"].iloc[-1]),
+            "osc": round(float(ar["osc"].iloc[-1]), 1),
+            "recent_divergence": None,
+        }
+        divs = detect_divergence(df_15m, ar["osc"].to_numpy(), left=15, right=15)
+        recent = [d.kind for d in divs if d.bar >= len(df_15m) - 60]
+        inp["momentum"]["recent_divergence"] = recent[-1] if recent else None
+    except Exception as e:
+        inp["orderflow"] = None
+        inp["momentum"] = None
+        inp["notes"] = f"{inp.get('notes') or ''} orderflow/momentum error: {type(e).__name__}: {e}".strip()
+
     return inp
 
 
@@ -379,8 +444,13 @@ def _htf_bias(inp: dict) -> tuple[str, int, dict]:
     wp = _phase_sign(_get(inp, "wyckoff", "phase"))
     detail["wyckoff"] = wp
     score += wp
+    # 订单流（资金流方向，辅助票：买压/卖压）
+    stdof = _num(_get(inp, "orderflow", "std_of"))
+    of_sign = 1 if stdof is not None and stdof > 0.5 else (-1 if stdof is not None and stdof < -0.5 else 0)
+    detail["orderflow"] = of_sign
+    score += of_sign
 
-    max_score = 3 + sum(weights.values()) + 2 + 1  # ICT(3) + 缠论(4) + ichimoku(2) + wyckoff(1) = 10
+    max_score = 3 + sum(weights.values()) + 2 + 1 + 1  # ICT(3) + 缠论(4) + ichimoku(2) + wyckoff(1) + orderflow(1) = 11
     confluence = int(round(max(0.0, min(1.0, abs(score) / max_score if max_score else 0.0)) * 100))
 
     # 方向：ICT 主，ICT 无方向时用辅助票
@@ -393,16 +463,23 @@ def _htf_bias(inp: dict) -> tuple[str, int, dict]:
 
 
 def _liquidity_levels(inp: dict, direction: str) -> list[float]:
-    """TP 候选：流动性池 + 中枢边界 + 云层。"""
+    """TP 候选：流动性池 + 中枢边界 + 云层 + Camarilla / VWAP带 / 主趋势线。"""
     liq = _get(inp, "ict_trader_15m", "liquidity") or {}
+    lvl = _get(inp, "levels") or {}
+    cam = lvl.get("camarilla") or {}
+    vb = lvl.get("vwap_band") or {}
     if direction == "long":
         lv = [_num(x) for x in (liq.get("bsl") or [])]
         lv += [_get(inp, "chanlun_htf", "1h", "zhongshu", 0, "high")]
         lv += [_get(inp, "ichimoku", "senkou_a"), _get(inp, "ichimoku", "senkou_b")]
+        lv += [_num(cam.get("H3")), _num(cam.get("H4")), _num(vb.get("upper")),
+               _num(lvl.get("vwap")), _num(lvl.get("trendline_resistance"))]
     else:
         lv = [_num(x) for x in (liq.get("ssl") or [])]
         lv += [_get(inp, "chanlun_htf", "1h", "zhongshu", 0, "low")]
         lv += [_get(inp, "ichimoku", "senkou_a"), _get(inp, "ichimoku", "senkou_b")]
+        lv += [_num(cam.get("L3")), _num(cam.get("L4")), _num(vb.get("lower")),
+               _num(lvl.get("vwap")), _num(lvl.get("trendline_support"))]
     price = _num(inp.get("current_price"))
     out = [v for v in lv if v is not None]
     if direction == "long" and price is not None:
@@ -498,6 +575,15 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
             conf += 5
         elif rs < 10:
             conf -= 10   # 勉强收回 → 仅 31% 存活
+    # RSI 背离（独立于缠论背驰的第二确认）：方向一致加分，冲突减分
+    div = _get(inp, "momentum", "recent_divergence")
+    if div:
+        bull_div = div in ("bullish", "hidden_bullish")
+        bear_div = div in ("bearish", "hidden_bearish")
+        if (direction == "long" and bull_div) or (direction == "short" and bear_div):
+            conf += 5    # 背离确认方向
+        elif (direction == "long" and bear_div) or (direction == "short" and bull_div):
+            conf -= 10   # 背离冲突（动能衰竭反向）
     conf = max(0, min(100, conf))
 
     inv = (f"close below {round(sl, 4)} invalidates long" if direction == "long"
@@ -584,6 +670,12 @@ def structured_plan(inp: dict) -> dict:
     if bias == "neutral":
         no_trade.append("HTF bias neutral (no dominant direction)")
 
+    # regime 硬门：震荡市不做（宁缺毋滥）
+    regime_label = _get(inp, "regime", "label")
+    regime_score = _num(_get(inp, "regime", "score"))
+    if regime_label == "Choppy":
+        no_trade.append(f"regime Choppy (score {regime_score:.0f}/100) — skip for trend setup")
+
     # 15m 入场确认：扫单/OB/FVG 是否存在
     sweep = _get(inp, "ict_trader_15m", "liquidity", "sweep")
     has_ob = bool(_get(inp, "ict_trader_15m", "order_blocks"))
@@ -628,6 +720,10 @@ def structured_plan(inp: dict) -> dict:
             "analysis_bias": bias,
             "htf_confluence_score": confluence,
             "htf_confluence_detail": detail,   # 逐项得分（供 AI 决策）
+            "regime": inp.get("regime"),       # 市场状态（Trending/Mixed/Choppy）
+            "levels": inp.get("levels"),       # 关键价位层级（Camarilla/VWAP带/主趋势线）
+            "orderflow": inp.get("orderflow"), # 资金流（std_of 买压/卖压）
+            "momentum": inp.get("momentum"),   # 动量（自适应RSI + 最近背离）
             "summary": "; ".join(summary_parts),
         },
         "long_setups": long_setups,
