@@ -1,0 +1,36 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © EmreKb
+
+//@version=5
+indicator("Market Structure Break & Order Block", "MSB-OB", overlay=true, max_lines_count=500, max_bars_back=4900, max_boxes_count=500)
+
+// ══════════════════════════════════════
+// 参考基准（ZigZag 摆动 + MSB + OB/BB/MB，100% 已被引擎覆盖）
+//
+//   信号链：ZigZag 摆动 → 市场结构突破(MSB, fib factor 确认) → OB/BB/MB 框
+//
+//   已覆盖（引擎中更强版本）：
+//     ZigZag 摆动    → swing/pivot 检测（wyckoff.pivot_high/low + concepts Swing）
+//     MSB           → market_structure（BOS/CHoCH/MSS）
+//     OB            → concepts.py OrderBlock（+ mitigated）
+//     BB/MB         → breaker block（从 WillyAlgoTrader HTF Sweep CISD 吸收）
+//
+//   细微差异（如需要可移植）：
+//     · BB vs MB：结构突破后 OB 若在「破低更低」(l0<l1) 则为 BB（breaker block），
+//       若未破低(l0>l1) 则为 MB（mitigation block）——一个细微的 ICT 术语区分
+// ══════════════════════════════════════
+
+settings = "Settings"
+zigzag_len = input.int(9, "ZigZag Length", group=settings)
+fib_factor = input.float(0.33, "Fib Factor for breakout confirmation", 0, 1, 0.01, group=settings)
+
+// ── 核心 ──
+to_up = high >= ta.highest(zigzag_len)
+to_down = low <= ta.lowest(zigzag_len)
+// trend 摆动：ZigZag 高低点
+// market 结构突破：fib factor 确认 MSB
+// OB = 突破前最后一根反向蜡烛；BB/MB = 摆动点相关 OB
+
+// ══════════════════════════════════════
+// (完整逻辑见原始脚本；已全部覆盖在 ICT-Trader 引擎中)
+// ══════════════════════════════════════
