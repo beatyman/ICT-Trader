@@ -215,6 +215,205 @@ def _build_auxiliary(inp: dict, df_15m, df_daily) -> None:
         _note("orderflow/momentum", e)
 
 
+def _build_ict(inp: dict, df_15m, df_daily, market: str) -> None:
+    """特征层（纯函数）：ICT 15m（analyze + audit + 结构/流动性/OB/FVG/PD/PO3）。"""
+    ict = inp["ict_trader_15m"]
+    md = inp["metadata"]
+    if df_15m is None or len(df_15m) < 30:
+        return
+    try:
+        from .concepts import analyze, ICTConfig
+        from .po3 import detect_po3
+        res = analyze(df_15m, ICTConfig(mode="historical", show_sessions=False,
+                                        show_htf_cisd=False, cisd_all=True, cisd_min_grade=0))
+        from .schema import assign_result_signal_ids
+        assign_result_signal_ids(res)
+
+        aud = {}
+        try:
+            from .rules import audit
+            aud = audit(df_15m, daily=df_daily, market=market, res=res)
+        except Exception:
+            pass
+        rules = aud.get("rules", []) if isinstance(aud, dict) else []
+
+        def _rule(rid):
+            for r in rules:
+                if r.get("rule_id") == rid:
+                    return r
+            return None
+
+        l5_03 = _rule("L5-03")
+        if l5_03:
+            v = l5_03.get("value")
+            if isinstance(v, dict):
+                d = v.get("direction")
+                ict["htf_bias"] = {"short": "bearish", "long": "bullish"}.get(d, d)
+            ict["htf_aligned"] = l5_03.get("status") == "PASS"
+
+        evts = getattr(res, "events", [])
+        if evts:
+            last = evts[-1]
+            ict["market_structure"] = last.kind if hasattr(last, "kind") else None
+            if hasattr(last, "direction"):
+                ict["structure_direction"] = last.direction
+
+        liq = ict["liquidity"]
+        bsl = sorted(round(k.price, 4) for k in res.key_levels
+                     if getattr(k, "name", "") in ("BSL", "EQH"))
+        ssl = sorted(round(k.price, 4) for k in res.key_levels
+                     if getattr(k, "name", "") in ("SSL", "EQL"))
+        liq["bsl"] = bsl
+        liq["ssl"] = ssl
+        liq["sweep"] = "ssl" if any(getattr(s, "direction", "") == "bull" for s in res.sweeps) else \
+                       "bsl" if any(getattr(s, "direction", "") == "bear" for s in res.sweeps) else None
+        price = float(df_15m["close"].iloc[-1])
+        above = [p for p in bsl if p > price]
+        below = [p for p in ssl if p < price]
+        liq["nearest_bsl"] = min(above) if above else None
+        liq["nearest_ssl"] = max(below) if below else None
+        from .sweeps import nearest_key_target
+        unswept = [k for k in res.key_levels if not getattr(k, "swept", False)]
+        liq["dol"] = round(nearest_key_target(unswept, price, False), 4) if unswept else None
+
+        try:
+            from .fractal import detect_fractal_reclaim, reclaim_stats
+            frac_setups = detect_fractal_reclaim(df_15m, tail=500)
+            if frac_setups:
+                latest = frac_setups[-1]
+                liq["reclaim_strength"] = latest["rs"]
+                liq["reclaim_direction"] = latest["direction"]
+            md["fractal"] = reclaim_stats(df_15m, tail=500)
+        except Exception:
+            pass
+
+        ict["order_blocks"] = [{"type": "bullish" if ob.direction == "bull" else "bearish",
+                                "low": round(ob.bottom, 4), "high": round(ob.top, 4),
+                                "mitigated": bool(ob.mitigated), "signal_id": ob.signal_id}
+                               for ob in getattr(res, "order_blocks", [])
+                               if not getattr(ob, "mitigated", True)][:5]
+        ict["fvg"] = [{"type": "bullish" if f.direction == "bull" else "bearish",
+                       "low": round(f.bottom, 4), "high": round(f.top, 4),
+                       "filled": bool(getattr(f, "mitigated", False)), "signal_id": f.signal_id}
+                      for f in getattr(res, "fvgs", [])
+                      if not getattr(f, "mitigated", True)][:5]
+
+        l5_06 = _rule("L5-06")
+        if l5_06:
+            v = l5_06.get("value")
+            if isinstance(v, dict):
+                ict["premium_discount"] = v.get("zone")
+
+        g = aud.get("grade", {}) if isinstance(aud, dict) else {}
+        ict["grade"] = {"grade": g.get("grade"), "hits": g.get("hits", 0),
+                        "enabled": g.get("enabled", 0)}
+
+        sc = md["structure_context"]
+        kinds = [getattr(e, "kind", "") for e in evts]
+        sc["bos_count"] = kinds.count("BOS")
+        sc["mss_count"] = kinds.count("MSS")
+        sc["choch_count"] = sum(1 for k in kinds if k not in ("BOS", "MSS"))
+        sc["ob_count"] = len(getattr(res, "order_blocks", []))
+        sc["fvg_count"] = len(getattr(res, "fvgs", []))
+        sc["sweep_count"] = len(getattr(res, "sweeps", []))
+        sc["key_level_count"] = len(getattr(res, "key_levels", []))
+
+        win = df_15m[df_15m["date"] >= str(df_15m["date"].iloc[-1])[:10]].reset_index(drop=True)
+        if len(win) >= 20:
+            po3, _ = detect_po3(win, accumulate_bars=20)
+            ict["po3_phase"] = {"ACCUMULATING": "accumulation", "MANIPULATED": "manipulation",
+                                "DISTRIBUTING": "distribution", "INVALID": None}.get(
+                                    getattr(po3, "state", ""), None)
+            ict["po3_range"] = {"high": round(float(po3.range_high), 4),
+                                "low": round(float(po3.range_low), 4)}
+            if po3.sweep_direction in ("bull", "bear") and po3.manipulation_extreme is not None:
+                from .amd import po3_fib_target
+                try:
+                    tgt, _, _ = po3_fib_target(float(po3.range_high), float(po3.range_low),
+                                               float(po3.manipulation_extreme),
+                                               po3.sweep_direction, fib=1.5)
+                    ict["po3_fib_target"] = round(tgt, 4)
+                except Exception:
+                    ict["po3_fib_target"] = None
+    except Exception:
+        pass
+
+
+def _build_wyckoff(inp: dict, df_15m) -> None:
+    """特征层（纯函数）：Wyckoff 阶段 + effort ratio + spring 质量分。"""
+    wy = inp["wyckoff"]
+    if df_15m is None or len(df_15m) < 30:
+        return
+    try:
+        from .wyckoff import detect_wyckoff, atr
+        from .wyckoff_quality import effort_ratio, spring_score
+        st, _ = detect_wyckoff(df_15m)
+        if st.direction != 0:
+            wy["phase"] = "accumulation" if st.direction == 1 else "distribution"
+            wy["range"] = {"low": round(float(st.range_bottom), 4),
+                           "high": round(float(st.range_top), 4)}
+        eff = effort_ratio(df_15m)
+        wy["effort_ratio"] = round(float(eff.iloc[-1]), 2)
+        if st.spring_confirmed and st.spring_bar >= 0:
+            try:
+                a = float(atr(df_15m, 14).iloc[-1])
+                depth_atr = abs(st.climax_side - st.spring_extreme) / max(a, 1e-9)
+                spring_eff = float(eff.iloc[st.spring_bar])
+                climax_eff = float(eff.iloc[st.climax_bar]) if st.climax_bar >= 0 else 1.0
+                bars_since = max(0, len(df_15m) - 1 - st.spring_bar)
+                wy["spring_quality"] = spring_score(depth_atr, spring_eff, climax_eff, bars_since)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _build_ichimoku(inp: dict, df_daily) -> None:
+    """特征层（纯函数）：Ichimoku 日线云层 + 位置 + TK 交叉。"""
+    ichi = inp["ichimoku"]
+    if df_daily is None or len(df_daily) < 52:
+        return
+    try:
+        import pandas as pd
+        from ichimoku.indicators import ichimoku as ichi_ind
+        from ichimoku.signals import signals as ichi_sig
+        d = df_daily.copy()
+        d.index = pd.to_datetime(d["date"])
+        ind = ichi_ind(d, 9, 26, 52, "PLATFORM")
+        ichi_sig(d, ind, 26)
+        ichi["tenkan"] = round(float(ind["tenkan"].iloc[-1]), 4)
+        ichi["kijun"] = round(float(ind["kijun"].iloc[-1]), 4)
+        ichi["senkou_a"] = round(float(ind["leading_a"].iloc[-1]), 4)
+        ichi["senkou_b"] = round(float(ind["leading_b"].iloc[-1]), 4)
+        close = float(d["close"].iloc[-1])
+        top = max(ichi["senkou_a"], ichi["senkou_b"])
+        bottom = min(ichi["senkou_a"], ichi["senkou_b"])
+        ichi["cloud_bias"] = "bullish" if ichi["senkou_a"] > ichi["senkou_b"] else "bearish"
+        ichi["price_vs_cloud"] = "above" if close > top else "below" if close < bottom else "inside"
+        ichi["tk_cross"] = "bullish" if ichi["tenkan"] > ichi["kijun"] else "bearish"
+    except Exception:
+        pass
+
+
+def _build_chanlun(inp: dict, df_4h, df_1h, df_daily, symbol: str) -> None:
+    """特征层（纯函数）：缠论 1d/4h/1h 趋势 + 中枢 + 买卖点 + 背驰。"""
+    ch = inp["chanlun_htf"]
+    try:
+        from .chanlun import analyze_chanlun
+        for tf, df, freq in (("1d", df_daily, "1d"), ("4h", df_4h, "4h"), ("1h", df_1h, "1h")):
+            if df is None or len(df) < 30:
+                continue
+            r = analyze_chanlun(df, symbol, freq)
+            cl = ch[tf]
+            cl["trend"] = r.last_bi_direction if r.last_bi_direction in ("up", "down") else "range"
+            if r.last_zs_zd is not None and r.last_zs_zg is not None:
+                cl["zhongshu"] = [{"low": round(r.last_zs_zd, 4), "high": round(r.last_zs_zg, 4)}]
+            cl["buy_sell_point"] = r.bsp_type or None
+            cl["beichi"] = bool(r.bsp_type and any(t in r.bsp_type for t in ("1买", "1卖")))
+    except Exception as e:
+        inp["notes"] = f"{inp.get('notes') or ''} chanlun error: {type(e).__name__}: {e}".strip()
+
+
 def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "crypto",
                           df_1h=None) -> dict:
     """从 OHLCV DataFrame + 引擎算出「输入 JSON」（ICT/Wyckoff/Ichimoku/缠论特征）。"""
@@ -262,212 +461,14 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
         "notes": None,
     }
 
-    # ---- metadata：数据可得性 + 上下文（数据层，纯函数）----
+    # ---- 数据层：多周期可得性 + 上下文（纯函数）----
     inp["metadata"] = _build_metadata(df_15m, df_4h, df_1h, df_daily)
-    md = inp["metadata"]
 
-    # ---- ICT 15m ----
-    if df_15m is not None and len(df_15m) >= 30:
-        try:
-            from .concepts import analyze, ICTConfig
-            from .po3 import detect_po3
-            res = analyze(df_15m, ICTConfig(mode="historical", show_sessions=False,
-                                            show_htf_cisd=False, cisd_all=True, cisd_min_grade=0))
-            # 给 ICTResult 对象打 signal_id（与渲染层共用同一 id，实现图文一致）
-            from .schema import assign_result_signal_ids
-            assign_result_signal_ids(res)
-            ict = inp["ict_trader_15m"]
-            # ---- 用 audit() 取完整 ICT 决策数据（L5-03 方向 / L5-06 溢价折价 / Grade）----
-            aud = {}
-            try:
-                from .rules import audit
-                aud = audit(df_15m, daily=df_daily, market=market, res=res)
-            except Exception:
-                pass
-            rules = aud.get("rules", []) if isinstance(aud, dict) else []
-
-            def _rule(rid):
-                for r in rules:
-                    if r.get("rule_id") == rid:
-                        return r
-                return None
-
-            # HTF 偏向（L5-03 方向 + 是否 PASS）
-            l5_03 = _rule("L5-03")
-            if l5_03:
-                v = l5_03.get("value")
-                if isinstance(v, dict):
-                    d = v.get("direction")
-                    # 归一化 short/long -> bearish/bullish
-                    ict["htf_bias"] = {"short": "bearish", "long": "bullish"}.get(d, d)
-                ict["htf_aligned"] = l5_03.get("status") == "PASS"
-
-            # 结构：最近一个 BOS/CHoCH/MSS + 方向（ICTResult.events）
-            evts = getattr(res, "events", [])
-            if evts:
-                last = evts[-1]
-                ict["market_structure"] = last.kind if hasattr(last, "kind") else None
-                if hasattr(last, "direction"):
-                    ict["structure_direction"] = last.direction
-
-            # 流动性：BSL/SSL + sweep + 最近位 + DOL
-            liq = ict["liquidity"]
-            bsl = sorted(round(k.price, 4) for k in res.key_levels
-                         if getattr(k, "name", "") in ("BSL", "EQH"))
-            ssl = sorted(round(k.price, 4) for k in res.key_levels
-                         if getattr(k, "name", "") in ("SSL", "EQL"))
-            liq["bsl"] = bsl
-            liq["ssl"] = ssl
-            liq["sweep"] = "ssl" if any(getattr(s, "direction", "") == "bull" for s in res.sweeps) else \
-                           "bsl" if any(getattr(s, "direction", "") == "bear" for s in res.sweeps) else None
-            price = float(df_15m["close"].iloc[-1])
-            above = [p for p in bsl if p > price]
-            below = [p for p in ssl if p < price]
-            liq["nearest_bsl"] = min(above) if above else None
-            liq["nearest_ssl"] = max(below) if below else None
-            # DOL：最近未扫流动性目标（空→下方 ssl，多→上方 bsl）
-            from .sweeps import nearest_key_target
-            unswept = [k for k in res.key_levels if not getattr(k, "swept", False)]
-            liq["dol"] = round(nearest_key_target(unswept, price, False), 4) if unswept else None
-
-            # 分形模型 C1-C4：Reclaim Strength（扫单回抽强度）+ 生存率
-            try:
-                from .fractal import detect_fractal_reclaim, reclaim_stats
-                frac_setups = detect_fractal_reclaim(df_15m, tail=500)
-                if frac_setups:
-                    latest = frac_setups[-1]
-                    liq["reclaim_strength"] = latest["rs"]
-                    liq["reclaim_direction"] = latest["direction"]
-                md["fractal"] = reclaim_stats(df_15m, tail=500)
-            except Exception:
-                pass
-
-            # OB + FVG：只留 active（未 mitigated/filled），携带 signal_id（图文一致）
-            ict["order_blocks"] = [{"type": "bullish" if ob.direction == "bull" else "bearish",
-                                    "low": round(ob.bottom, 4), "high": round(ob.top, 4),
-                                    "mitigated": bool(ob.mitigated),
-                                    "signal_id": ob.signal_id}
-                                   for ob in getattr(res, "order_blocks", [])
-                                   if not getattr(ob, "mitigated", True)][:5]
-            ict["fvg"] = [{"type": "bullish" if f.direction == "bull" else "bearish",
-                           "low": round(f.bottom, 4), "high": round(f.top, 4),
-                           "filled": bool(getattr(f, "mitigated", False)),
-                           "signal_id": f.signal_id}
-                          for f in getattr(res, "fvgs", [])
-                          if not getattr(f, "mitigated", True)][:5]
-
-            # 溢价/折价（L5-06 zone）
-            l5_06 = _rule("L5-06")
-            if l5_06:
-                v = l5_06.get("value")
-                if isinstance(v, dict):
-                    ict["premium_discount"] = v.get("zone")
-
-            # Grade
-            g = aud.get("grade", {}) if isinstance(aud, dict) else {}
-            ict["grade"] = {"grade": g.get("grade"), "hits": g.get("hits", 0),
-                            "enabled": g.get("enabled", 0)}
-
-            # 结构上下文（事件计数）
-            sc = md["structure_context"]
-            kinds = [getattr(e, "kind", "") for e in evts]
-            sc["bos_count"] = kinds.count("BOS")
-            sc["mss_count"] = kinds.count("MSS")
-            sc["choch_count"] = sum(1 for k in kinds if k not in ("BOS", "MSS"))
-            sc["ob_count"] = len(getattr(res, "order_blocks", []))
-            sc["fvg_count"] = len(getattr(res, "fvgs", []))
-            sc["sweep_count"] = len(getattr(res, "sweeps", []))
-            sc["key_level_count"] = len(getattr(res, "key_levels", []))
-
-            # PO3（阶段 + 区间）；当日 bar 数须 ≥ accumulate_bars，避免「半成品日」薄数据前视
-            win = df_15m[df_15m["date"] >= str(df_15m["date"].iloc[-1])[:10]].reset_index(drop=True)
-            if len(win) >= 20:
-                po3, _ = detect_po3(win, accumulate_bars=20)
-                ict["po3_phase"] = {"ACCUMULATING": "accumulation", "MANIPULATED": "manipulation",
-                                    "DISTRIBUTING": "distribution", "INVALID": None}.get(
-                                        getattr(po3, "state", ""), None)
-                ict["po3_range"] = {"high": round(float(po3.range_high), 4),
-                                    "low": round(float(po3.range_low), 4)}
-                # AMD fib 外延目标（派发目标，锚定操纵腿）
-                if po3.sweep_direction in ("bull", "bear") and po3.manipulation_extreme is not None:
-                    from .amd import po3_fib_target
-                    try:
-                        tgt, _, _ = po3_fib_target(float(po3.range_high), float(po3.range_low),
-                                                   float(po3.manipulation_extreme),
-                                                   po3.sweep_direction, fib=1.5)
-                        ict["po3_fib_target"] = round(tgt, 4)
-                    except Exception:
-                        ict["po3_fib_target"] = None
-        except Exception:
-            pass
-
-    # ---- Wyckoff ----
-    if df_15m is not None and len(df_15m) >= 30:
-        try:
-            from .wyckoff import detect_wyckoff, atr
-            from .wyckoff_quality import effort_ratio, spring_score
-            st, _ = detect_wyckoff(df_15m)
-            if st.direction != 0:
-                inp["wyckoff"]["phase"] = "accumulation" if st.direction == 1 else "distribution"
-                inp["wyckoff"]["range"] = {"low": round(float(st.range_bottom), 4),
-                                           "high": round(float(st.range_top), 4)}
-            # 量价 effort ratio（努力与结果）
-            eff = effort_ratio(df_15m)
-            inp["wyckoff"]["effort_ratio"] = round(float(eff.iloc[-1]), 2)
-            # Spring/UTAD 质量分（深度 + 努力 + 速度）
-            if st.spring_confirmed and st.spring_bar >= 0:
-                try:
-                    a = float(atr(df_15m, 14).iloc[-1])
-                    depth_atr = abs(st.climax_side - st.spring_extreme) / max(a, 1e-9)
-                    spring_eff = float(eff.iloc[st.spring_bar])
-                    climax_eff = float(eff.iloc[st.climax_bar]) if st.climax_bar >= 0 else 1.0
-                    bars_since = max(0, len(df_15m) - 1 - st.spring_bar)
-                    inp["wyckoff"]["spring_quality"] = spring_score(depth_atr, spring_eff,
-                                                                   climax_eff, bars_since)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    # ---- Ichimoku（日线） ----
-    if df_daily is not None and len(df_daily) >= 52:
-        try:
-            from ichimoku.indicators import ichimoku as ichi_ind
-            from ichimoku.signals import signals as ichi_sig
-            d = df_daily.copy()
-            d.index = pd.to_datetime(d["date"])
-            ind = ichi_ind(d, 9, 26, 52, "PLATFORM")
-            sig = ichi_sig(d, ind, 26)
-            ichi = inp["ichimoku"]
-            ichi["tenkan"] = round(float(ind["tenkan"].iloc[-1]), 4)
-            ichi["kijun"] = round(float(ind["kijun"].iloc[-1]), 4)
-            ichi["senkou_a"] = round(float(ind["leading_a"].iloc[-1]), 4)
-            ichi["senkou_b"] = round(float(ind["leading_b"].iloc[-1]), 4)
-            close = float(d["close"].iloc[-1])
-            top = max(ichi["senkou_a"], ichi["senkou_b"])
-            bottom = min(ichi["senkou_a"], ichi["senkou_b"])
-            ichi["cloud_bias"] = "bullish" if ichi["senkou_a"] > ichi["senkou_b"] else "bearish"
-            ichi["price_vs_cloud"] = "above" if close > top else "below" if close < bottom else "inside"
-            ichi["tk_cross"] = "bullish" if ichi["tenkan"] > ichi["kijun"] else "bearish"
-        except Exception:
-            pass
-
-    # ---- 缠论 1d/4h/1h ----
-    try:
-        from .chanlun import analyze_chanlun
-        for tf, df, freq in (("1d", df_daily, "1d"), ("4h", df_4h, "4h"), ("1h", df_1h, "1h")):
-            if df is None or len(df) < 30:
-                continue
-            r = analyze_chanlun(df, symbol, freq)
-            cl = inp["chanlun_htf"][tf]
-            cl["trend"] = r.last_bi_direction if r.last_bi_direction in ("up", "down") else "range"
-            if r.last_zs_zd is not None and r.last_zs_zg is not None:
-                cl["zhongshu"] = [{"low": round(r.last_zs_zd, 4), "high": round(r.last_zs_zg, 4)}]
-            cl["buy_sell_point"] = r.bsp_type or None
-            # 背驰 = 一买/一卖（chan.py 无 divergence 字段，从买卖点派生）
-            cl["beichi"] = bool(r.bsp_type and any(t in r.bsp_type for t in ("1买", "1卖")))
-    except Exception as e:
-        inp["notes"] = f"chanlun error: {type(e).__name__}: {e}"
+    # ---- 核心信号层（ICT / Wyckoff / Ichimoku / Chanlun，纯函数）----
+    _build_ict(inp, df_15m, df_daily, market)
+    _build_wyckoff(inp, df_15m)
+    _build_ichimoku(inp, df_daily)
+    _build_chanlun(inp, df_4h, df_1h, df_daily, symbol)
 
     # ---- 辅助特征层（regime / levels / profile_shape / patterns / orderflow / momentum）----
     _build_auxiliary(inp, df_15m, df_daily)
