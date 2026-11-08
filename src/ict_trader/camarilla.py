@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-__all__ = ["camarilla_pivots", "vwap"]
+__all__ = ["camarilla_pivots", "vwap", "vwap_band"]
 
 
 def camarilla_pivots(high: float, low: float, close: float) -> dict[str, float]:
@@ -52,3 +52,25 @@ def vwap(df: pd.DataFrame) -> pd.Series:
     cum_v = vol.cumsum()
     out = cum_pv / cum_v
     return out.fillna(typical)
+
+
+def vwap_band(df: pd.DataFrame, eq_len: int = 20, dev_len: int = 100,
+              mult: float = 4.0) -> pd.DataFrame:
+    """VWAP 偏差带（Zeiierman VWAP Range 的核心几何）。
+
+    width = std(price - eqVWAP)×mult（成交量加权），上/下带 = eqVWAP ± width。
+    返回 upper / vwap / lower（价值区间）。
+    """
+    typical = (df["high"] + df["low"] + df["close"]) / 3.0
+    vol = df["volume"].astype(float).replace(0, 1.0)
+    pv = typical * vol
+    eq_vw = pv.rolling(eq_len, min_periods=1).sum() / vol.rolling(eq_len, min_periods=1).sum()
+    res = typical - eq_vw
+    var = (vol * res * res).rolling(dev_len, min_periods=2).sum() / vol.rolling(dev_len, min_periods=2).sum()
+    dev = np.sqrt(var.clip(lower=0.0))
+    width = dev * mult
+    return pd.DataFrame({
+        "upper": eq_vw + width,
+        "vwap": eq_vw,
+        "lower": eq_vw - width,
+    }, index=df.index)

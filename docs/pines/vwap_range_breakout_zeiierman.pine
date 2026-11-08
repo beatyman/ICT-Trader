@@ -1,0 +1,33 @@
+//@version=6
+// (c) Zeiierman
+indicator("VWAP Range Breakout (Zeiierman)", overlay=true, max_labels_count=500)
+
+// ══════════════════════════════════════════════════════════
+// 参考基准（VWAP 锚定水平区间 + 突破，第三策略族，非 ICT）
+//
+//   已吸收（辅助「点位判定」→ src/ict_trader/camarilla.py）：
+//     · vwap_band：VWAP 偏差带（width = std(price - eqVWAP)×mult，
+//       上/下带 = eqVWAP ± width）——价值区间
+//
+//   已覆盖（引擎已有）：
+//     · VWAP          → camarilla.py vwap（累计 VWAP）
+//     · 波动率        → synapse.py（ATR/ADX/震荡/R²）
+//     · 区间突破      → patterns.py / ICT range（BOS/CHoCH）
+//
+//   未吸收（不同策略族，边际价值低）：
+//     · Smart Trend（波动率自适应 VWAP 结构）
+//     · Value Transfer（成交量耦合 VWAP 迁移记忆）
+//     · 完整突破交易引擎（full-candle breakout → 新区间）
+// ══════════════════════════════════════════════════════════
+
+// ── 核心几何 ──
+baseVW = weighted(hlc3, wt, seedLen)          // 区间锚定 VWAP
+eqVW = weighted(hlc3, wt, eqLen)              // 均衡参考
+res = hlc3 - eqVW
+dev = sqrt(sum(wt*res^2, devLen) / sum(wt, devLen))   // 价格相对 VWAP 的加权偏差
+width = dev * chMult                           // 区间半宽
+hi = baseVW + width; lo = baseVW - width       // 上下带
+
+// ══════════════════════════════════════════════════════════
+// (完整逻辑见原始脚本；核心偏差带已移植到 camarilla.py vwap_band)
+// ══════════════════════════════════════════════════════════

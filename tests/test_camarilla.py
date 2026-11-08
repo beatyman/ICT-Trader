@@ -9,7 +9,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ict_trader.camarilla import camarilla_pivots, vwap  # noqa: E402
+from ict_trader.camarilla import camarilla_pivots, vwap, vwap_band  # noqa: E402
 
 
 def test_camarilla_level_ordering():
@@ -53,3 +53,16 @@ def test_vwap_falls_back_without_volume():
                        "volume": np.zeros(n)})
     v = vwap(df)
     assert v.isna().sum() == 0
+
+
+def test_vwap_band_encloses_vwap():
+    n = 200
+    rng = np.random.RandomState(0)
+    close = 100 + np.cumsum(rng.normal(0, 1, n))
+    df = pd.DataFrame({"high": close + 2, "low": close - 2, "close": close,
+                       "volume": rng.uniform(50, 200, n)})
+    b = vwap_band(df)
+    valid = b.dropna()
+    assert len(valid) > 0
+    assert (valid["upper"] >= valid["vwap"]).all()
+    assert (valid["vwap"] >= valid["lower"]).all()
