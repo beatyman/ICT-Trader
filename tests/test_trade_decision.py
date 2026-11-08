@@ -36,10 +36,10 @@ def test_long_position_hold_then_tp_sl():
     # hold：100 < price < 110
     a, _ = decide(st, _plan(), price=105.0, timestamp="t", min_conf=50)
     assert a == "hold"
-    # take profit
+    # 到 TP1 → be（移损到成本）
     a, _ = decide(st, _plan(), price=111.0, timestamp="t", min_conf=50)
-    assert a == "take_profit"
-    # stop loss
+    assert a == "be"
+    # stop loss：跌破止损（未保本时）
     a, _ = decide(st, _plan(), price=99.0, timestamp="t", min_conf=50)
     assert a == "stop_loss"
 
@@ -49,9 +49,49 @@ def test_short_position_hold_then_tp_sl():
     # hold：100 < price < 110
     a, _ = decide(st, _plan(), price=105.0, timestamp="t", min_conf=50)
     assert a == "hold"
-    # take profit：price <= 100
+    # 到 TP1 → be（移损到成本）
     a, _ = decide(st, _plan(), price=99.0, timestamp="t", min_conf=50)
-    assert a == "take_profit"
-    # stop loss：price >= 110
+    assert a == "be"
+    # stop loss：涨破止损（未保本时）
     a, _ = decide(st, _plan(), price=111.0, timestamp="t", min_conf=50)
     assert a == "stop_loss"
+
+
+def test_be_after_tp1_moves_stop_to_entry():
+    """TP1 到 → be（移损到成本）；之后回到成本 → take_profit(0R)。"""
+    st = {"position": {"direction": "long", "entry": 100.0, "sl": 95.0, "tp1": 110.0, "be": False}}
+    # 未到 TP1 → hold
+    a, _ = decide(st, _plan(), price=105.0, timestamp="t", min_conf=50)
+    assert a == "hold"
+    # 到 TP1 → be（移损到成本）
+    a, _ = decide(st, _plan(), price=111.0, timestamp="t", min_conf=50)
+    assert a == "be"
+    # 手动把状态改成 be=True（模拟 main() 的移损）
+    st["position"]["be"] = True
+    st["position"]["sl"] = 100.0
+    # 回到成本 → take_profit（0R）
+    a, reason = decide(st, _plan(), price=99.0, timestamp="t", min_conf=50)
+    assert a == "take_profit"
+    assert "BE" in reason or "0R" in reason
+
+
+def test_position_with_null_tp1_does_not_crash():
+    """回归：open 时若无 TP，state 里 tp1 为 None，早期版本 float(None) 会抛 TypeError。"""
+    st = {"position": {"direction": "long", "sl": 100.0, "tp1": None}}
+    a, _ = decide(st, _plan(), price=105.0, timestamp="t", min_conf=50)
+    assert a == "hold"
+
+
+def test_low_confidence_valid_setup_is_wait():
+    st = {"position": None}
+    a, _ = decide(st, _plan(valid=True, conf=20), price=2235.0, timestamp="t", min_conf=50)
+    assert a == "wait"
+
+
+def test_find_entry_setup_respects_confidence_and_zone():
+    from trade_decision import find_entry_setup
+    plan = _plan(valid=True, conf=60)
+    assert find_entry_setup(plan, 2235.0, 50)["id"] == "S1"
+    assert find_entry_setup(plan, 2235.0, 61) is None      # 置信度不足
+    assert find_entry_setup(plan, 2225.0, 50) is None      # 不在入场区
+    assert find_entry_setup({"short_setups": []}, 2235.0, 50) is None

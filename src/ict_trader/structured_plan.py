@@ -533,6 +533,25 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
                    else f"price dips into {round(entry_low, 4)}-{round(entry_high, 4)} (buy the dip)")
     else:
         trigger = f"close {'above' if direction == 'long' else 'below'} {round(entry_high if direction == 'long' else entry_low, 4)}"
+
+    # Setup 汇合评分 0-100（WillyAlgoTrader 权重：OB/FVG/扫单/溢价折价/偏向/回抽强度）
+    pd = _get(inp, "ict_trader_15m", "premium_discount")
+    pd_align = (pd == "discount" and direction == "long") or (pd == "premium" and direction == "short")
+    setup_score = 0
+    if _get(inp, "ict_trader_15m", "order_blocks"):
+        setup_score += 15                       # active OB
+    if _get(inp, "ict_trader_15m", "fvg"):
+        setup_score += 15                       # active FVG
+    if _get(inp, "ict_trader_15m", "liquidity", "sweep") is not None:
+        setup_score += 10                       # 扫单
+    if pd_align:
+        setup_score += 10                       # 溢价/折价对齐
+    if bias == direction:
+        setup_score += 10                       # HTF 偏向对齐
+    if rs is not None and rs_aligns and rs >= 100:
+        setup_score += 10                       # 强回抽
+    setup_score = max(0, min(100, setup_score))
+
     return {
         "id": f"{'L' if direction == 'long' else 'S'}{idx}",
         "status": status,
@@ -543,6 +562,7 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
         "sl": round(sl, 4),
         "tp": tps,
         "confidence": conf,
+        "setup_score": setup_score,
         "invalidation": inv,
         "rationale": rationale,
         "risk_note": "conflict: HTF vs LTF, reduced confidence" if status == "conditional"

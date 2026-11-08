@@ -65,22 +65,38 @@ def find_entry_setup(plan: dict, price: float, min_conf: int) -> dict | None:
 
 def decide(state: dict, plan: dict, price: float, timestamp: str,
            min_conf: int) -> tuple[str, str]:
-    """返回 (action, reason)。action ∈ open/hold/take_profit/stop_loss/wait。"""
+    """返回 (action, reason)。action ∈ open/hold/be/take_profit/stop_loss/wait。
+
+    仓位管理（WillyAlgoTrader 的 BE-after-TP1）：
+      未保本：先看 SL（止损），再看 TP1 → 触发「be」（把止损移到成本）
+      已保本：价格回到成本 → take_profit（0R 平仓，算赢）；否则 hold（无风险持有）
+    """
     pos = state.get("position")
     if pos:
         direction = pos["direction"]
         sl = float(pos["sl"])
         tp1 = float(pos.get("tp1") or 0)
+        entry = float(pos.get("entry") or 0)
+        be = bool(pos.get("be", False))
+
+        if be:
+            # 已保本：止损在成本，价格回到成本 → 0R 平仓（赢）
+            if direction == "long" and price <= entry:
+                return "take_profit", f"BE stop at entry {entry} (0R, win)"
+            if direction == "short" and price >= entry:
+                return "take_profit", f"BE stop at entry {entry} (0R, win)"
+            return "hold", f"BE active, risk-free holding"
+
         if direction == "long":
             if price <= sl:
                 return "stop_loss", f"price {price} <= SL {sl}"
             if tp1 and price >= tp1:
-                return "take_profit", f"price {price} >= TP1 {tp1}"
+                return "be", f"TP1 {tp1} hit, move stop to entry {entry} (break-even)"
         else:  # short
             if price >= sl:
                 return "stop_loss", f"price {price} >= SL {sl}"
             if tp1 and price <= tp1:
-                return "take_profit", f"price {price} <= TP1 {tp1}"
+                return "be", f"TP1 {tp1} hit, move stop to entry {entry} (break-even)"
         return "hold", f"price {price} within SL {sl} / TP1 {tp1}, hold"
 
     # 无仓位 → 找 valid 且置信度足够的 setup，且当前价已进入入场区
@@ -142,14 +158,20 @@ def main() -> None:
     action, reason = decide(state, plan, price, timestamp, args.min_confidence)
 
     # 更新仓位状态
-    if action in ("stop_loss", "take_profit"):
+    if action == "be":
+        # TP1 已到 → 止损移到成本（保本），仓位继续持有
+        pos = state.get("position") or {}
+        pos["be"] = True
+        pos["sl"] = pos.get("entry")
+        state["position"] = pos
+    elif action in ("stop_loss", "take_profit"):
         pos = state.get("position") or {}
         closed = {
             "symbol": args.symbol,
             "direction": pos.get("direction"),
             "entry": pos.get("entry"),
             "exit": round(price, 4),
-            "result": "tp" if action == "take_profit" else "sl",
+            "result": "tp" if action == "take_profit" else ("be" if pos.get("be") else "sl"),
             "closed_at": timestamp,
         }
         state.setdefault("history", []).append(closed)
