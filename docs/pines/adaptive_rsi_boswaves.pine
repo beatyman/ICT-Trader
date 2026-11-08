@@ -1,0 +1,42 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © BOSWaves
+
+//@version=6
+import TradingView/ta/11 as ta
+
+indicator("Adaptive RSI [BOSWaves]", overlay=false)
+
+// ══════════════════════════════════════
+// 参考基准（已吸收进 ICT-Trader 引擎 → src/ict_trader/adaptive_rsi.py）
+//
+//  · 自适应 RSI：RSI(HMA(close,4), 18) + 可选平滑
+//    阈值来自历史 RSI 分布的上/下百分位（默认 50/45），而非固定 70/30
+//    regime = +1（牛）/ -1（熊）越过自适应阈值
+//  · 顶/底背离：价创新高 + RSI 高点下降 = 顶背离（bearish）
+//                价创新低 + RSI 低点抬高 = 底背离（bullish）
+//
+// 在引擎中的定位：辅助层「动量状态 + 背离」——方向/点位判定，
+//  与缠论背驰（bsp_type）形成独立第二确认。
+// ══════════════════════════════════════
+
+// ── 核心输入 ──
+rsi_length      = input.int(18, "RSI Length")
+use_smoothing   = input.bool(true, "Smooth Oscillator")
+smooth_length   = input.int(20, "Smoothing Length")
+adapt_lookback  = input.int(1000, "Adaptive Lookback")
+upper_percentile = input.int(50, "Upper Percentile")
+lower_percentile = input.int(45, "Lower Percentile")
+
+// ── 核心计算 ──
+base_src = ta.hma(osc_source, 4)
+osc_raw  = ta.rsi(base_src, rsi_length)
+osc      = use_smoothing ? ma_smoothing(osc_raw, smooth_length, smooth_type) : osc_raw
+// 自适应阈值 = 历史 osc 分布的上/下百分位
+upper_thr = percentile_value(sorted_history, upper_percentile)
+lower_thr = percentile_value(sorted_history, lower_percentile)
+// regime：osc > upper → 1；osc < lower → -1；否则沿用
+// 背离：osc 枢轴点对比（价 HH + osc LH = 顶背离；价 LL + osc HL = 底背离）
+
+// ══════════════════════════════════════
+// (完整逻辑见原始脚本；核心已移植到 adaptive_rsi.py)
+// ══════════════════════════════════════
