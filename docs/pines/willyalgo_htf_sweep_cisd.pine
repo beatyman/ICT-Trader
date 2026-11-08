@@ -1,0 +1,303 @@
+//@version=6
+// ══════════════════════════════════════════════════════════
+// HTF SWEEP CISD SETUPS [WillyAlgoTrader]
+// ══════════════════════════════════════════════════════════
+// Author:  Willy | WillyAlgoTrader
+// Version: 1.7.1
+//
+// 参考基准（已吸收进 ICT-Trader 引擎）：
+//   - HTF 扫单 + CISD + OB/FVG/IFVG/Breaker/Unicorn 入场 PD 阵列
+//   - 溢价/折价、Killzone、SMT、ATR 波动率过滤
+//   - 风险预设（Conservative/Balanced/Aggressive/Scalping）+ TP1 后保本
+//   - Setup 汇合评分 0-100 + 完整交易引擎（限价单→成交→TP1/TP2/TP3→BE→SL→反转）
+// 已移植到：src/ict_trader/{structured_plan,trade_risk,trade_decision,timemachine}.py
+
+// ══════════════════════════════════════════════════════════
+indicator(
+     title               = "HTF Sweep CISD Setups [WillyAlgoTrader]",
+     shorttitle          = "Sweep CISD",
+     overlay             = true,
+     max_lines_count     = 500,
+     max_labels_count    = 500,
+     max_boxes_count     = 500,
+     max_bars_back       = 5000)
+
+// ══════════════════════════════════════════════════════════
+// 2. CONSTANTS
+// ══════════════════════════════════════════════════════════
+const string INDICATOR_VERSION = "v1.7.1"
+const string INDICATOR_SHORT   = "Sweep CISD"
+
+const string GRP_MAIN    = "⚙️ Main Settings"
+const string GRP_HTF     = "🕐 Step 1 · HTF Condition"
+const string GRP_ENTRY   = "🎯 Step 2 · Setup Entry"
+const string GRP_REQ     = "🧩 Step 3 · Required PD Arrays"
+const string GRP_FILTER  = "🔍 Filters · Time & Quality"
+const string GRP_CONTEXT = "🧭 Filters · Context"
+const string GRP_RISK    = "🛡️ Risk Management"
+const string GRP_VISUAL  = "🎨 Visual Settings"
+const string GRP_PANEL   = "🕯️ HTF Panel"
+const string GRP_DASH    = "📊 Dashboard"
+const string GRP_ALERT   = "🔔 Alerts"
+const string GRP_COLORS  = "🎨 Colors"
+
+const int LINE_FORWARD_BARS = 20
+const int LINE_UPDATE_BARS  = 5
+const int LABEL_OFFSET_BARS = 1
+const int BE_DIM_TRANSP     = 70
+const int FORM_LEN          = 10
+const int MS_DAY            = 86400000
+const int STATS_PRUNE_DAYS  = 31
+const int MAX_REPLAY        = 450
+const int EXT_LINES_MAX     = 30
+const int PROJ_LEVELS_MAX   = 8
+
+enum EntryAt
+    obHL  = "OB · Order Block High/Low"
+    obOpen = "OB · CISD / Order Block Open"
+    obMT  = "OB · Order Block m.t."
+    obXHL = "OB · Crossed Candle High/Low"
+    obXC  = "OB · Crossed Candle Close"
+    fvgC  = "FVG · FVG Close"
+    fvgCE = "FVG · FVG c.e."
+    fvgO  = "FVG · FVG Open"
+    ifO   = "IFVG · IFVG Open"
+    ifCE  = "IFVG · IFVG c.e."
+    ifC   = "IFVG · IFVG Close"
+    ifXHL = "IFVG · Crossed Candle High/Low"
+    ifXC  = "IFVG · Crossed Candle Close"
+    brHL  = "Breaker · Breaker High/Low"
+    brC   = "Breaker · Breaker Close"
+    brXHL = "Breaker · Crossed Candle High/Low"
+    brXC  = "Breaker · Crossed Candle Close"
+    uni   = "Unicorn · Unicorn Close"
+
+enum StopAt
+    piv   = "Pivot Point"
+    ob    = "Order Block High/Low"
+    cross = "Crossed Candle High/Low"
+    fvg   = "FVG Open"
+    ifvg  = "IFVG Close"
+    brk   = "Breaker High/Low"
+
+// entry PD array families
+const int FAM_OB   = 0
+const int FAM_FVG  = 1
+const int FAM_IFVG = 2
+const int FAM_BRK  = 3
+const int FAM_UNI  = 4
+
+// ══════════════════════════════════════════════════════════
+// 3. INPUTS
+// ══════════════════════════════════════════════════════════
+// ── Main ──
+autoHtfInput   = input.bool(true, "Auto Paired HTF", group = GRP_MAIN,
+     tooltip = "Pick the higher timeframe automatically from the chart timeframe:\n" +
+               "1m→15m, 3m→30m, 5m→1H, 15m→4H, 1H→D, 4H→W.\n" +
+               "Turn off to use the Manual HTF below.")
+htfManualInput = input.timeframe("60", "Manual HTF", group = GRP_MAIN,
+     tooltip = "Higher timeframe used when Auto Paired HTF is off.\nMust be higher than the chart timeframe.")
+directionInput = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = GRP_MAIN,
+     tooltip = "Which setups to look for.")
+pivotLenInput  = input.int(3, "LTF Pivot Length", minval = 1, maxval = 10, group = GRP_MAIN,
+     tooltip = "Bars on each side that confirm an LTF swing (used for breakers).\n" +
+               "• Higher = fewer, more significant swings (confirmed later)\n" +
+               "• Recommended: 2–5")
+maxWaitInput   = input.int(36, "Max Bars to Wait for Setup", minval = 3, maxval = 400, group = GRP_MAIN,
+     tooltip = "After an HTF trigger, how many chart bars the indicator keeps looking for an entry model.\n" +
+               "• Higher = more late setups\n• Recommended: 2–3 HTF candles worth of bars")
+preBarsInput   = input.int(30, "Structure Lookback Before Trigger", minval = 5, maxval = 200, group = GRP_MAIN,
+     tooltip = "Chart bars before the trigger scanned for the down/up run (OB/CISD) and opposing FVGs.")
+fvgLifeInput   = input.int(120, "FVG Lifetime for Inversion (bars)", minval = 10, maxval = 400, group = GRP_MAIN,
+     tooltip = "How long an opposing FVG stays a candidate for inversion (IFVG).")
+maxCtxAgeInput = input.int(120, "Max Context Age (bars)", minval = 5, maxval = 1000, group = GRP_MAIN,
+     tooltip = "Absolute lifetime of an HTF trigger context. New sweeps extend the wait window,\n" +
+               "but a context older than this is closed regardless.\n• Must be ≥ Max Bars to Wait")
+
+// ── Step 1: HTF condition ──
+waitCloseInput   = input.bool(false, "Wait for HTF Candle to Close", group = GRP_HTF,
+     tooltip = "On: triggers are evaluated only when the HTF candle closes.\nOff: sweeps are detected as soon as a chart bar takes the level.")
+sweepPrevInput   = input.bool(true, "Sweep of Previous High/Low", group = GRP_HTF,
+     tooltip = "Trigger when price trades through the previous HTF candle's high (short) or low (long).")
+sweepBodyInput   = input.bool(false, "Sweep + Close Back Into Body", group = GRP_HTF,
+     tooltip = "Trigger when the previous HTF high/low is swept and price closes back inside that candle's body.")
+sweepAnyInput    = input.bool(true, "Sweep of Any Previous High/Low", group = GRP_HTF,
+     tooltip = "Trigger when any untaken HTF high/low within the lookback below is swept.")
+liqLookbackInput = input.int(10, "  └ Lookback (HTF candles)", minval = 2, maxval = 100, group = GRP_HTF,
+     tooltip = "How many HTF candles back untaken highs/lows are tracked as liquidity.")
+stPivotInput     = input.bool(false, "New Short Term Pivot (Candle Close)", group = GRP_HTF,
+     tooltip = "Trigger when a 3-candle HTF swing low (long) / high (short) is confirmed on HTF close.")
+
+// ── Step 2: entry ──
+entryAtInput = input.enum(EntryAt.brC, "Entry At", group = GRP_ENTRY,
+     tooltip = "Entry price model on the chart timeframe. The selected PD array is required for a setup.\n" +
+               "• FVG Close / IFVG Open = near edge, Open / Close = far edge, c.e. = midpoint\n" +
+               "• Crossed Candle = the candle that confirmed the PD array")
+stopAtInput  = input.enum(StopAt.piv, "Structure Stop At", group = GRP_ENTRY,
+     tooltip = "Stop location used when SL Mode = Structure.\nPivot Point = the swept extreme. Falls back to Pivot Point if the chosen array is missing.")
+stopBufferInput = input.float(0.0, "Structure Stop Buffer (×ATR)", minval = 0.0, maxval = 1.0, step = 0.05, group = GRP_ENTRY,
+     tooltip = "Extra distance beyond the structure stop, as a multiple of ATR.\n• 0 = exactly at the level\n• 0.1–0.25 protects against spread wicks")
+projModeInput   = input.string("Projected", "Measured-Move Levels", options = ["Projected", "Risk:Reward"], group = GRP_ENTRY,
+     tooltip = "Reference levels drawn as dotted lines with numbers (visual only, not targets).\n" +
+               "• Projected: 0 = CISD / OB open, -1 = stop\n• Risk:Reward: 0 = entry, 1 = one risk unit")
+projLevelsInput = input.string("1, 2, 2.5", "  └ Levels", group = GRP_ENTRY,
+     tooltip = "Comma-separated list of measured-move levels, e.g. 1, 2, 2.5, 4 (at most 8).")
+showProjInput   = input.bool(true, "  └ Show Measured-Move Levels", group = GRP_ENTRY,
+     tooltip = "Toggle the dotted measured-move levels on each setup.")
+pendExpiryInput = input.int(60, "Cancel Unfilled Limit After (bars)", minval = 1, maxval = 500, group = GRP_ENTRY,
+     tooltip = "A pending limit order is cancelled after this many bars, or when price reaches TP1 before the fill.")
+
+// ── Step 3: required arrays ──
+reqObInput    = input.bool(false, "Order Block / CISD Cross", group = GRP_REQ,
+     tooltip = "Require a close through the open of the run that delivered the sweep (CISD).")
+reqFvgInput   = input.bool(false, "Any FVG", group = GRP_REQ,
+     tooltip = "Require a fair value gap in the setup direction after the sweep.")
+reqFvgObInput = input.bool(false, "FVG After Order Block Open", group = GRP_REQ,
+     tooltip = "Require the FVG to form beyond the OB open during the CISD displacement.")
+reqIfvgInput  = input.bool(false, "IFVG", group = GRP_REQ,
+     tooltip = "Require an opposing FVG to be inverted (closed through) after the sweep.")
+reqBrkInput   = input.bool(false, "Breaker Block", inline = "brk", group = GRP_REQ,
+     tooltip = "Require a close through the swing that preceded the sweep.")
+reqPivotInput = input.bool(true, "Require Pivot", inline = "brk", group = GRP_REQ,
+     tooltip = "Breaker must be a confirmed LTF pivot. Off: the candle before the OB run is used.")
+reqUniInput   = input.bool(false, "Unicorn Model", group = GRP_REQ,
+     tooltip = "Require a breaker overlapping an FVG.")
+
+// ── Filters: time & quality ──
+tzInput         = input.string("America/New_York", "Timezone", group = GRP_FILTER,
+     tooltip = "Timezone for kill zones, macros and block windows (IANA name).")
+kzAsiaInput     = input.bool(false, "Asia KZ", inline = "kza", group = GRP_FILTER,
+     tooltip = "If any kill zone is enabled, setups form only inside enabled zones. None enabled = no time limit.")
+sessAsiaInput   = input.session("2000-0000", "", inline = "kza", group = GRP_FILTER)
+kzLondonInput   = input.bool(false, "London KZ", inline = "kzl", group = GRP_FILTER,
+     tooltip = "London kill zone.")
+sessLondonInput = input.session("0200-0500", "", inline = "kzl", group = GRP_FILTER)
+kzNyAmInput     = input.bool(false, "NY AM KZ", inline = "kzn", group = GRP_FILTER,
+     tooltip = "New York morning kill zone.")
+sessNyAmInput   = input.session("0830-1100", "", inline = "kzn", group = GRP_FILTER)
+kzNyPmInput     = input.bool(false, "NY PM KZ", inline = "kzp", group = GRP_FILTER,
+     tooltip = "New York afternoon kill zone.")
+sessNyPmInput   = input.session("1330-1600", "", inline = "kzp", group = GRP_FILTER)
+macroOnlyInput  = input.bool(false, "Only Inside ICT Macros (xx:50–xx:10)", group = GRP_FILTER,
+     tooltip = "Allow setups only in the last 10 minutes and first 10 minutes of each hour.")
+block1Input     = input.bool(false, "Block Window 1 (news)", inline = "b1", group = GRP_FILTER,
+     tooltip = "No setups inside this window. Pine has no economic calendar — set your release times manually.")
+block1SessInput = input.session("0825-0845", "", inline = "b1", group = GRP_FILTER)
+block2Input     = input.bool(false, "Block Window 2 (news)", inline = "b2", group = GRP_FILTER,
+     tooltip = "Second blocked window, e.g. 13:55–14:15 for FOMC.")
+block2SessInput = input.session("1355-1415", "", inline = "b2", group = GRP_FILTER)
+atrLenInput     = input.int(14, "ATR Length", minval = 5, maxval = 50, group = GRP_FILTER,
+     tooltip = "ATR period used by every ATR-based filter, stop and buffer.\n• 14 = standard")
+minRiskAtrInput = input.float(0.25, "Min Risk (×ATR, 0 = off)", minval = 0.0, maxval = 5.0, step = 0.05, group = GRP_FILTER,
+     tooltip = "Skip setups whose stop is tighter than this — noise would hit it.\n• Recommended: 0.2–0.5")
+maxRiskAtrInput = input.float(3.0, "Max Risk (×ATR, 0 = off)", minval = 0.0, maxval = 20.0, step = 0.25, group = GRP_FILTER,
+     tooltip = "Skip setups whose stop is wider than this.\n• Recommended: 2–4")
+dispAtrInput    = input.float(0.5, "Displacement Body (×ATR, 0 = off)", minval = 0.0, maxval = 3.0, step = 0.05, group = GRP_FILTER,
+     tooltip = "The candle that crosses the CISD level, inverts an FVG or breaks the breaker must have a body at least this large.\n" +
+               "• Higher = only strong displacement, fewer setups\n• Recommended: 0.3–0.7")
+minFvgAtrInput  = input.float(0.1, "Min FVG Size (×ATR, 0 = off)", minval = 0.0, maxval = 2.0, step = 0.05, group = GRP_FILTER,
+     tooltip = "Ignore fair value gaps smaller than this.")
+skipStaleInput  = input.bool(true, "Skip Already-Traded Entries", group = GRP_FILTER,
+     tooltip = "Limit mode: if price already came back to the entry level between the PD array forming and the setup confirming, the setup is skipped.")
+firstSweepInput = input.bool(false, "Only First Sweep per Direction per Day", group = GRP_FILTER,
+     tooltip = "Ignore repeated sweeps in the same direction on the same day.")
+cancelOutInput  = input.bool(true, "Cancel Pending Outside Filters", group = GRP_FILTER,
+     tooltip = "Cancel a pending limit order when a bar opens outside the enabled kill zones / macro,\n" +
+               "inside a news block window or outside the volatility band.")
+cancelDayInput  = input.bool(false, "Cancel Pending on New Day", group = GRP_FILTER,
+     tooltip = "Cancel a pending limit order at the first bar of a new day.")
+conflictInput   = input.string("Skip both", "Same-Bar Long & Short", options = ["Skip both", "Follow HTF bias"], group = GRP_FILTER,
+     tooltip = "When a long and a short setup confirm on the same bar:\n" +
+               "• Skip both: no trade (default)\n• Follow HTF bias: take the side matching the bias, skip if neutral")
+maxPerDayInput  = input.int(0, "Max Signals per Day (0 = off)", minval = 0, maxval = 50, group = GRP_FILTER,
+     tooltip = "Cap on accepted signals per day. A pending order counts even if it is later cancelled.")
+biasOnlyInput   = input.bool(false, "Only in Direction of HTF Bias", group = GRP_FILTER,
+     tooltip = "Longs only with bullish HTF bias, shorts only with bearish bias.")
+
+// ── Filters: context ──
+pdModeInput      = input.string("Off", "Premium / Discount Filter", options = ["Off", "HTF range", "Previous day"], group = GRP_CONTEXT,
+     tooltip = "Longs only when entry is below equilibrium (discount), shorts only above it (premium).\n" +
+               "The premium/discount side is always used for the score, even when the filter is off.")
+pdCandlesInput   = input.int(4, "  └ HTF Range Candles", minval = 2, maxval = 50, group = GRP_CONTEXT,
+     tooltip = "Number of HTF candles that form the dealing range for 'HTF range'.")
+tpModeInput      = input.string("Fixed R", "Final Target (TP3)", options = ["Fixed R", "Nearest HTF liquidity", "First HTF liquidity ≥ min R:R"], group = GRP_CONTEXT,
+     tooltip = "• Fixed R: TP3 = TP3 multiplier × risk\n" +
+               "• Nearest HTF liquidity: TP3 = nearest untaken HTF high/low; trade skipped if closer than min R:R\n" +
+               "• First ≥ min R:R: TP3 = first untaken level at least min R:R away\n" +
+               "With liquidity targets TP2 = midpoint of TP1 and TP3.")
+minRRInput       = input.float(1.5, "  └ Min R:R to Liquidity", minval = 0.5, maxval = 10.0, step = 0.25, group = GRP_CONTEXT,
+     tooltip = "Minimum reward-to-risk for a liquidity target.")
+pdLiqInput       = input.bool(true, "  └ Include Previous Day High/Low", group = GRP_CONTEXT,
+     tooltip = "Add PDH / PDL to the liquidity target candidates.")
+noLiqFallbackInput = input.bool(true, "  └ No Liquidity Found → Fixed R", group = GRP_CONTEXT,
+     tooltip = "If no liquidity level exists beyond entry, use the Fixed R target instead of skipping.")
+smtModeInput     = input.string("Off", "SMT Divergence", options = ["Off", "Mark only", "Required"], group = GRP_CONTEXT,
+     tooltip = "This symbol swept the level while the correlated symbol did not take its matching high/low.\n" +
+               "Requires data access to both symbols.")
+smtSymbolInput   = input.string("", "  └ Correlated Symbol (empty = auto)", group = GRP_CONTEXT,
+     tooltip = "e.g. CME_MINI:NQ1!. Auto: ES↔NQ, MES↔MNQ, YM/RTY→ES, MYM/M2K→MES.")
+volLenInput      = input.int(500, "ATR Percentile Lookback", minval = 50, maxval = 5000, group = GRP_CONTEXT,
+     tooltip = "Bars used to rank current ATR for the volatility filter.")
+volMinInput      = input.float(0.0, "  └ Min ATR Percentile (0 = off)", minval = 0.0, maxval = 100.0, step = 5.0, group = GRP_CONTEXT,
+     tooltip = "Skip setups in very quiet conditions. e.g. 20 = ignore the quietest 20% of bars.")
+volMaxInput      = input.float(100.0, "  └ Max ATR Percentile (100 = off)", minval = 0.0, maxval = 100.0, step = 5.0, group = GRP_CONTEXT,
+     tooltip = "Skip setups in extreme volatility.")
+
+// ── Risk management ──
+entryModeInput = input.string("Limit", "Entry Mode", options = ["Limit", "Market"], group = GRP_RISK,
+     tooltip = "• Limit: a pending order at the PD array price; the trade opens when price returns to it\n" +
+               "• Market: the trade opens at the close of the signal bar (strict signal-trade parity)")
+slModeInput    = input.string("Structure", "SL Mode", options = ["Structure", "Wick-Anchored", "ATR"], group = GRP_RISK,
+     tooltip = "• Structure: at the swept extreme / chosen PD array (recommended for this model)\n" +
+               "• Wick-Anchored: beyond the signal bar wick + 0.25×ATR, min 0.5×ATR from entry\n" +
+               "• ATR: SL Multiplier × ATR from entry")
+riskPresetInput = input.string("Balanced", "Risk Preset", options = ["Conservative", "Balanced", "Aggressive", "Scalping", "Custom"], group = GRP_RISK,
+     tooltip = "TP multipliers (and the SL multiplier of the ATR mode):\n" +
+               "• Conservative: SL 2.5×ATR, TP 1R/2R/4R\n• Balanced: SL 1.5×ATR, TP 1R/2R/3R\n" +
+               "• Aggressive: SL 1.0×ATR, TP 1.5R/2.5R/4R\n• Scalping: SL 0.8×ATR, TP 0.8R/1.5R/2R\n" +
+               "• Custom: values below. Structure / Wick stops ignore the SL part.")
+slMultInput  = input.float(1.5, "SL Multiplier (×ATR)", minval = 0.5, maxval = 5.0, step = 0.1, group = GRP_RISK,
+     tooltip = "Custom preset, ATR mode only.\n• Scalping 0.8–1.2 | Swing 1.5–2.5")
+tp1MultInput = input.float(1.0, "TP1 (×Risk)", minval = 0.5, maxval = 5.0, step = 0.1, group = GRP_RISK,
+     tooltip = "Custom preset. TP1 as multiple of the actual SL distance. A trade is a win once TP1 is touched.")
+tp2MultInput = input.float(2.0, "TP2 (×Risk)", minval = 1.0, maxval = 10.0, step = 0.1, group = GRP_RISK,
+     tooltip = "Custom preset. TP2 as multiple of risk.")
+tp3MultInput = input.float(3.0, "TP3 (×Risk)", minval = 1.5, maxval = 15.0, step = 0.1, group = GRP_RISK,
+     tooltip = "Custom preset. Final target; closes the trade.")
+beInput       = input.bool(true, "Break-Even After TP1", group = GRP_RISK,
+     tooltip = "Move the stop to entry once TP1 is reached.\nPositions stopped at break-even after TP1 count as wins.")
+intrabarModelInput = input.string("Optimistic", "Intrabar Conflict Model", options = ["Optimistic", "Conservative"], group = GRP_RISK,
+     tooltip = "When one bar touches both the stop and a target, OHLC cannot tell which came first.\n" +
+               "• Optimistic (standard TP priority): the target counts first, but the trade still\n" +
+               "  closes at the stop if the bar closes beyond it\n" +
+               "• Conservative: the stop counts first; targets touched on that bar are ignored\n" +
+               "Limit fill bar: Optimistic stops out only if the bar closes beyond the stop,\n" +
+               "Conservative whenever the bar trades through the stop.")
+costRInput     = input.float(0.0, "Cost per Trade (R)", minval = 0.0, maxval = 1.0, step = 0.01, group = GRP_RISK,
+     tooltip = "Commission + slippage per round trip expressed in R. Subtracted from every closed trade\n" +
+               "in Net R / Avg R / Profit Factor. e.g. 0.05 = 5% of the stop distance.")
+rewardBoxInput = input.string("TP2", "Setup Reward Box To", options = ["TP1", "TP2", "TP3"], group = GRP_RISK,
+     tooltip = "Height of the green reward box drawn on each setup.")
+showSlTpInput       = input.bool(true, "Show SL/TP Lines", group = GRP_RISK,
+     tooltip = "Entry / SL / TP1-3 lines of the active trade. Lines stay on the chart after the trade closes and are replaced at the next entry.")
+showPendingInput    = input.bool(true, "Show Pending Limit Order", group = GRP_RISK,
+     tooltip = "Dashed entry line with planned SL / TP1 while a limit order waits, plus bars left.\n" +
+               "A cancelled order stays as a grey record with the reason.")
+showOutcomeInput    = input.bool(true, "Show Trade Outcomes", group = GRP_RISK,
+     tooltip = "Mark each closed trade at the exit (TP3 / SL / BE / REV with result in R)\n" +
+               "and each cancelled order with the reason.")
+showSlTpLabelsInput = input.bool(true, "Show SL/TP Labels", group = GRP_RISK,
+     tooltip = "Price labels at the end of the SL/TP lines.")
+showPctOnLabelsInput = input.bool(true, "Show % Distance on Labels", group = GRP_RISK,
+     tooltip = "Append % distance from entry, e.g. 'SL 7577.25 (-0.09%)'.")
+entryLineStyleInput = input.string("Dotted", "Entry Line Style", options = ["Solid", "Dashed", "Dotted"], group = GRP_RISK,
+     tooltip = "Entry is a reference, not an action level — keep it subtle.")
+slLineStyleInput    = input.string("Solid", "SL Line Style", options = ["Solid", "Dashed", "Dotted"], group = GRP_RISK,
+     tooltip = "Style of the stop-loss line (width 2).")
+tpLineStyleInput    = input.string("Dashed", "TP Line Style", options = ["Solid", "Dashed", "Dotted"], group = GRP_RISK,
+     tooltip = "Style for TP1/TP2/TP3. On hit, a TP line turns solid teal.")
+
+// ══════════════════════════════════════════════════════════
+// (visual / panel / dashboard / stats / alerts / trade engine 等其余部分
+//  见完整原始脚本；核心策略逻辑已移植到 Python 引擎)
+// ══════════════════════════════════════════════════════════
