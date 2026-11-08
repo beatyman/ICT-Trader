@@ -713,6 +713,22 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
         setup_score += 10                       # 强回抽
     setup_score = max(0, min(100, setup_score))
 
+    # signal_refs：本 setup 依据的流动性/结构信号 id（图文一致回溯）
+    sweep_sig = _get(inp, "ict_trader_15m", "liquidity", "sweep")
+    signal_refs = []
+    if sweep_sig is not None:
+        signal_refs.append("SWP-0001")
+    if direction == "short" and nearest_bsl is not None:
+        signal_refs.append("BSL-0001")
+    elif direction == "long" and nearest_ssl is not None:
+        signal_refs.append("SSL-0001")
+    if dol is not None:
+        signal_refs.append("DOL-0001")
+    for i, _ob in enumerate((_get(inp, "ict_trader_15m", "order_blocks") or [])[:3], 1):
+        signal_refs.append(f"OB-{i:04d}")
+    for i, _f in enumerate((_get(inp, "ict_trader_15m", "fvg") or [])[:3], 1):
+        signal_refs.append(f"FVG-{i:04d}")
+
     return {
         "id": f"{'L' if direction == 'long' else 'S'}{idx}",
         "status": status,
@@ -724,6 +740,7 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
         "tp": tps,
         "confidence": conf,
         "setup_score": setup_score,
+        "signal_refs": signal_refs,
         "invalidation": inv,
         "rationale": rationale,
         "risk_note": "conflict: HTF vs LTF, reduced confidence" if status == "conditional"
@@ -801,6 +818,7 @@ def structured_plan(inp: dict) -> dict:
             "momentum": inp.get("momentum"),   # 动量（自适应RSI + 最近背离）
             "profile_shape": inp.get("profile_shape"),  # 成交量分布形状（D/B/P/Double Zone）
             "patterns": inp.get("patterns"),    # 图表形态（双顶/双底/头肩/楔形）
+            "schema_version": "1.0.0",
             "summary": "; ".join(summary_parts),
         },
         "long_setups": long_setups,
