@@ -1,0 +1,26 @@
+//@version=6
+// Study : Fair Value Gaps by DGT (© dgtrd)
+//
+// ══════════════════════════════════════════════════════════
+// 参考基准（多周期 FVG + IFVG + LTF FVG，~95% 已被引擎覆盖）
+//
+//   已覆盖（concepts.py）：
+//     · FVG 检测        → detect_fvgs（3-candle gap + 位移过滤 + ATR/body/width 阈值）
+//     · IFVG（逆 FVG）  → detect_ifvg（收盘穿越 FVG 远边 → 极性反转）
+//     · 填充追踪        → touched_at / mitigated（完整穿越远边 = 已填充）
+//
+//   唯一细微差异（如需要可移植）：
+//     · 4 种填充方法：Any Touch / Midpoint Reached / Wick Sweep / Body Beyond
+//       我们的 mitigated = 完整穿越远边（≈ Wick Sweep，最保守），
+//       未区分「轻触 / 半程 / 全穿 / 收盘修复」四种严格度。
+// ══════════════════════════════════════════════════════════
+
+// ── 核心 ──
+// 牛 FVG：bar.low > 前两根 bar.high（三根失衡）
+// 熊 FVG：bar.high < 前两根 bar.low
+// IFVG：牛 FVG 收盘跌破下沿 → 变熊 IFVG（阻力）；熊 FVG 收盘涨破上沿 → 变牛 IFVG（支撑）
+// 填充方法：Any Touch / Midpoint / Wick Sweep / Body Beyond（4 种严格度）
+
+// ══════════════════════════════════════════════════════════
+// (完整逻辑见原始脚本；FVG + IFVG 已移植到 concepts.py)
+// ══════════════════════════════════════════════════════════
