@@ -273,9 +273,9 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
             sc["sweep_count"] = len(getattr(res, "sweeps", []))
             sc["key_level_count"] = len(getattr(res, "key_levels", []))
 
-            # PO3（阶段 + 区间）
+            # PO3（阶段 + 区间）；当日 bar 数须 ≥ accumulate_bars，避免「半成品日」薄数据前视
             win = df_15m[df_15m["date"] >= str(df_15m["date"].iloc[-1])[:10]].reset_index(drop=True)
-            if len(win) >= 10:
+            if len(win) >= 20:
                 po3, _ = detect_po3(win, accumulate_bars=20)
                 ict["po3_phase"] = {"ACCUMULATING": "accumulation", "MANIPULATED": "manipulation",
                                     "DISTRIBUTING": "distribution", "INVALID": None}.get(
