@@ -425,7 +425,9 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
     atr = _num(_get(inp, "metadata", "volatility_context", "atr_14")) or (price * 0.005)
     tp_pool = _liquidity_levels(inp, direction)
 
-    status = "valid" if bias == direction else "conditional"
+    # bias 用 bullish/bearish，direction 用 long/short，须先映射再比较
+    bias_dir = {"long": "bullish", "short": "bearish"}[direction]
+    status = "valid" if bias == bias_dir else "conditional"
     setup_type = "trend_pullback" if kind == "A" else "sweep_reversal"
 
     # 入场：A=顺势回踩（sell the rally / buy the dip 到最近流动性），B=扫单反转（追）
@@ -441,17 +443,21 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
             entry_low, entry_high = entry, price
             sl = entry - 0.5 * atr
     else:
-        buf = price * 0.002
+        # 区间半宽不得超过 SL 距离的一半，否则 SL 会落在入场区内（触发即止损）
+        buf = min(price * 0.002, 0.25 * atr)
         entry_low, entry_high = price - buf, price + buf
         sl = price - 0.5 * atr if direction == "long" else price + 0.5 * atr
 
-    # TP：DOL / 最近流动性池 / 中枢 / 云层（跳过 RR<1 的过近目标）
+    # TP：DOL / 最近流动性池 / 中枢 / 云层（跳过 RR<1 的过近目标、方向错误的目标）
     entry_mid = (entry_low + entry_high) / 2
-    tp_vals = [v for v in tp_pool if _rr(entry_mid, sl, v, direction) >= 1.0][:3]
-    if dol is not None and dol not in tp_vals:
-        tp_vals.insert(0, dol)
+    cands = [v for v in tp_pool if _rr(entry_mid, sl, v, direction) >= 1.0]
+    if dol is not None:
+        dol_on_profit_side = dol > entry_mid if direction == "long" else dol < entry_mid
+        if dol_on_profit_side and _rr(entry_mid, sl, dol, direction) >= 1.0:
+            cands.insert(0, dol)
+    tp_vals = list(dict.fromkeys(cands))[:3]
     tps = []
-    for i, lv in enumerate(tp_vals[:3], 1):
+    for i, lv in enumerate(tp_vals, 1):
         tps.append({"label": f"TP{i}", "level": round(lv, 4),
                     "rr": _rr(entry_mid, sl, lv, direction)})
     if not tps:
@@ -461,7 +467,7 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
 
     # 置信度：confluence + setup + 共振
     conf = confluence
-    if kind == "A" and bias == direction:
+    if kind == "A" and bias == bias_dir:
         conf += 10  # 顺势共振
     elif kind == "B" and _get(inp, "ict_trader_15m", "liquidity", "sweep") is not None:
         conf += 5   # 扫单反转
@@ -551,6 +557,14 @@ def structured_plan(inp: dict) -> dict:
 
     long_setups = [s for s in long_setups if s is not None]
     short_setups = [s for s in short_setups if s is not None]
+
+    # 风险门：每个 setup 过一遍风控（止损/盈亏比/单笔亏损/当日亏损/次数）
+    try:
+        from .trade_risk import risk_check
+        for s in long_setups + short_setups:
+            s["risk_check"] = risk_check(s)
+    except Exception:
+        pass
 
     summary_parts = [f"HTF {bias} (confluence {confluence}/100)"]
     if long_setups:

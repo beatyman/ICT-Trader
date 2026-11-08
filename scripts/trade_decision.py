@@ -46,6 +46,23 @@ def save_state(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def find_entry_setup(plan: dict, price: float, min_conf: int) -> dict | None:
+    """返回当前价已进入 entry_zone 的、status=valid 且置信度达标的首个 setup。"""
+    for s in plan.get("short_setups", []) + plan.get("long_setups", []):
+        if s.get("status") != "valid":
+            continue
+        if s.get("confidence", 0) < min_conf:
+            continue
+        zone = s.get("entry_zone") or {}
+        if zone.get("low") is None or zone.get("high") is None:
+            continue
+        lo = float(zone["low"])
+        hi = float(zone["high"])
+        if lo <= price <= hi:
+            return s
+    return None
+
+
 def decide(state: dict, plan: dict, price: float, timestamp: str,
            min_conf: int) -> tuple[str, str]:
     """返回 (action, reason)。action ∈ open/hold/take_profit/stop_loss/wait。"""
@@ -53,7 +70,7 @@ def decide(state: dict, plan: dict, price: float, timestamp: str,
     if pos:
         direction = pos["direction"]
         sl = float(pos["sl"])
-        tp1 = float(pos.get("tp1", 0))
+        tp1 = float(pos.get("tp1") or 0)
         if direction == "long":
             if price <= sl:
                 return "stop_loss", f"price {price} <= SL {sl}"
@@ -66,17 +83,25 @@ def decide(state: dict, plan: dict, price: float, timestamp: str,
                 return "take_profit", f"price {price} <= TP1 {tp1}"
         return "hold", f"price {price} within SL {sl} / TP1 {tp1}, hold"
 
-    # 无仓位 → 找 valid 且置信度足够的 setup
-    for s in plan.get("short_setups", []) + plan.get("long_setups", []):
-        if s.get("status") != "valid":
-            continue
-        if s.get("confidence", 0) < min_conf:
-            continue
-        lo = float(s["entry_zone"]["low"])
-        hi = float(s["entry_zone"]["high"])
-        if lo <= price <= hi:
-            return "open", f"{s['id']} valid setup in entry zone [{lo}, {hi}]"
-    return "wait", "no valid setup or price not in entry zone"
+    # 无仓位 → 找 valid 且置信度足够的 setup，且当前价已进入入场区
+    setup = find_entry_setup(plan, price, min_conf)
+    if setup is not None:
+        lo = float(setup["entry_zone"]["low"])
+        hi = float(setup["entry_zone"]["high"])
+        return "open", f"{setup['id']} valid setup in entry zone [{lo}, {hi}]"
+
+    # 未开仓：把"为什么不开"说清楚（无 valid 形态 / 置信度不足 / 价格不在区间）
+    valid = [s for s in plan.get("short_setups", []) + plan.get("long_setups", [])
+             if s.get("status") == "valid"]
+    if not valid:
+        return "wait", "no valid setup (none aligned with HTF bias)"
+    best = max(valid, key=lambda s: s.get("confidence", 0))
+    conf = best.get("confidence", 0)
+    if conf < min_conf:
+        return "wait", f"valid setup {best['id']} confidence {conf} < min {min_conf}"
+    lo = float(best["entry_zone"]["low"])
+    hi = float(best["entry_zone"]["high"])
+    return "wait", f"price {price} outside {best['id']} entry zone [{lo}, {hi}]"
 
 
 def main() -> None:
@@ -130,12 +155,8 @@ def main() -> None:
         state.setdefault("history", []).append(closed)
         state["position"] = None
     elif action == "open":
-        setup = None
-        for s in plan.get("short_setups", []) + plan.get("long_setups", []):
-            lo = float(s["entry_zone"]["low"]); hi = float(s["entry_zone"]["high"])
-            if s.get("status") == "valid" and lo <= price <= hi:
-                setup = s
-                break
+        # 与 decide() 用同一套筛选，保证开的就是被判定的那个 setup
+        setup = find_entry_setup(plan, price, args.min_confidence)
         if setup:
             direction = "short" if setup["id"].startswith("S") else "long"
             tps = setup.get("tp") or []
@@ -150,6 +171,17 @@ def main() -> None:
 
     save_state(state_path, state)
 
+    # Time Machine：开仓前回放诚实胜率（先到止盈/止损的概率 + 历史真实胜负）
+    tm_out = None
+    if action == "open":
+        setup = find_entry_setup(plan, price, args.min_confidence)
+        if setup and setup.get("tp"):
+            from ict_trader.timemachine import time_machine
+            direction = "short" if setup["id"].startswith("S") else "long"
+            tm_out = time_machine(df_15m, entry=price, sl=setup["sl"],
+                                  tp=setup["tp"][0]["level"], direction=direction,
+                                  n_bars=16, replays=2000, seed=19)
+
     out = {
         "symbol": args.symbol,
         "timestamp": timestamp,
@@ -159,6 +191,7 @@ def main() -> None:
         "position": state["position"],
         "plan_bias": plan["meta"]["analysis_bias"],
         "plan_confluence": plan["meta"]["htf_confluence_score"],
+        "time_machine": tm_out,
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
