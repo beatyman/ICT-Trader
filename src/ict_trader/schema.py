@@ -13,7 +13,7 @@ from typing import Any
 
 __all__ = ["validate_output", "assign_signal_ids", "OUTPUT_SCHEMA", "INPUT_SCHEMA",
            "validate_input", "parse_ai_response", "validate_visual_consistency",
-           "SCHEMA_VERSION"]
+           "assign_result_signal_ids", "SCHEMA_VERSION"]
 
 # 版本号：Schema / 提示词向后兼容的锚点
 SCHEMA_VERSION = "1.0.0"
@@ -115,6 +115,21 @@ def validate_output(out: dict) -> dict:
 
     return {"ok": not errors, "errors": errors, "warnings": warnings,
             "schema_version": SCHEMA_VERSION}
+
+
+def assign_result_signal_ids(result) -> None:
+    """给 ICTResult 的对象就地打 signal_id（按列表顺序，稳定、幂等）。
+
+    structured_plan 与 plot_ict_clean 共用此函数，保证「图↔信号」同 id。
+    """
+    for i, ob in enumerate(getattr(result, "order_blocks", None) or [], 1):
+        ob.signal_id = f"OB-{i:04d}"
+    for i, f in enumerate(getattr(result, "fvgs", None) or [], 1):
+        f.signal_id = f"FVG-{i:04d}"
+    for i, s in enumerate(getattr(result, "sweeps", None) or [], 1):
+        s.signal_id = f"SWP-{i:04d}"
+    for i, k in enumerate(getattr(result, "key_levels", None) or [], 1):
+        k.signal_id = f"KL-{i:04d}"
 
 
 def assign_signal_ids(inp: dict) -> dict:
@@ -261,7 +276,7 @@ def validate_visual_consistency(out: dict, chart_elements: list[dict]) -> dict:
             if ref not in known:
                 mismatches.append(f"{s['id']}: signal_ref {ref} missing in chart")
 
-    valid_prefix = {"OB", "FVG", "SWP", "BSL", "SSL", "DOL", "ZS"}
+    valid_prefix = {"OB", "FVG", "SWP", "KL", "ZS", "BSL", "SSL", "DOL"}
     for e in chart_elements:
         sid = e.get("signal_id")
         if not sid or sid.split("-")[0] not in valid_prefix:

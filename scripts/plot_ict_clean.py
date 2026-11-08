@@ -208,7 +208,9 @@ def render(args) -> Path:
     hist = df[df["date"] <= end].reset_index(drop=True)
     if len(hist) < 30:
         raise SystemExit("need at least 30 bars up to --end")
-    analysis = hist.tail(max(300, args.last_bars)).reset_index(drop=True)
+    # 分析全量历史（与 structured_plan 同源），保证 OB/FVG/扫单 signal_id 一致；
+    # 只把「视图窗口」限制在尾部，用于绘图。
+    analysis = hist.reset_index(drop=True)
     if args.start:
         start = pd.Timestamp(args.start)
         view = hist[(hist["date"] >= start) & (hist["date"] <= end)].reset_index(drop=True)
@@ -226,6 +228,8 @@ def render(args) -> Path:
                   cisd_all=True, cisd_min_grade=0, sweep_reclaim_bars=args.sweep_reclaim_bars,
                   fvg_min_width_atr=args.fvg_min_width_atr),
     )
+    from ict_trader.schema import assign_result_signal_ids
+    assign_result_signal_ids(result)   # 图元 signal_id，与 structured_plan 同源
     plan = _resolve_plan(args, view, result)
 
     # grade + position size (Authrain grade model)
@@ -696,6 +700,33 @@ def render(args) -> Path:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, facecolor="white", bbox_inches=None)
+
+    # ---- 图元 signal_id 清单（图文一致：与 structured_plan 同源 id）----
+    if getattr(args, "emit_chart_elements", None):
+        elements: list[dict] = []
+        for s in getattr(result, "sweeps", []) or []:
+            if s.signal_id:
+                elements.append({"signal_id": s.signal_id, "type": "sweep",
+                                 "level": round(float(s.sweep_price), 4),
+                                 "timeframe": args.timeframe})
+        for ob in getattr(result, "order_blocks", []) or []:
+            if ob.signal_id:
+                elements.append({"signal_id": ob.signal_id, "type": "order_block",
+                                 "zone": [round(float(ob.bottom), 4), round(float(ob.top), 4)],
+                                 "timeframe": args.timeframe})
+        for f in getattr(result, "fvgs", []) or []:
+            if f.signal_id:
+                elements.append({"signal_id": f.signal_id, "type": "fvg",
+                                 "zone": [round(float(f.bottom), 4), round(float(f.top), 4)],
+                                 "timeframe": args.timeframe})
+        for k in getattr(result, "key_levels", []) or []:
+            if k.signal_id:
+                elements.append({"signal_id": k.signal_id, "type": "key_level",
+                                 "level": round(float(k.price), 4),
+                                 "name": k.name, "timeframe": args.timeframe})
+        ep = Path(args.emit_chart_elements)
+        ep.parent.mkdir(parents=True, exist_ok=True)
+        ep.write_text(json.dumps(elements, ensure_ascii=False, indent=2), encoding="utf-8")
     return out
 
 
@@ -711,6 +742,8 @@ def main() -> None:
                     help="plot window end / last closed bar")
     ap.add_argument("--sweep-reclaim-bars", type=int, default=3)
     ap.add_argument("--out", default="ict_plan.png")
+    ap.add_argument("--emit-chart-elements", default=None,
+                    help="write chart_elements JSON (signal_id list for visual-structural consistency)")
     ap.add_argument("--plan-json", default=None,
                     help="ict-trader plan JSON; only decision=TRADE is used")
     ap.add_argument("--direction", choices=["long", "short"], default=None)

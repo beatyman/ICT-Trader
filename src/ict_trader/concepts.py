@@ -134,6 +134,7 @@ class FVG:
     volume_ratio: float = 0.0
     first_presented: bool = False
     touched_at: int | None = None
+    signal_id: str = ""
 
     @property
     def ce(self) -> float:
@@ -156,6 +157,7 @@ class OrderBlock:
     created: int
     active: bool = True
     mitigated: bool = False
+    signal_id: str = ""
 
     @property
     def mean(self) -> float:

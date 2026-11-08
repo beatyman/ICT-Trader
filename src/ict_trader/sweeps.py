@@ -38,6 +38,7 @@ class KeyLevel:
     broken_at: int | None = None
     touches: int = 1
     quality: float = 0.0  # liquidity quality score (higher = more liquidity)
+    signal_id: str = ""
 
 
 @dataclass
@@ -54,6 +55,7 @@ class LiquiditySweep:
     volume_ratio: float = 0.0
     strength: int = 1
     reclaim_bars: int = 0
+    signal_id: str = ""
 
 
 def detect_key_levels(

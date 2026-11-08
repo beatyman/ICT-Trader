@@ -167,6 +167,9 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
             from .po3 import detect_po3
             res = analyze(df_15m, ICTConfig(mode="historical", show_sessions=False,
                                             show_htf_cisd=False, cisd_all=True, cisd_min_grade=0))
+            # 给 ICTResult 对象打 signal_id（与渲染层共用同一 id，实现图文一致）
+            from .schema import assign_result_signal_ids
+            assign_result_signal_ids(res)
             ict = inp["ict_trader_15m"]
             # ---- 用 audit() 取完整 ICT 决策数据（L5-03 方向 / L5-06 溢价折价 / Grade）----
             aud = {}
@@ -233,15 +236,17 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
             except Exception:
                 pass
 
-            # OB + FVG：只留 active（未 mitigated/filled）
+            # OB + FVG：只留 active（未 mitigated/filled），携带 signal_id（图文一致）
             ict["order_blocks"] = [{"type": "bullish" if ob.direction == "bull" else "bearish",
                                     "low": round(ob.bottom, 4), "high": round(ob.top, 4),
-                                    "mitigated": bool(ob.mitigated)}
+                                    "mitigated": bool(ob.mitigated),
+                                    "signal_id": ob.signal_id}
                                    for ob in getattr(res, "order_blocks", [])
                                    if not getattr(ob, "mitigated", True)][:5]
             ict["fvg"] = [{"type": "bullish" if f.direction == "bull" else "bearish",
                            "low": round(f.bottom, 4), "high": round(f.top, 4),
-                           "filled": bool(getattr(f, "mitigated", False))}
+                           "filled": bool(getattr(f, "mitigated", False)),
+                           "signal_id": f.signal_id}
                           for f in getattr(res, "fvgs", [])
                           if not getattr(f, "mitigated", True)][:5]
 
@@ -713,21 +718,18 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
         setup_score += 10                       # 强回抽
     setup_score = max(0, min(100, setup_score))
 
-    # signal_refs：本 setup 依据的流动性/结构信号 id（图文一致回溯）
+    # signal_refs：本 setup 依据的原始信号 id（图文一致回溯）。
+    # BSL/SSL/DOL 是「派生价位」（由 key_levels 计算），已进 meta.levels，不在此重复。
     sweep_sig = _get(inp, "ict_trader_15m", "liquidity", "sweep")
     signal_refs = []
     if sweep_sig is not None:
         signal_refs.append("SWP-0001")
-    if direction == "short" and nearest_bsl is not None:
-        signal_refs.append("BSL-0001")
-    elif direction == "long" and nearest_ssl is not None:
-        signal_refs.append("SSL-0001")
-    if dol is not None:
-        signal_refs.append("DOL-0001")
-    for i, _ob in enumerate((_get(inp, "ict_trader_15m", "order_blocks") or [])[:3], 1):
-        signal_refs.append(f"OB-{i:04d}")
-    for i, _f in enumerate((_get(inp, "ict_trader_15m", "fvg") or [])[:3], 1):
-        signal_refs.append(f"FVG-{i:04d}")
+    for _ob in (_get(inp, "ict_trader_15m", "order_blocks") or [])[:3]:
+        if _ob.get("signal_id"):
+            signal_refs.append(_ob["signal_id"])
+    for _f in (_get(inp, "ict_trader_15m", "fvg") or [])[:3]:
+        if _f.get("signal_id"):
+            signal_refs.append(_f["signal_id"])
 
     return {
         "id": f"{'L' if direction == 'long' else 'S'}{idx}",
