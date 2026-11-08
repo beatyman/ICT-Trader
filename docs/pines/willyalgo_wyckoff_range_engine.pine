@@ -1,0 +1,156 @@
+//@version=6
+// ══════════════════════════════════════════════════════════
+// WYCKOFF RANGE ENGINE [WillyAlgoTrader]
+// ══════════════════════════════════════════════════════════
+// Author:  Willy | WillyAlgoTrader
+// Version: 3.3.2
+//
+// 参考基准（已吸收进 ICT-Trader 引擎）：
+//   - 状态机 SC/BC → AR → ST → Spring/UTAD → TEST → SOS/SOW → LPS/LPSY → Phase A-E
+//     （已移植到 src/ict_trader/wyckoff.py）
+//   - 量价 effort ratio + 质量评分 climax/spring/sos 0-100
+//     （已移植到 src/ict_trader/wyckoff_quality.py）
+//   - u-space 归一化坐标（0=高潮边, 1=反应边）+ 区间规则 + SOS 目标追踪
+
+// ══════════════════════════════════════
+indicator(
+     title               = "Wyckoff Range Engine [WillyAlgoTrader]",
+     shorttitle          = "Wyckoff RE",
+     overlay             = true,
+     max_lines_count     = 500,
+     max_labels_count    = 500,
+     max_boxes_count     = 200,
+     max_bars_back       = 5000)
+
+// ══════════════════════════════════
+// CONSTANTS
+// ══════════════════════════════════
+GRP_MAIN   = "⚙️ Main Settings"
+GRP_SWING  = "〰️ Swing Engine"
+GRP_RANGE  = "📐 Range Rules"
+GRP_EVENT  = "🧩 Event Rules"
+GRP_VISUAL = "🎨 Visual Settings"
+GRP_RISK   = "🛡️ Risk Management"
+GRP_DASH   = "📊 Dashboard"
+GRP_ALERT  = "🔔 Alerts"
+GRP_COLORS = "🎨 Colors"
+
+INDICATOR_VERSION = "v3.3.2"
+INDICATOR_SHORT   = "WRE"
+
+// ── Trade engine ──
+WICK_BUFFER_ATR   = 0.25
+WICK_MIN_ATR      = 0.5
+LINE_FORWARD_BARS = 20
+LINE_UPDATE_BARS  = 8
+LABEL_OFFSET_BARS = 1
+FORM_LEN          = 10
+GAUGE_WIDTH       = 8
+MS_DAY            = 86400000
+STATS_PRUNE_DAYS  = 31
+RSI_LEN           = 14
+MAX_SWINGS        = 60
+EFF_BUF_MAX       = 3000
+
+// ── Schematic drawing ──
+EVENT_OFFSET_ATR  = 0.5
+PHASE_TAG_FRAC    = 0.14
+DIVIDER_PAD_FRAC  = 0.06
+MIN_PHASE_BARS    = 6
+PHASE_E_OFFSET_BARS = 8
+TAG_OFFSET_BARS   = 3
+
+// ══════════════════════════════════
+// INPUTS
+// ══════════════════════════════════
+// ── Main ──
+effModeInput = input.string("Auto", "Effort Source", options = ["Auto", "Volume", "Bar Range"], group = GRP_MAIN,
+     tooltip = "Chosen once per symbol.\n• Auto: volume if the symbol provides it, otherwise bar range\n" +
+               "• Effort of a bar = source / its baseline average (1.0 = normal)")
+effBaseLenInput = input.int(50, "Effort Baseline (bars)", minval = 10, maxval = 500, group = GRP_MAIN,
+     tooltip = "Lookback of the effort baseline (simple average). Bar effort ratio = effort / baseline.")
+atrLenInput = input.int(14, "ATR Period", minval = 1, maxval = 100, group = GRP_MAIN,
+     tooltip = "ATR used for swing reversals, range height, break distances and quality scores.")
+climaxScoreInput = input.int(60, "Climax Score Threshold (0–100)", minval = 20, maxval = 95, group = GRP_MAIN,
+     tooltip = "A swing low (high) becomes a Selling (Buying) Climax candidate when the climactic RUN that ends there\n" +
+               "(all consecutive lower-highs / higher-lows legs) scores at least this much: 30% mean effort of the run,\n" +
+               "30% peak bar effort, 20% run length in ATR, 20% velocity (ATR per bar). Higher = fewer, stronger climaxes.")
+climaxPeakInput = input.float(2.0, "Climax Peak Bar Effort (×baseline)", minval = 1.0, maxval = 6.0, step = 0.1, group = GRP_MAIN,
+     tooltip = "Hard gate: the climactic run must contain at least one bar with effort this many times the baseline.")
+trendSwingsInput = input.int(2, "Trend Context (lower lows in the run)", minval = 1, maxval = 6, group = GRP_MAIN,
+     tooltip = "The climactic run must contain at least this many earlier swing lows above the SC (for a BC: swing highs\n" +
+               "below it) while the swing highs keep falling (lows keep rising). Swing-structure replacement for an EMA filter.")
+entrySignalInput = input.string("LPS / LPSY", "Trade Entry Signal", options = ["LPS / LPSY", "Spring / UTAD", "SOS / SOW", "Spring + LPS"], group = GRP_MAIN,
+     tooltip = "Which Wyckoff event opens a position in the trade engine:\n" +
+               "• LPS / LPSY: last point of support/supply after the breakout (classic, recommended)\n" +
+               "• Spring / UTAD: early entry on the Phase C shakeout\n" +
+               "• SOS / SOW: breakout bar\n• Spring + LPS: both (opposite signal reverses, same-direction ignored)")
+
+// ── Swing engine ──
+swingRevInput = input.float(1.0, "Swing Reversal (×ATR)", minval = 0.5, maxval = 6.0, step = 0.1, group = GRP_SWING,
+     tooltip = "A swing high is confirmed when a bar closes this many ATR below the running high (swing low: above\n" +
+               "the running low). Smaller = more swings, earlier confirmation of ST / TEST / LPS, more noise. Recommended 0.8–1.5.")
+
+// ── Range rules ──
+arRetraceInput = input.float(0.5, "AR Min Retrace (fraction of climactic run)", minval = 0.1, maxval = 1.0, step = 0.02, group = GRP_RANGE,
+     tooltip = "The Automatic Rally / Reaction must retrace at least this fraction of the climactic run (from the start\n" +
+               "of the final decline/advance to the climax extreme). Shallower bounces are ignored and the candidate keeps\n" +
+               "waiting; a deeper extreme extends the candidate.")
+minHeightAtrInput = input.float(3.0, "Min Range Height (×ATR)", minval = 0.5, maxval = 20.0, step = 0.25, group = GRP_RANGE,
+     tooltip = "Minimum distance between the climax extreme and the AR swing.")
+maxHeightAtrInput = input.float(8.0, "Max Range Height (×ATR)", minval = 2.0, maxval = 40.0, step = 0.5, group = GRP_RANGE,
+     tooltip = "If the automatic reaction keeps extending (AR+) beyond this height before the first ST, the structure is a\n" +
+               "trend, not a range: the candidate is dropped (gray 'NO RANGE - trend').")
+arMaxBarsInput = input.int(60, "Max Bars To Confirm AR", minval = 5, maxval = 500, group = GRP_RANGE,
+     tooltip = "Counted from the (latest) climax swing bar. If no qualifying AR swing is confirmed in time, the candidate is discarded.")
+maxRangeBarsInput = input.int(400, "Range Lifetime (bars)", minval = 20, maxval = 5000, group = GRP_RANGE,
+     tooltip = "Counted from the climax bar. A range without a breakout by then is closed as TIMED OUT (gray).")
+
+// ── Event rules (all zones are fractions of range height measured from the climax side) ──
+stZoneInput = input.float(0.30, "ST Zone (u ≤)", minval = 0.05, maxval = 0.9, step = 0.05, group = GRP_EVENT,
+     tooltip = "Secondary Test: a climax-side swing inside the range with u ≤ this value\n(u = 0 climax edge, u = 1 reaction edge).")
+maxSTInput = input.int(3, "Max ST Per Range", minval = 0, maxval = 6, group = GRP_EVENT,
+     tooltip = "0 together with 'Spring Needs A Prior ST' makes Spring/UTAD impossible (validation stops the script).")
+requireSTInput = input.bool(true, "Spring Needs A Prior ST", group = GRP_EVENT,
+     tooltip = "Springs happen in Phase C after the range was tested. With this on, a swing beyond the climax side\n" +
+               "before the first ST only extends the range edge (marked 'ext').")
+reclaimBarsInput = input.int(8, "Reclaim Deadline (bars)", minval = 1, maxval = 40, group = GRP_EVENT,
+     tooltip = "After a swing beyond the climax side is confirmed, price must close back inside the range within\n" +
+               "this many bars. Otherwise the range is BROKEN.")
+failDistAtrInput = input.float(0.5, "Decisive Break Distance (×ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_EVENT,
+     tooltip = "A close this far beyond the climax edge ends the range immediately as BROKEN.")
+testZoneInput = input.float(0.4, "Test Zone (u ≤)", minval = 0.05, maxval = 0.9, step = 0.05, group = GRP_EVENT,
+     tooltip = "TEST: climax-side swing after the Spring, above the spring extreme, with u ≤ this value and a leg\n" +
+               "with less effort than the spring leg.")
+sosEffInput = input.float(1.2, "SOS / SOW Leg Effort (×baseline)", minval = 0.5, maxval = 5.0, step = 0.1, group = GRP_EVENT,
+     tooltip = "Mean effort of the breakout LEG (from the last climax-side swing to the breakout bar).\n" +
+               "A breakout is only recognised from Phase B on (after at least one ST or a Spring).")
+sosLegAtrInput = input.float(1.5, "SOS / SOW Leg Length (×ATR)", minval = 0.25, maxval = 10.0, step = 0.25, group = GRP_EVENT,
+     tooltip = "Length of the breakout leg in ATR units at the breakout bar.")
+sosLogicInput = input.string("Effort OR leg length", "SOS / SOW Confirmation", options = ["Effort OR leg length", "Effort AND leg length"], group = GRP_EVENT,
+     tooltip = "OR = either a strong leg or a long leg qualifies. AND = both required (stricter).")
+sosBufAtrInput = input.float(0.1, "SOS / SOW Close Beyond Range (×ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = GRP_EVENT,
+     tooltip = "Breakout close must exceed the reaction edge by this ATR multiple.")
+lpsFloorInput = input.float(0.75, "LPS / LPSY Floor (u ≥)", minval = 0.5, maxval = 1.5, step = 0.05, group = GRP_EVENT,
+     tooltip = "After SOS/SOW the first climax-side swing with u ≥ this value is the LPS / LPSY.\n" +
+               "0.75 = upper quarter or above the range. 1.0 = must hold above the range edge.\n" +
+               "A close below the midline (u < 0.5) after SOS fails the breakout.")
+lpsMaxBarsInput = input.int(60, "LPS Search Window (bars)", minval = 5, maxval = 500, group = GRP_EVENT,
+     tooltip = "After SOS/SOW. If no LPS appears, the range closes as MARKUP / MARKDOWN without LPS.")
+markUTInput = input.bool(true, "Mark UT / SHAKEOUT (reaction-side false break)", group = GRP_EVENT,
+     tooltip = "A reaction-side swing beyond the range edge after the first ST that did not qualify as SOS/SOW.\n" +
+               "Before the first ST such a swing extends the AR instead (marked 'AR+'). Does not change state.")
+projMultInput = input.float(1.0, "Target Projection (×range height)", minval = 0.25, maxval = 5.0, step = 0.25, group = GRP_EVENT,
+     tooltip = "Measured-move target after SOS/SOW: reaction edge + height × multiplier.")
+projBarsInput = input.int(40, "Target Line Extension (bars)", minval = 5, maxval = 300, group = GRP_EVENT,
+     tooltip = "Visual length of the target line.")
+tgtMarginAtrInput = input.float(0.5, "Target Must Be Ahead Of SOS Close (×ATR)", minval = 0.0, maxval = 5.0, step = 0.1, group = GRP_EVENT,
+     tooltip = "Outcome tracking starts only if the target is at least this far ahead of the SOS close;\n" +
+               "otherwise the case is counted as 'target already passed' and excluded from the hit rate.")
+outcomeBarsInput = input.int(120, "SOS Outcome Horizon (bars)", minval = 10, maxval = 1000, group = GRP_EVENT,
+     tooltip = "Bars after SOS to reach the target before a close back below the midline. Expiry is checked first.")
+
+// ══════════════════════════════════════
+// (完整计算逻辑/交易引擎/绘图/仪表盘 见完整原始脚本；
+//  核心状态机已移植到 wyckoff.py，质量评分已移植到 wyckoff_quality.py)
+// ══════════════════════════════════════
