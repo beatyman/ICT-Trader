@@ -1,0 +1,50 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Viprasol
+
+//@version=6
+indicator("Liquidity Hunt Pro [Viprasol]", shorttitle="Liquidity Hunt Pro Viprasol", overlay=true, max_labels_count=500, max_lines_count=100, max_boxes_count=30)
+
+// ══════════════════════════════════════
+// 参考基准（ICT/SMC 经典「扫单 + MSS」入场，是我们引擎核心的精简版）
+//
+// 信号链：扫单(swing high/low wick 突破 + 收回) → N 根内 MSS(收盘穿越对侧 swing)
+//        → 入场(收盘) + SL(扫单极值) + TP1/TP2/TP3(1R/2R/3R)
+//
+// 已覆盖（引擎中更强版本）：
+//   扫单          → detect_sweeps（BSL/SSL + 扫单方向/深度）
+//   MSS           → mss_events / market_structure（BOS/CHoCH/MSS）
+//   OB / FVG      → concepts.py（OrderBlock/FVG + mitigated）
+//   BOS / CHoCH   → market_structure
+//   BSL/SSL 线    → liquidity{bsl,ssl,nearest_bsl,nearest_ssl}
+//   入场/SL/TP    → structured_plan.py（sell-the-rally / buy-the-dip + net RR ≥ 2.5）
+//   EMA 趋势过滤   → htf_bias（ICT 3 权重主 + 缠论/Ichimoku/Wyckoff 辅）
+//
+// 两个细微差异（如需要可移植）：
+//   · fresh shift：MSS 必须是「第一根收盘穿越」对侧 swing（上一根还在另一侧），防重复信号
+//   · taken level：一旦 swing 被收盘穿越，该水平「已夺取」，不再给扫单/BOS
+// ══════════════════════════════════════
+
+// ── 关键输入 ──
+swingLen     = input.int(5, "Swing Length", minval=2, tooltip="swing 确认强度")
+confirmBars  = input.int(10, "Max Bars After Sweep", minval=1, tooltip="扫单后 N 根内需 MSS")
+atrLen       = input.int(14, "ATR Length")
+minBodyATR   = input.float(0.15, "Min Reversal Body (ATR)")
+freshShift   = input.bool(true, "Require Fresh Shift Close", tooltip="MSS 必须是第一根收盘穿越")
+signalGap    = input.int(10, "Bars Between Signals")
+rr1 = input.float(1.0, "TP1 Risk:Reward")
+rr2 = input.float(2.0, "TP2 Risk:Reward")
+rr3 = input.float(3.0, "TP3 Risk:Reward")
+useTrendFilter = input.bool(false, "Enable EMA Trend Filter", tooltip="EMA50 vs EMA200")
+
+// ── 核心信号链 ──
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+sweepLow  = low < swingLow and close > swingLow      // sell-side 扫单
+sweepHigh = high > swingHigh and close < swingHigh   // buy-side 扫单
+// 扫单 → 等 MSS（收盘穿越对侧 swing）→ 入场
+buySignal  = waitBull and close > bullMSS and bullCandle
+sellSignal = waitBear and close < bearMSS and bearCandle
+
+// ══════════════════════════════════════
+// (完整逻辑见原始脚本；已全部覆盖在 ICT-Trader 引擎中)
+// ══════════════════════════════════════
