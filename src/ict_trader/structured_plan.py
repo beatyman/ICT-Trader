@@ -88,7 +88,8 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
             "market_structure": None,       # BOS / CHoCH / MSS
             "structure_direction": None,    # bullish / bearish
             "liquidity": {"bsl": [], "ssl": [], "sweep": None,
-                          "nearest_bsl": None, "nearest_ssl": None, "dol": None},
+                          "nearest_bsl": None, "nearest_ssl": None, "dol": None,
+                          "reclaim_strength": None, "reclaim_direction": None},
             "order_blocks": [],             # 仅 active（未 mitigated）
             "fvg": [],                      # 仅 active（未 filled）
             "premium_discount": None,       # premium / discount / equilibrium
@@ -219,6 +220,18 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
             from .sweeps import nearest_key_target
             unswept = [k for k in res.key_levels if not getattr(k, "swept", False)]
             liq["dol"] = round(nearest_key_target(unswept, price, False), 4) if unswept else None
+
+            # 分形模型 C1-C4：Reclaim Strength（扫单回抽强度）+ 生存率
+            try:
+                from .fractal import detect_fractal_reclaim, reclaim_stats
+                frac_setups = detect_fractal_reclaim(df_15m, tail=500)
+                if frac_setups:
+                    latest = frac_setups[-1]
+                    liq["reclaim_strength"] = latest["rs"]
+                    liq["reclaim_direction"] = latest["direction"]
+                md["fractal"] = reclaim_stats(df_15m, tail=500)
+            except Exception:
+                pass
 
             # OB + FVG：只留 active（未 mitigated/filled）
             ict["order_blocks"] = [{"type": "bullish" if ob.direction == "bull" else "bearish",
@@ -473,6 +486,18 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
         conf += 5   # 扫单反转
     if _get(inp, "ict_trader_15m", "killzone") not in (None, "none"):
         conf += 5
+    # 分形回抽强度（RS）：方向一致时，强回抽(>=100)加分，弱回抽(<10)减分
+    rs = _num(_get(inp, "ict_trader_15m", "liquidity", "reclaim_strength"))
+    rs_dir = _get(inp, "ict_trader_15m", "liquidity", "reclaim_direction")
+    rs_aligns = (rs_dir == "bull" and direction == "long") or \
+                (rs_dir == "bear" and direction == "short")
+    if rs is not None and rs_aligns:
+        if rs >= 100:
+            conf += 10   # 收盘越过 C1 极值 → 96.8% 存活（统计优势）
+        elif rs >= 50:
+            conf += 5
+        elif rs < 10:
+            conf -= 10   # 勉强收回 → 仅 31% 存活
     conf = max(0, min(100, conf))
 
     inv = (f"close below {round(sl, 4)} invalidates long" if direction == "long"
@@ -489,7 +514,8 @@ def _build_setup(inp: dict, direction: str, bias: str, kind: str, idx: int,
             f"structure: {_get(inp, 'ict_trader_15m', 'market_structure') or 'n/a'} "
             f"{_get(inp, 'ict_trader_15m', 'structure_direction') or ''}",
             f"liquidity: sweep={_get(inp, 'ict_trader_15m', 'liquidity', 'sweep') or 'none'}, "
-            f"nearest_bsl={nearest_bsl}, nearest_ssl={nearest_ssl}, DOL={dol}",
+            f"nearest_bsl={nearest_bsl}, nearest_ssl={nearest_ssl}, DOL={dol}, "
+            f"reclaim_strength={rs if rs is not None else 'n/a'}",
             f"PD: {_get(inp, 'ict_trader_15m', 'premium_discount') or 'n/a'}, "
             f"PO3: {_get(inp, 'ict_trader_15m', 'po3_phase') or 'n/a'}, "
             f"grade: {g.get('grade') or 'n/a'} ({g.get('hits', 0)}/{g.get('enabled', 0)})",
