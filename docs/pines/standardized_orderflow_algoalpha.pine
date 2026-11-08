@@ -1,0 +1,30 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AlgoAlpha
+
+//@version=5
+indicator(title='Standardized Orderflow [AlgoAlpha]', shorttitle = "AlgoAlpha - ⨊ Standardized Orderflow", precision = 3, overlay=false)
+
+// ══════════════════════════════════════════════════════════
+// 参考基准（已吸收进 ICT-Trader 引擎 → src/ict_trader/orderflow.py）
+//
+//   · order_flow：成交量差值（涨 +vol / 跌 -vol）滚动和 + HMA 平滑
+//   · standardized_order_flow：z-score 标准化（of / 2×std），跨品种可比
+//   · order_velocity：标准化订单流的变化率
+//   · 常规 + 隐藏顶/底背离（在订单流曲线上）
+//
+// 定位：辅助层「订单流 / 资金流」——买卖压力，方向确认 + 动能衰竭预警。
+// ══════════════════════════════════════════════════════════
+
+// ── 核心 ──
+orderFlow = sum(close > close[1] ? volume : (close < close[1] ? -volume : 0), window)
+orderFlow := useSmoothing ? hma(orderFlow, smoothingLength) : orderFlow
+stdDev = stdev(orderFlow, 45)
+normalizedOrderFlow = orderFlow / (stdDev + stdDev)   // z-score 归一
+
+// 订单速度 = (norm - ma(norm, signal)) * 10 的再平滑
+// 反转：normalizedOF crossover -1.5（多）/ crossunder +1.5（空）
+// 隐藏背离：价 HL + 曲线 LL（隐藏多）；价 LH + 曲线 HH（隐藏空）
+
+// ══════════════════════════════════════════════════════════
+// (完整逻辑见原始脚本；核心已移植到 orderflow.py)
+// ══════════════════════════════════════════════════════════
