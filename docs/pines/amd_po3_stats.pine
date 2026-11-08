@@ -1,0 +1,77 @@
+//@version=6
+// ══════════════════════════════════════════════════════════
+// AMD Po3 WITH LIVE EDGE STATS [WillyAlgoTrader]
+// ══════════════════════════════════════════════════════════
+// Author:  Willy | WillyAlgoTrader
+// Version: 2.4.0
+//
+// 参考基准（已吸收进 ICT-Trader 引擎）：
+//   · AMD 状态机 idle→accum→sweepPending→manip→dist
+//     （核心已移植到 src/ict_trader/po3.py）
+//   · 派发目标 = 操纵腿斐波那契外延（默认 1.5）
+//     （已移植到 src/ict_trader/amd.py → po3_fib_target）
+//   · 走前优势统计（目标命中率 / 平均 R / form）
+//     （已移植到 src/ict_trader/amd.py → AmdEdgeStats）
+
+// ══════════════════════════════════
+indicator(
+     title            = "AMD Po3 with Live Edge Stats [WillyAlgoTrader]",
+     shorttitle       = "AMD Po3 Stats",
+     overlay          = true,
+     max_boxes_count  = 500,
+     max_lines_count  = 500,
+     max_labels_count = 500)
+
+// ══════════════════════════════════
+// 2. CONSTANTS
+// ══════════════════════════════════
+GRP_RANGE  = "⚙️ Range (Accumulation)"
+GRP_SWEEP  = "🌀 Manipulation (Sweep)"
+GRP_DIST   = "🚀 Distribution"
+GRP_MODEL  = "🎯 Reference Model & Stats"
+GRP_FILTER = "🔍 Filters"
+
+INDICATOR_VERSION = "v2.4.0"
+
+LINE_UPDATE_BARS  = 5
+LABEL_OFFSET_BARS = 1
+FORM_LEN          = 10
+MS_DAY            = 86400000
+STATS_PRUNE_DAYS  = 31
+COOLDOWN_BARS     = 10
+RANGE_WIN         = 20
+PIVOT_LR          = 3
+PIVOT_CAP         = 60
+EQ_LOOKBACK       = 96
+
+// ── Range ──
+minRangeBarsInput   = input.int(12, "Min range maturity, bars", minval = 8, maxval = 40, group = GRP_RANGE)
+maxRangeBarsInput   = input.int(96, "Max range age, bars", minval = 48, maxval = 192, group = GRP_RANGE)
+compressionPctInput = input.int(25, "Compression threshold, percentile", minval = 10, maxval = 50, group = GRP_RANGE)
+statWindowInput     = input.int(200, "Distribution window, bars", minval = 100, maxval = 500, group = GRP_RANGE)
+rangeToleranceInput = input.float(0.10, "Boundary expansion tolerance", minval = 0.0, maxval = 0.30, step = 0.01, group = GRP_RANGE)
+minRangeWidthPInput = input.float(0.15, "Min range width, % of price", minval = 0.05, maxval = 1.0, step = 0.05, group = GRP_RANGE)
+boundaryModeInput   = input.string("pivot", "Boundary method", options = ["pivot", "absolute"], group = GRP_RANGE)
+trimTailPctInput    = input.int(15, "Impulse-tail trim, % of width", minval = 0, maxval = 40, group = GRP_RANGE)
+
+// ── Manipulation ──
+sweepReturnBarsInput  = input.int(6, "Max bars until return", minval = 2, maxval = 16, group = GRP_SWEEP)
+requireLiquidityInput = input.bool(false, "Require liquidity beyond boundary (EQH/EQL)", group = GRP_SWEEP)
+sweepDepthPctInput    = input.int(100, "Soft depth cap, percentile (100 = off)", minval = 80, maxval = 100, group = GRP_SWEEP)
+allowRearmInput       = input.bool(true, "Allow re-arm (double sweep)", group = GRP_SWEEP)
+
+// ── Distribution ──
+distTimeoutBarsInput   = input.int(64, "Distribution timeout, bars", minval = 24, maxval = 128, group = GRP_DIST)
+
+// ── Reference model & stats ──
+stopBufAtrInput = input.float(0.4, "Stop buffer past sweep, × ATR anchor", minval = 0.0, maxval = 1.5, step = 0.05, group = GRP_MODEL)
+fibExtInput     = input.float(1.5, "Fib extension target", minval = 1.0, maxval = 3.0, step = 0.001, group = GRP_MODEL)
+
+// ── Filters ──
+useKillzonesInput = input.bool(false, "Killzones (sweep only in sessions)", group = GRP_FILTER)
+useHtfBiasInput   = input.bool(false, "HTF bias (EMA50)", group = GRP_FILTER)
+htfTfInput        = input.timeframe("240", "HTF bias timeframe", group = GRP_FILTER)
+
+// ══════════════════════════════════
+// (完整 FSM/绘图/仪表盘见原始脚本；核心已移植到 po3.py + amd.py)
+// ══════════════════════════════════
