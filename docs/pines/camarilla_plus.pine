@@ -1,0 +1,41 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=4
+study("Camarilla++", overlay = true)
+
+// ══════════════════════════════════════
+// 参考基准（大杂烩指标，12 个工具；已吸收进 ICT-Trader 引擎 → src/ict_trader/camarilla.py）
+//
+//   已吸收（辅助「点位判定」）：
+//     · Camarilla 枢轴：H1-H6 / L1-L6 / Pivot / BC / TC
+//       （H3/H4/L3/L4 = 反转区，H5/L5 = 极值，H6/L6 = 终极极值）
+//     · VWAP：成交量加权均价（机构锚点）
+//
+//   未吸收（已覆盖或属大杂烩冗余）：
+//     GRaB/EMA/Hull/回归通道 → 我们已有 EMA/Ichimoku/回归(r_squared)
+//     MACD+RSI/TKE/RSI Swing/PPO/VPT/PivotBoss → 与已有 adaptive_rsi/patterns/synapse 重叠
+// ══════════════════════════════════════
+
+// ── Camarilla 核心方程 ──
+range = high - low
+H5 = (high / low) * close
+H4 = close + range * 1.1/2
+H3 = close + range * 1.1/4
+H2 = close + range * 1.1/6
+H1 = close + range * 1.1/12
+H6 = H5 + 1.168 * (H5 - H4)
+L1 = close - range * 1.1/12
+L2 = close - range * 1.1/6
+L3 = close - range * 1.1/4
+L4 = close - range * 1.1/2
+L5 = close - (H5 - close)
+L6 = close - (H6 - close)
+pivot = (high + low + close) / 3
+bc = (high + low) / 2
+tc = pivot - bc + pivot
+
+// ── VWAP ──
+NormalVwap = vwap(hlc3)
+
+// ══════════════════════════════════════
+// (完整逻辑见原始脚本；核心已移植到 camarilla.py)
+// ══════════════════════════════════════
