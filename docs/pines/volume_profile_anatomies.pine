@@ -1,0 +1,37 @@
+//@version=6
+// =============================================================================
+//  DIFFERENT VOLUME PROFILE ANATOMIES  (1 D-shape | 2 B-shape | 3 P-shape | 4 Double Zone)
+//  - WillyAlgoTrader 参考基准
+//
+//  已吸收进 ICT-Trader 引擎：
+//    · 成交量分布（volume profile）→ src/ict_trader/cyq.py（从 InStock 吸收）
+//    · POC / VAH / VAL（价值区）   → src/ict_trader/vp_anatomy.py
+//    · 形状分类 D/B/P/Double Zone  → src/ict_trader/vp_anatomy.py
+//
+//  形状分类（POC 位置 + 第二峰）：
+//    1 D-shape      = POC 居中（均衡市，正常波动）
+//    2 B-shape      = POC 偏下（均衡市，强短期波动）
+//    3 P-shape      = POC 偏上（单边趋势动量：bull/bear run）
+//    4 Double Zone  = 双峰（bimodal 盘整）
+// =============================================================================
+indicator('Volume Profile Anatomies (D / B / P / Double Zone)', shorttitle = 'VP Anatomies', overlay = true, max_bars_back = 1000, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ------------------------------- INPUTS --------------------------------------
+liveOn = input.bool(true, 'Live Detection', group = 'General')
+galleryOn = input.bool(true, 'Show Gallery (1-4)', group = 'General')
+lookback = input.int(100, 'Profile Lookback (bars)', minval = 20, maxval = 1000, group = 'Live Profile')
+rowsIn = input.int(30, 'Profile Rows', minval = 10, maxval = 60, group = 'Live Profile')
+wLive = input.int(25, 'Histogram Width (bars)', minval = 8, maxval = 80, group = 'Live Profile')
+placeIn = input.string('Right of last bar', 'Histogram Placement', options = ['Right of last bar', 'Left of range'], group = 'Live Profile')
+vaPct = input.float(70.0, 'Value Area %', minval = 50.0, maxval = 95.0, group = 'Live Profile') / 100.0
+showTable = input.bool(true, 'Show diagnostics table', group = 'Live Profile')
+
+smoothN = input.int(2, 'Smoothing passes (classifier)', minval = 0, maxval = 5, group = 'Classifier')
+secondRatio = input.float(0.60, '2nd peak min size vs POC', minval = 0.2, maxval = 1.0, step = 0.05, group = 'Classifier')
+valleyRatio = input.float(0.70, 'Valley max size vs 2nd peak', minval = 0.1, maxval = 1.0, step = 0.05, group = 'Classifier')
+posHi = input.float(0.66, 'P-shape if POC position above', minval = 0.5, maxval = 0.95, step = 0.01, group = 'Classifier')
+posLo = input.float(0.34, 'B-shape if POC position below', minval = 0.05, maxval = 0.5, step = 0.01, group = 'Classifier')
+
+// ══════════════════════════════════════
+// (完整分类/绘图逻辑见原始脚本；核心已移植到 cyq.py + vp_anatomy.py)
+// ══════════════════════════════════════
