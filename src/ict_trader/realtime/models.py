@@ -131,6 +131,7 @@ class Kline:
             "quote_volume": self.quote_volume,
             "trades": self.trades,
             "is_closed": self.is_closed,
+            "ingest_time": self.ingest_time,
         }
 
     def to_csv_row(self) -> dict[str, Any]:

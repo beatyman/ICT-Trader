@@ -595,7 +595,14 @@
     badge.hidden = !anchorSignal;
     if (anchorSignal) badge.textContent = `SIG ${shortDate(anchorSignal.bar_time)}`;
     $("#liveChartBtn").hidden = !anchorSignal;
-    $("#chartFeedNote").textContent = snap.mode === "demo" ? "simulated tape · closed-bar signals" : "Binance WS · closed-bar signals";
+    const freshness = liveEdge && lastBar?.ingest_time
+      ? Math.max(0, num(snap.server_time) - num(lastBar.ingest_time))
+      : null;
+    $("#chartFeedNote").textContent = anchorSignal
+      ? "historical signal context"
+      : freshness !== null
+        ? `live candle · ${freshness}ms old · closed-bar signals`
+        : (snap.mode === "demo" ? "simulated tape · closed-bar signals" : "Binance WS · closed-bar signals");
     $("#sbSymbols").textContent = `${(snap.config?.symbols || []).length} symbols · ${S.tf}`;
   }
 
