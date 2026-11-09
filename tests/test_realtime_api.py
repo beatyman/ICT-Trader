@@ -16,6 +16,19 @@ class FakeRunner:
     def __init__(self) -> None:
         self.signals = []
 
+    def frame(self, symbol, limit=80):
+        return []
+
+
+class FakeAI:
+    available = False
+
+    def status(self):
+        return {"configured": False, "enabled": False, "model": "deepseek-flash"}
+
+    async def review(self, snapshot, bars, symbol):
+        raise RuntimeError("not configured")
+
 
 class FakeEngine:
     def __init__(self, tmp_path):
@@ -24,6 +37,7 @@ class FakeEngine:
                                  data_dir=tmp_path)
         self.metrics = Metrics()
         self.runner = FakeRunner()
+        self.ai = FakeAI()
         self.phase = "ready"
         self.boot_error = ""
         self.boot_done = 1
@@ -63,7 +77,7 @@ class FakeEngine:
                         "return_pct": 0},
             "positions": [], "trades": [], "equity_curve": [],
             "stats": {"trades": 0}, "metrics": self.metrics.snapshot(),
-            "selected": "BTCUSDT",
+            "ai": self.ai.status(), "selected": "BTCUSDT",
         }
 
 
@@ -79,6 +93,11 @@ def test_dashboard_routes_and_websocket(tmp_path):
         bars = client.get("/api/klines?symbol=BTCUSDT&interval=15m&limit=20")
         assert bars.status_code == 200
         assert len(bars.json()["bars"]) == 1
+        ai = client.get("/api/ai/status")
+        assert ai.status_code == 200
+        assert ai.json()["configured"] is False
+        review = client.post("/api/ai/review", json={"symbol": "BTCUSDT"})
+        assert review.status_code == 503
         with client.websocket_connect("/ws") as ws:
             payload = ws.receive_json()
             assert payload["trading_mode"] == "PAPER"

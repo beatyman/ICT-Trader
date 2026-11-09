@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import orjson
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .ai import AiReviewError
 from .engine import RealtimeEngine
 
 log = logging.getLogger(__name__)
@@ -136,6 +137,27 @@ def create_app(engine: RealtimeEngine) -> FastAPI:
     @app.get("/api/signals")
     async def signals() -> JSONResponse:
         return JSONResponse([s.to_public() for s in engine.runner.signals[:50]])
+
+    @app.get("/api/ai/status")
+    async def ai_status() -> JSONResponse:
+        return JSONResponse(engine.ai.status())
+
+    @app.post("/api/ai/review")
+    async def ai_review(payload: dict | None = Body(default=None)) -> JSONResponse:
+        payload = payload or {}
+        symbol = str(payload.get("symbol") or engine.settings.symbols[0]).upper()
+        if symbol not in engine.settings.symbols:
+            return JSONResponse({"ok": False, "error": "unknown symbol"}, status_code=400)
+        if not engine.ai.available:
+            return JSONResponse({"ok": False, "error": "DeepSeek API key is not configured"}, status_code=503)
+        if engine.phase != "ready":
+            return JSONResponse({"ok": False, "error": "engine is not ready"}, status_code=409)
+        bars = engine.runner.frame(symbol, 80)
+        try:
+            result = await engine.ai.review(engine.snapshot(), bars, symbol)
+        except AiReviewError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+        return JSONResponse({"ok": True, "review": result})
 
     @app.post("/api/paper/flatten")
     async def flatten() -> JSONResponse:

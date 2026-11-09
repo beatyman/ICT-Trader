@@ -13,6 +13,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from .ai import DeepSeekReviewer
 from .broker import PaperBroker
 from .config import Settings
 from .demo import DemoFeed, generate_history
@@ -223,6 +224,7 @@ class RealtimeEngine:
         )
         self.runner = ICTStrategyRunner(settings, self.metrics)
         self.broker = PaperBroker(settings, self.metrics)
+        self.ai = DeepSeekReviewer(settings, self.metrics)
         self.runner.on_signal = self._on_signal
         self.broker.on_trade = self._on_trade
         self.sessions: dict[tuple[str, str], StreamSession] = {}
@@ -312,6 +314,7 @@ class RealtimeEngine:
         if self._health_task is not None:
             self._health_task.cancel()
             self._health_task = None
+        await self.ai.close()
         await self.ch.stop()
         await self.rest.close()
         await self.redis.stop()
@@ -545,6 +548,7 @@ class RealtimeEngine:
             "equity_curve": broker["equity_curve"],
             "stats": broker["stats"],
             "metrics": metrics,
+            "ai": self.ai.status(),
             "selected": self.settings.symbols[0] if self.settings.symbols else "",
         }
 

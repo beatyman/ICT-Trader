@@ -205,7 +205,10 @@
         <section class="panel setup-panel">
           <div class="panel-head">
             <span class="eyebrow">LATEST SETUP</span>
-            <span class="setup-status" id="setupStatus">WAITING</span>
+            <div class="setup-head-actions">
+              <span class="setup-status" id="setupStatus">WAITING</span>
+              <button class="ai-head-btn" id="aiReviewBtnTop" title="DeepSeek Flash risk review">AI</button>
+            </div>
           </div>
           <div id="setupContent">
             <div class="setup-empty">
@@ -236,8 +239,8 @@
           </div>
           <div class="ai-reserved">
             <span class="ai-mark">DS</span>
-            <div><b>DeepSeek review</b><small id="aiStatus">API key reserved</small></div>
-            <span class="soon">SOON</span>
+            <div><b>DeepSeek Flash</b><small id="aiStatus">risk review · not an order</small></div>
+            <button class="mini-btn ai-btn" id="aiReviewBtn">REVIEW</button>
           </div>
         </section>
       </aside>
@@ -265,6 +268,25 @@
   </div>
 
   <div class="toast-stack" id="toastStack"></div>
+
+  <div class="modal-backdrop" id="aiModal" hidden>
+    <div class="ai-modal" role="dialog" aria-modal="true" aria-labelledby="aiModalTitle">
+      <header class="ai-modal-head">
+        <div class="ai-modal-title">
+          <span class="ai-orb">DS</span>
+          <div><span class="eyebrow">DEEPSEEK FLASH</span><h2 id="aiModalTitle">Risk review</h2></div>
+        </div>
+        <div class="ai-modal-actions">
+          <span class="ai-paper-tag">PAPER · ADVISORY ONLY</span>
+          <button class="icon-btn" id="aiCloseBtn" aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+      </header>
+      <div class="ai-modal-body" id="aiModalBody"></div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

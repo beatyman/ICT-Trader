@@ -14,9 +14,10 @@ per-stream queue → gap state machine → REST backfill / replay
         └── ICT setup on CLOSED bars → paper broker → dashboard
 ```
 
-It is **paper-only by design**. There is no order routing, no API key, and no
-claim that the frozen setup is profitable. The engine refuses to start if
-`PAPER_TRADE=false`.
+It is **paper-only by design**. There is no exchange order API key, no order
+routing, and no claim that the frozen setup is profitable. The engine refuses
+to start if `PAPER_TRADE=false`. An optional server-side DeepSeek Flash key is
+used only for on-demand risk review.
 
 ![Realtime paper terminal](assets/realtime-dashboard.png)
 
@@ -192,10 +193,25 @@ build_setup(df_15m, result, SetupConfig(market="crypto", stack=...))
 * WebSocket snapshot at 1 Hz, `/api/snapshot`, `/api/klines`,
   `/api/health`, `/api/docs`.
 
-DeepSeek is intentionally **not called** in this build. `DEEPSEEK_API_KEY` is
-reserved and never sent to the browser; the UI shows "API key reserved". A later
-review layer can consume the same signal JSON without touching the execution
-path.
+### DeepSeek Flash risk review
+
+![DeepSeek Flash risk review](assets/realtime-ai-review.png)
+
+`DEEPSEEK_API_KEY` lives in `.env` (git-ignored) and is **never sent to the
+browser**. The model is called only when the operator presses `REVIEW`; it
+receives a compact snapshot (last 50 closed bars, selected-symbol signals,
+positions, account, gap/latency health) and returns structured JSON.
+
+* model: `deepseek-flash`, `reasoning_effort=low`, JSON-object response;
+* role: risk reviewer only — it cannot open, close or modify a paper position;
+* it is told to reject `HISTORICAL`/`actionable=false` setups and never invent
+  prices;
+* review latency observed locally: ~10–16s; ~6–8k prompt tokens per review;
+* `POST /api/ai/review {"symbol":"BTCUSDT"}` and `GET /api/ai/status` are the
+  API surface. The UI stores the last review for `/#ai` deep links.
+
+If no key is set, the button is disabled and the deterministic system runs
+exactly as before. The AI layer has no path into the execution broker.
 
 ## 7. Acceptance / validation
 

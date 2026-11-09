@@ -21,6 +21,9 @@
     notify: true,
     filter: "all",
     fetchSeq: 0,
+    aiBusy: false,
+    aiReview: null,
+    aiHashOpened: false,
   };
 
   const COINS = {
@@ -163,10 +166,16 @@
       S.firstSnapshot = false;
     }
 
+    if (snap.ai?.last_review && !S.aiReview) S.aiReview = snap.ai.last_review;
+
     renderAll(snap);
 
     if (S.phase === "ready" && !S.chartLoaded && !S.chartLoading) {
       loadBars();
+    }
+    if (location.hash === "#ai" && !S.aiHashOpened) {
+      S.aiHashOpened = true;
+      openAiModal();
     }
     if (S.phase === "ready" && wasFirst) {
       showToast("Engine ready", `${snap.config.symbols.length} symbols · paper execution only`, "success");
@@ -487,8 +496,20 @@
     Object.values(h.sessions || {}).forEach(s => { gaps += num(s.gaps); });
     $("#sbGaps").textContent = String(gaps);
     $("#sbRows").textContent = ch.rows != null ? fmtMoney(ch.rows, 0) : "—";
-    const ai = snap.config?.ai;
-    if (ai) $("#aiStatus").textContent = ai.configured ? `${ai.model} · configured` : "API key reserved";
+    const ai = snap.ai || snap.config?.ai || {};
+    for (const id of ["aiReviewBtn", "aiReviewBtnTop"]) {
+      const aiBtn = $("#" + id);
+      if (!aiBtn) continue;
+      aiBtn.disabled = !ai.configured || S.aiBusy;
+      if (id === "aiReviewBtn") aiBtn.textContent = S.aiBusy ? "REVIEWING" : "REVIEW";
+      else aiBtn.textContent = S.aiBusy ? "…" : "AI";
+    }
+    if (ai.configured) {
+      const reviews = num(ai.reviews);
+      $("#aiStatus").textContent = `${ai.model || "deepseek-flash"} · ${reviews} review${reviews === 1 ? "" : "s"}`;
+    } else {
+      $("#aiStatus").textContent = "API key not configured";
+    }
   }
 
   // ------------------------------------------------------------- chart header
@@ -842,6 +863,103 @@
     drawChart();
   }
 
+  // ------------------------------------------------------------- AI review
+  const AI_VERDICT = {
+    support: ["支持", "SUPPORT"],
+    caution: ["谨慎", "CAUTION"],
+    reject: ["否决", "REJECT"],
+  };
+
+  function openAiModal() {
+    const modal = $("#aiModal");
+    modal.hidden = false;
+    if (!S.aiReview) {
+      $("#aiModalBody").innerHTML = `<div class="ai-empty">点击 REVIEW，让 DeepSeek Flash 对当前 ${escapeHtml(S.symbol || "市场")} 的 paper setup、仓位、风险和系统健康做一次只读审查。模型不会下单。</div>`;
+    } else {
+      renderAiReview(S.aiReview);
+    }
+  }
+
+  function closeAiModal() {
+    $("#aiModal").hidden = true;
+  }
+
+  async function runAiReview() {
+    if (S.aiBusy) return;
+    const configured = S.snap?.ai?.configured ?? S.snap?.config?.ai?.configured;
+    if (!configured) {
+      showToast("DeepSeek not configured", "Set DEEPSEEK_API_KEY in .env and restart.", "error");
+      return;
+    }
+    S.aiBusy = true;
+    openAiModal();
+    $("#aiModalBody").innerHTML = `
+      <div class="ai-loading">
+        <div class="ring"></div>
+        <span>DEEPSEEK FLASH // REVIEWING ${escapeHtml(S.symbol || "")}</span>
+        <small style="color:var(--muted-2);font-size:7px">paper snapshot · closed bars · no order authority</small>
+      </div>`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 100000);
+    try {
+      const res = await fetch("/api/ai/review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: S.symbol }),
+        signal: controller.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      S.aiReview = data.review;
+      renderAiReview(data.review);
+      fetchSnapshot();
+      showToast("AI review ready", `${data.review.verdict.toUpperCase()} · ${data.review.confidence}/100`, "success");
+    } catch (err) {
+      const msg = err.name === "AbortError" ? "request timed out after 100s" : err.message;
+      $("#aiModalBody").innerHTML = `<div class="ai-error"><b>REVIEW FAILED</b><br>${escapeHtml(msg)}<br><br>检查 DeepSeek 余额/网络，或稍后重试。API key 不会在浏览器中显示。</div>`;
+      showToast("AI review failed", msg, "error");
+    } finally {
+      clearTimeout(timer);
+      S.aiBusy = false;
+      renderHealth(S.snap || {});
+    }
+  }
+
+  function aiList(items) {
+    if (!items || !items.length) return "<p>—</p>";
+    return `<ul>${items.map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`;
+  }
+
+  function renderAiReview(review) {
+    const v = AI_VERDICT[review.verdict] || AI_VERDICT.caution;
+    const usage = review.usage || {};
+    const tokens = usage.total_tokens ?? "—";
+    $("#aiModalBody").innerHTML = `
+      <div class="ai-result">
+        <div class="ai-verdict-row">
+          <div class="ai-verdict-card ${escapeHtml(review.verdict)}">
+            <div class="ai-verdict-kicker">RISK VERDICT · ${escapeHtml(review.symbol || S.symbol || "")}</div>
+            <div class="ai-verdict-label ${escapeHtml(review.verdict)}">${v[0]} <span style="font-size:11px;opacity:.55">${v[1]}</span></div>
+            <div class="ai-headline">${escapeHtml(review.headline || "")}</div>
+          </div>
+          <div class="ai-conf"><b>${num(review.confidence)}</b><span>CONFIDENCE</span></div>
+        </div>
+        <div class="ai-summary">${escapeHtml(review.summary || "")}</div>
+        <div class="ai-grid">
+          <div class="ai-section risk"><h3>RISK FLAGS</h3>${aiList(review.risk_flags)}</div>
+          <div class="ai-section notes"><h3>EXECUTION NOTES</h3>${aiList(review.execution_notes)}</div>
+          <div class="ai-section"><h3>INVALIDATION</h3><p>${escapeHtml(review.invalidation || "—")}</p></div>
+          <div class="ai-section"><h3>DATA QUALITY</h3><p>${escapeHtml(review.data_quality || "—")}</p></div>
+        </div>
+        <div class="ai-result-foot">
+          <span><b>${escapeHtml(review.model || "deepseek-flash")}</b> · ${num(review.latency_ms).toFixed(0)}ms · ${tokens} tokens</span>
+          <span>${escapeHtml(review.reviewed_at || "")} · ${escapeHtml(review.disclaimer || "advisory only")}</span>
+        </div>
+      </div>`;
+  }
+
   // ------------------------------------------------------------- controls
   function bindControls() {
     $("#watchlist").addEventListener("click", e => {
@@ -883,6 +1001,15 @@
       S.notify = !S.notify;
       e.currentTarget.style.color = S.notify ? "var(--green)" : "var(--muted)";
       showToast("Notifications", S.notify ? "Signal alerts enabled." : "Signal alerts muted.");
+    });
+    $("#aiReviewBtn").addEventListener("click", runAiReview);
+    $("#aiReviewBtnTop").addEventListener("click", runAiReview);
+    $("#aiCloseBtn").addEventListener("click", closeAiModal);
+    $("#aiModal").addEventListener("click", e => {
+      if (e.target.id === "aiModal") closeAiModal();
+    });
+    document.addEventListener("keydown", e => {
+      if (e.key === "Escape" && !$("#aiModal").hidden) closeAiModal();
     });
     $("#flattenBtn").addEventListener("click", async () => {
       if (!(S.snap?.positions || []).length) { showToast("No exposure", "There are no paper positions to close."); return; }

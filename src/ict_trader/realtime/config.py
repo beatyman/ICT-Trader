@@ -39,7 +39,11 @@ def load_env_file(path: Path | None = None) -> None:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        value = value.strip()
+        if value and value[0] not in {'"', "'"}:
+            # Support `KEY=value  # comment` in the shipped example.
+            value = value.split(" #", 1)[0].strip()
+        value = value.strip('"').strip("'")
         if key and key not in os.environ:
             os.environ[key] = value
 
@@ -158,7 +162,10 @@ class Settings:
     # ---- optional AI layer (intentionally unused by default) ------------
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-flash"
+    deepseek_timeout: float = 90.0
+    deepseek_max_tokens: int = 4000
+    deepseek_effort: str = "low"
 
     def __post_init__(self) -> None:
         self.symbols = [s.upper() for s in self.symbols]
@@ -233,13 +240,16 @@ class Settings:
             "paper_trade": self.paper_trade,
             "bootstrap_bars": self.bootstrap_bars,
             "risk_pct": self.risk_pct,
+            "max_position_pct": self.max_position_pct,
             "max_open_positions": self.max_open_positions,
             "commission_bps": self.commission_bps,
             "slippage_bps": self.slippage_bps,
             "ai": {
                 "provider": "deepseek",
                 "configured": bool(self.deepseek_api_key),
+                "enabled": bool(self.deepseek_api_key),
                 "model": self.deepseek_model,
+                "mode": "on-demand risk review (never executes orders)",
             },
         }
 
@@ -312,7 +322,10 @@ class Settings:
             data_dir=data_dir,
             deepseek_api_key=_env_str("DEEPSEEK_API_KEY", ""),
             deepseek_base_url=_env_str("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-            deepseek_model=_env_str("DEEPSEEK_MODEL", "deepseek-chat"),
+            deepseek_model=_env_str("DEEPSEEK_MODEL", "deepseek-flash"),
+            deepseek_timeout=_env_float("DEEPSEEK_TIMEOUT", 90.0),
+            deepseek_max_tokens=_env_int("DEEPSEEK_MAX_TOKENS", 4000),
+            deepseek_effort=_env_str("DEEPSEEK_EFFORT", "low"),
         )
         for key, value in overrides.items():
             if value is not None and hasattr(cfg, key):
