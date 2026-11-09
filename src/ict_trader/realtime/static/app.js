@@ -220,7 +220,8 @@
     if (snap.ai?.last_review && !S.aiReview) S.aiReview = snap.ai.last_review;
     if (S.anchorSignalId
         && !(snap.signals || []).some(s => s.id === S.anchorSignalId)
-        && !(snap.setups || []).some(s => s.setup_id === S.anchorSignalId)) {
+        && !(snap.engine_signals || []).some(e => e.signal_id === S.anchorSignalId)
+        && !findSetupBySignalId(S.anchorSignalId)) {
       S.anchorSignalId = null;
     }
 
@@ -666,9 +667,7 @@
     const anchorSignal = S.anchorSignalId
       ? (snap.signals || []).find(s => s.id === S.anchorSignalId)
       : null;
-    const anchorSetup = S.anchorSignalId
-      ? (snap.setups || []).find(s => s.setup_id === S.anchorSignalId)
-      : null;
+    const anchorSetup = S.anchorSignalId ? findSetupBySignalId(S.anchorSignalId) : null;
     const anchor = anchorSignal || anchorSetup;
     $("#chartPrice").textContent = anchor
       ? fmtPrice(anchor.entry)
@@ -785,11 +784,10 @@
     const firstLoad = !S.bars.length;
     S.chartLoading = true;
     if (firstLoad) $("#chartLoading").classList.remove("hidden");
-    const setupAnchor = S.anchorSignalId
-      ? (S.snap?.setups || []).find(s => s.setup_id === S.anchorSignalId)
-      : null;
+    const setupAnchor = S.anchorSignalId ? findSetupBySignalId(S.anchorSignalId) : null;
     const anchor = S.anchorSignalId
-      ? (S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
+      ? ((S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
+        || findEngineSignal(S.anchorSignalId))
       : null;
     const anchorTime = anchor?.bar_time || setupAnchor?.engine_signals?.[0]?.source_kline_open_time;
     const endTime = anchorTime
@@ -837,14 +835,40 @@
     loadBars();
   }
 
+  function findSetupBySignalId(id) {
+    return (S.snap?.setups || []).find(s =>
+      s.setup_id === id
+      || (s.signal_ids || []).includes(id)
+      || (s.engine_signals || []).some(e => e.signal_id === id),
+    ) || null;
+  }
+
+  function findEngineSignal(id) {
+    return (S.snap?.engine_signals || []).find(e => e.signal_id === id) || null;
+  }
+
   function selectSignal(signalId) {
     const signal = (S.snap?.signals || []).find(s => s.id === signalId);
     if (!signal) {
-      const setup = (S.snap?.setups || []).find(s => s.setup_id === signalId);
+      const setup = findSetupBySignalId(signalId);
       if (setup) {
         S.anchorSignalId = setup.setup_id;
         S.symbol = setup.symbol;
         S.tf = setup.interval;
+        S.chartLoaded = false;
+        S.bars = [];
+        $$("#tfTabs .tf").forEach(b => b.classList.toggle("active", b.dataset.tf === S.tf));
+        renderWatchlist(S.snap || {});
+        renderChartHeader(S.snap || {});
+        renderSignals(S.snap || {});
+        loadBars();
+        return;
+      }
+      const engine = findEngineSignal(signalId);
+      if (engine) {
+        S.anchorSignalId = signalId;
+        S.symbol = engine.symbol;
+        S.tf = engine.interval;
         S.chartLoaded = false;
         S.bars = [];
         $$("#tfTabs .tf").forEach(b => b.classList.toggle("active", b.dataset.tf === S.tf));
@@ -890,11 +914,10 @@
 
   function showLatestOhlc() {
     const anchor = S.anchorSignalId
-      ? (S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
+      ? ((S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
+        || findEngineSignal(S.anchorSignalId))
       : null;
-    const setup = S.anchorSignalId
-      ? (S.snap?.setups || []).find(s => s.setup_id === S.anchorSignalId)
-      : null;
+    const setup = S.anchorSignalId ? findSetupBySignalId(S.anchorSignalId) : null;
     const anchorTime = anchor?.bar_time || setup?.engine_signals?.[0]?.source_kline_open_time;
     const b = anchorTime
       ? S.bars.find(x => num(x.open_time) === num(anchorTime))
@@ -1273,7 +1296,7 @@
     if (!S.snap) return null;
     const setups = S.snap.setups || [];
     const anchor = S.anchorSignalId
-      ? setups.find(s => s.setup_id === S.anchorSignalId && s.symbol === S.symbol)
+      ? findSetupBySignalId(S.anchorSignalId)
       : null;
     return anchor
       || setups.find(s => s.symbol === S.symbol && ["DETECTED", "OPEN"].includes(s.status))
@@ -1327,6 +1350,23 @@
         { price: sig.stop, color: CHART.stop, label: "SL", dash: true },
         { price: sig.target, color: CHART.target, label: `TP1 · ${num(sig.rr).toFixed(2)}R`, dash: false },
       ];
+    }
+    const engine = S.anchorSignalId ? findEngineSignal(S.anchorSignalId) : null;
+    if (engine) {
+      const z = engine.trigger_price_zone || {};
+      const entry = (Number(z.low) + Number(z.high)) / 2;
+      const target = Number(engine.evidence?.target || z.low);
+      const stop = Number(engine.invalidation_price);
+      if ([entry, stop, target].every(Number.isFinite)) {
+        return [
+          { price: entry, color: CHART.entry, label: "ENTRY", dash: true,
+            axisLabel: true, axisLabelText: `ENTRY ${fmtPrice(entry)}` },
+          { price: stop, color: CHART.stop, label: "SL", dash: true,
+            axisLabel: true, axisLabelText: `SL ${fmtPrice(stop)}` },
+          { price: target, color: CHART.target, label: "TP1", dash: false,
+            axisLabel: true, axisLabelText: `TP1 ${fmtPrice(target)}` },
+        ];
+      }
     }
     return [];
   }
@@ -1387,11 +1427,10 @@
       });
     };
     let anchor = S.anchorSignalId
-      ? (S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
+      ? ((S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
+        || findEngineSignal(S.anchorSignalId))
       : null;
-    const anchorSetup = S.anchorSignalId
-      ? (S.snap?.setups || []).find(s => s.setup_id === S.anchorSignalId)
-      : null;
+    const anchorSetup = S.anchorSignalId ? findSetupBySignalId(S.anchorSignalId) : null;
     if (!anchor && anchorSetup?.engine_signals?.length) {
       const e = anchorSetup.engine_signals[0];
       anchor = { bar_time: e.source_kline_open_time, direction: e.direction, engine: e.engine, evidence: e.evidence };
