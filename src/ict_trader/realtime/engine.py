@@ -31,7 +31,7 @@ from .rest_backfill import BackfillError, RestBackfiller
 from .storage import ClickHouseStore, RedisStore, Wal
 from .storage.observability import Observability
 from .strategy_runner import ICTStrategyRunner, TradeSignal
-from .setups import SetupManager
+from .setups import Setup, SetupManager
 from .universe import fetch_top_usdt_symbols
 
 log = logging.getLogger(__name__)
@@ -532,10 +532,15 @@ class RealtimeEngine:
     async def _ai_scan_loop(self) -> None:
         while True:
             try:
-                await asyncio.sleep(max(30.0, self.settings.ai_scan_seconds))
+                interval = self.settings.ai_scan_seconds
+                if self.settings.ai_market_scan:
+                    interval = min(interval, self.settings.ai_market_scan_seconds)
+                await asyncio.sleep(max(30.0, interval))
                 for setup in self.setups.active():
                     if not setup.ai_decision_id:
                         await self._on_setup_created(setup)
+                if self.settings.ai_market_scan:
+                    await self._ai_market_scan_once()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -573,6 +578,90 @@ class RealtimeEngine:
                 symbol=setup.symbol,
             )
         return bool(result.accepted)
+
+    async def _ai_market_scan_once(self) -> None:
+        symbols = list(self.settings.symbols)[:max(1, self.settings.ai_market_scan_max_symbols)]
+        tasks = []
+        for symbol in symbols:
+            positions = self.broker.snapshot().get("positions", [])
+            if any((p.get("symbol") if isinstance(p, dict) else getattr(p, "symbol", None)) == symbol
+                   for p in positions):
+                continue
+            tasks.append(asyncio.create_task(self._ai_market_review(symbol),
+                                             name=f"ai-market-{symbol}"))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _ai_market_review(self, symbol: str) -> None:
+        if not self.ai.available:
+            return
+        async with self._ai_sem:
+            started = time.perf_counter()
+            now = utc_ms()
+            try:
+                context = await self.ai_context(symbol, market_scan=True)
+                bars = self.runner.frame(symbol, 80)
+                review = await self.ai.review(
+                    self.snapshot(), bars, symbol, context=context,
+                )
+                status, error = 1, ""
+            except Exception as exc:
+                review = {"verdict": "reject", "confidence": 0,
+                          "headline": "AI market scan unavailable",
+                          "summary": str(exc)[:400], "raw_output": ""}
+                status, error = 4, f"{type(exc).__name__}: {exc}"
+            decision_id = "AI-" + hashlib.sha1(
+                f"market|{symbol}|{now}".encode()
+            ).hexdigest()[:22]
+            plan = review.get("trade_plan") or {}
+            direction = str(plan.get("direction") or "long")
+            targets = [float(x) for x in (plan.get("targets") or []) if float(x) > 0]
+            setup = Setup(
+                setup_id="AISET-" + decision_id[4:],
+                symbol=symbol, interval=self.settings.strategy_interval,
+                direction=direction, status="DETECTED",
+                created_at=now, updated_at=now,
+                entry_low=float(plan.get("entry_low") or 0),
+                entry_high=float(plan.get("entry_high") or plan.get("entry_low") or 0),
+                stop=float(plan.get("stop") or 0),
+                target=targets[0] if targets else 0.0,
+                targets=targets, confidence=float(review.get("confidence", 0) or 0) / 100.0,
+                engine="ai_market", engine_version="deepseek-market-v1",
+                signal_ids=[], engine_signals=[],
+            )
+            usage = review.get("usage") or {}
+            latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000.0))
+            input_snapshot = json.dumps({
+                "mode": "market_scan", "symbol": symbol, "as_of": now,
+                "context": context,
+            }, ensure_ascii=False, default=str)
+            await self.ch.insert_ai_decision((
+                decision_id, setup.setup_id, symbol, setup.interval,
+                "deepseek", self.settings.deepseek_model, "market-scan-v1",
+                input_snapshot, str(review.get("raw_output", ""))[:20000],
+                json.dumps(review, ensure_ascii=False, default=str), status,
+                latency_ms, int(usage.get("prompt_tokens", 0) or 0),
+                int(usage.get("completion_tokens", 0) or 0),
+                int(usage.get("total_tokens", 0) or 0), 0.0,
+                datetime.fromtimestamp(now / 1000.0, tz=timezone.utc),
+                datetime.now(timezone.utc),
+            ))
+            execution = {"accepted": False, "reason": "no plan"}
+            if str(review.get("verdict")) == "support" and plan.get("open"):
+                execution = await self._execute_ai_plan(setup, review)
+                review["execution"] = execution
+            self.ai_decisions.append({
+                "decision_id": decision_id, "setup_id": setup.setup_id,
+                "symbol": symbol, "verdict": review.get("verdict"),
+                "confidence": review.get("confidence"),
+                "headline": review.get("headline"),
+                "summary": review.get("summary"), "status": status,
+                "error": error, "latency_ms": latency_ms,
+                "total_tokens": int(usage.get("total_tokens", 0) or 0),
+                "created_at": now, "parsed": review, "execution": execution,
+                "mode": "market_scan",
+            })
+            self.metrics.inc("ai_market_review")
 
     async def _on_setup_created(self, setup) -> None:
         if setup.ai_decision_id:
@@ -1004,7 +1093,8 @@ class RealtimeEngine:
         from .overlays import build_ict_overlays, overlays_public
         return overlays_public(build_ict_overlays(frame))
 
-    async def ai_context(self, symbol: str) -> dict[str, Any]:
+    async def ai_context(self, symbol: str, *,
+                         market_scan: bool = False) -> dict[str, Any]:
         """Compact multi-timeframe context for the AI reviewer.
 
         ICT is primary; Ichimoku/Wyckoff/Chan are context, never execution.
@@ -1012,7 +1102,8 @@ class RealtimeEngine:
         from .analysis.arrays import build_ict_arrays
         from .overlays import build_ict_overlays, overlays_public
 
-        out: dict[str, Any] = {"symbol": symbol.upper(), "frames": {}}
+        out: dict[str, Any] = {"symbol": symbol.upper(), "frames": {},
+                               "market_scan": market_scan}
         limits = {"15m": 80, "1h": 48, "4h": 32, "1d": 24}
         frames: dict[str, pd.DataFrame] = {}
         for iv, limit in limits.items():
@@ -1091,6 +1182,8 @@ class RealtimeEngine:
                             if p.get("symbol") == symbol]
         out["rules"] = {
             "ict_primary": True,
+            "market_scan": market_scan,
+            "allow_trade_plan_without_setup": market_scan,
             "auxiliary": "context only; do not overturn ICT without explicit conflict",
             "execution": "paper only; AI cannot place orders",
         }

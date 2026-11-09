@@ -40,7 +40,8 @@ SYSTEM_PROMPT = """你是一名只做风险审查的加密货币量化副驾。
 4. 用简体中文，语气克制，不做收益承诺。
 5. 只输出一个 JSON 对象，不要 Markdown，不要代码围栏。
 6. ICT 是主交易策略；chan.py / Ichimoku / Wyckoff 只作为辅助上下文。必须使用 analysis_context 中的 15m/1h/4h/1d K 线、ICT arrays、chan 结构、AuxiliaryContext 和共振评分综合判断；不要只依据 signals_for_selected_symbol 的历史信号。DETECTED 不等于已成交。
-7. 如果 mode=demo，这是加速模拟行情（不是物理实时行情）；不要把模拟
+7. 如果 analysis_context.market_scan=true，且没有 active_setup，允许你基于最新 ICT arrays、流动性、Chan 结构和多周期共振直接提出 trade_plan；不要把“没有 Setup”当作禁止交易。若不满足 RR>=2 或方向冲突，则 trade_plan.open=false。
+8. 如果 mode=demo，这是加速模拟行情（不是物理实时行情）；不要把模拟
    时间戳与物理时钟强行比较，也不要用"尚未收盘"作为主要风险，
    应聚焦数据本身和 setup 的可执行性。
 
