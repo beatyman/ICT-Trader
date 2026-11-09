@@ -958,78 +958,115 @@
       chart: null, series: null, requestUpdate: null,
       data: { rectangles: [], segments: [], lines: [] },
     };
-    const renderer = {
-      draw(target) {
-        target.useBitmapCoordinateSpace(scope => {
-          const ctx = scope.context;
-          const hr = scope.horizontalPixelRatio;
-          const vr = scope.verticalPixelRatio;
-          const ts = state.chart?.timeScale();
-          if (!ts || !state.series) return;
-          const toX = t => {
-            const x = ts.timeToCoordinate(t);
-            return x == null ? null : x * hr;
-          };
-          const toY = p => {
-            const y = state.series.priceToCoordinate(Number(p));
-            return y == null ? null : y * vr;
-          };
-          const width = scope.bitmapSize.width;
-          for (const z of state.data.rectangles) {
-            const projected = window.ICTMath
-              ? window.ICTMath.projectRectangle(z, toX, toY)
-              : null;
-            if (!projected) continue;
-            let { x1, x2, top, height } = projected;
-            if (!Number.isFinite(x2)) x2 = width;
-            if (x2 < x1) [x1, x2] = [x2, x1];
-            if (x2 - x1 < 2 * hr) x2 = x1 + 3 * hr;
-            height = Math.max(1 * vr, height);
-            ctx.fillStyle = z.fill;
-            ctx.fillRect(x1, top, x2 - x1, height);
-            ctx.strokeStyle = z.border;
-            ctx.lineWidth = Math.max(1, hr);
-            ctx.setLineDash([3 * hr, 3 * hr]);
-            ctx.strokeRect(x1, top, x2 - x1, height);
-            ctx.setLineDash([]);
-            ctx.font = `${10 * hr}px Cascadia Code, Consolas, monospace`;
-            ctx.fillStyle = z.labelColor || z.border;
-            ctx.textAlign = "right";
-            ctx.textBaseline = "bottom";
-            ctx.fillText(z.label, x2 - 3 * hr, top - 2 * vr);
-          }
-          for (const seg of (state.data.segments || [])) {
-            const projected = window.ICTMath
-              ? window.ICTMath.projectSegment(seg, toX, toY)
-              : null;
-            if (!projected) continue;
-            ctx.strokeStyle = seg.color || "rgba(120,123,134,.7)";
-            ctx.lineWidth = Math.max(1, (seg.width || 1) * hr);
-            ctx.beginPath();
-            ctx.moveTo(projected.x1, projected.y1);
-            ctx.lineTo(projected.x2, projected.y2);
-            ctx.stroke();
-          }
-          for (const l of state.data.lines) {
-            const y = toY(l.price);
-            if (y == null) continue;
-            let x1 = toX(l.startTime);
-            let x2 = toX(l.endTime);
-            if (x1 == null) x1 = 0;
-            if (x2 == null) x2 = width;
-            ctx.strokeStyle = l.color;
-            ctx.lineWidth = Math.max(1, hr);
-            ctx.setLineDash([5 * hr, 4 * hr]);
-            ctx.beginPath();
-            ctx.moveTo(x1, y);
-            ctx.lineTo(x2, y);
-            ctx.stroke();
-            ctx.setLineDash([]);
-          }
-        });
-      },
-    };
-    const view = { renderer: () => renderer };
+
+    function coords(scope) {
+      const ts = state.chart?.timeScale();
+      if (!ts || !state.series) return null;
+      const hr = scope.horizontalPixelRatio;
+      const vr = scope.verticalPixelRatio;
+      return {
+        hr, vr, width: scope.bitmapSize.width,
+        toX: t => {
+          const x = ts.timeToCoordinate(t);
+          return x == null ? null : x * hr;
+        },
+        toY: p => {
+          const y = state.series.priceToCoordinate(Number(p));
+          return y == null ? null : y * vr;
+        },
+      };
+    }
+
+    function drawRectangles(scope) {
+      const c = coords(scope);
+      if (!c) return;
+      const ctx = scope.context;
+      const { hr, vr, width, toX, toY } = c;
+      for (const z of state.data.rectangles) {
+        const projected = window.ICTMath
+          ? window.ICTMath.projectRectangle(z, toX, toY) : null;
+        if (!projected) continue;
+        let { x1, x2, top, height } = projected;
+        if (!Number.isFinite(x2)) x2 = width;
+        if (x2 < x1) [x1, x2] = [x2, x1];
+        if (x2 - x1 < 2 * hr) x2 = x1 + 3 * hr;
+        height = Math.max(1 * vr, height);
+        ctx.fillStyle = z.fill;
+        ctx.fillRect(x1, top, x2 - x1, height);
+        ctx.strokeStyle = z.border;
+        ctx.lineWidth = Math.max(1, hr);
+        ctx.setLineDash([3 * hr, 3 * hr]);
+        ctx.strokeRect(x1, top, x2 - x1, height);
+        ctx.setLineDash([]);
+      }
+    }
+
+    function drawLines(scope) {
+      const c = coords(scope);
+      if (!c) return;
+      const ctx = scope.context;
+      const { hr, width, toX, toY } = c;
+      for (const seg of (state.data.segments || [])) {
+        const projected = window.ICTMath
+          ? window.ICTMath.projectSegment(seg, toX, toY) : null;
+        if (!projected) continue;
+        ctx.strokeStyle = seg.color || "rgba(120,123,134,.7)";
+        ctx.lineWidth = Math.max(1, (seg.width || 1) * hr);
+        ctx.setLineDash(seg.dash ? [5 * hr, 4 * hr] : []);
+        ctx.beginPath();
+        ctx.moveTo(projected.x1, projected.y1);
+        ctx.lineTo(projected.x2, projected.y2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      for (const l of state.data.lines) {
+        const y = toY(l.price);
+        if (y == null) continue;
+        let x1 = toX(l.startTime);
+        let x2 = toX(l.endTime);
+        if (x1 == null) x1 = 0;
+        if (x2 == null) x2 = width;
+        ctx.strokeStyle = l.color;
+        ctx.lineWidth = Math.max(1, hr);
+        ctx.setLineDash([5 * hr, 4 * hr]);
+        ctx.beginPath();
+        ctx.moveTo(x1, y);
+        ctx.lineTo(x2, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    function drawLabels(scope) {
+      const c = coords(scope);
+      if (!c) return;
+      const ctx = scope.context;
+      const { hr, vr, width, toX, toY } = c;
+      ctx.font = `${9 * hr}px Cascadia Code, Consolas, monospace`;
+      ctx.textAlign = "right";
+      ctx.textBaseline = "bottom";
+      for (const z of state.data.rectangles) {
+        if (!z.label) continue;
+        const projected = window.ICTMath
+          ? window.ICTMath.projectRectangle(z, toX, toY) : null;
+        if (!projected) continue;
+        let x2 = Number.isFinite(projected.x2) ? projected.x2 : width;
+        const x1 = Math.min(projected.x1, x2);
+        if (x2 < 0 || x1 > width) continue;
+        ctx.fillStyle = z.labelColor || z.border;
+        ctx.fillText(z.label, Math.min(x2, width) - 3 * hr, projected.top - 2 * vr);
+      }
+    }
+
+    const view = (zOrder, draw) => ({
+      zOrder: () => zOrder,
+      renderer: () => ({ draw: target => target.useBitmapCoordinateSpace(draw) }),
+    });
+    const views = [
+      view("bottom", drawRectangles),
+      view("normal", drawLines),
+      view("top", drawLabels),
+    ];
     return {
       attached(param) {
         state.chart = param.chart;
@@ -1037,7 +1074,7 @@
         state.requestUpdate = param.requestUpdate;
       },
       detached() {},
-      paneViews() { return [view]; },
+      paneViews() { return views; },
       updateAllViews() {},
       setData(data) {
         state.data = data || { rectangles: [], segments: [], lines: [] };
