@@ -320,14 +320,6 @@
           direction: b.is_buy ? "bullish" : "bearish",
         });
       }
-      for (const d of (chan.divergences || []).slice(-4)) {
-        markers.push({
-          time: Math.floor(d.time / 1000),
-          position: d.is_buy ? "belowBar" : "aboveBar",
-          shape: "square", color: "#b89dff", text: "DIV", kind: "DIV",
-          direction: d.is_buy ? "bullish" : "bearish",
-        });
-      }
     }
 
     // Chan zone from live engine evidence only.

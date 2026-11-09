@@ -318,8 +318,8 @@ drawn by a series primitive, not a separate canvas:
 - **Liquidity**: recent 24h high/low reference lines.
 - **Chan ZS**: real chan.py `zs_list` ranges, not an approximation;
 - **Chan BI / SEG**: real `bi_list` and `seg_list` polylines;
-- **Chan BSP / DIV**: real `bs_point_lst` markers, with `1买/1卖` labelled as
-  divergence;
+- **Chan BSP**: real `bs_point_lst` markers, labelled exactly with chan.py's
+  `type2str()` value (`1p`, `2`, `3a`, ...); no synthetic `DIV` label;
 - **VWAP**: cumulative typical-price VWAP line.
 - **EMA20/50**, volume, Entry/Stop/Target price lines and `SIG` markers.
 
@@ -353,7 +353,8 @@ values for an FVG rectangle and an SMT marker. It writes
 
 Chan structure is returned by `/api/chan/structure` directly from chan.py:
 `bis` (笔), `segs` (线段), `zss` (中枢), `bsps` (买卖点) and `divergences` (1类
-背驰). The browser draws BI/SEG polylines, ZS rectangles and BSP/DIV markers.
+背驰). The browser draws BI/SEG polylines, ZS rectangles and BSP markers using
+chan.py's native type labels; `DIV` is deliberately not rendered.
 
 ### Dark / light theme
 

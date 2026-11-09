@@ -139,7 +139,7 @@ test("Chan structure is converted to BI/SEG lines, ZS rectangles and BSP markers
   assert.ok(data.segments.some(s => s.label === "SEG" && s.width === 2));
   assert.ok(data.rectangles.some(r => r.kind === "ChanZS" && r.low === 95 && r.high === 102));
   assert.ok(data.markers.some(m => m.kind === "BSP" && m.text === "2买" && m.direction === "bullish"));
-  assert.ok(data.markers.some(m => m.kind === "DIV" && m.text === "DIV"));
+  assert.equal(data.markers.some(m => m.text === "DIV"), false);
   assert.deepEqual(ICT.projectSegment(data.segments[0], t => t, p => p), {
     x1: ICT.timeOf(BASE), x2: ICT.timeOf(BASE + 5 * STEP), y1: 90, y2: 100,
   });
