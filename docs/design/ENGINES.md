@@ -80,8 +80,10 @@ levels/zones 做窗口扫描，最坏 O(n·(L+Z))。
 窗口：`span_a` 先 `rolling(26)` 再 `shift(26)`，`span_b` 为 `rolling(52)` 再 `shift(26)`，
 因此同周期至少 78 根才有非 NaN 云；建议 ≥200 根；1D 云需要 ≥78 根日线（15m 合成约 7500 根）。
 
-多周期（待实现）：base 15m 求 TK 交叉，4h/1d 用 `resample_htf` + `_drop_incomplete_htf` +
-`align_htf` 求云层与 Chikou 确认；三役（tenkan/kijun/cloud 同向）与云层厚度/扭转需新增计算。
+多周期（已实现 adapter）：`analysis/engines/ichimoku.py` 在 base 15m 上求 TK 交叉，
+4H 由同一窗口 resample，最后一个未完成桶丢弃，并用 `known_at` 收盘时刻过滤；
+同时校验云层、Chikou 和 ATR 云厚。默认 `htf_interval=4h`，1D 需要至少 8000 根
+15m（当前默认窗口不足，必须显式配置）。
 
 输出证据（拟）：`tenkan/kijun/span_a/span_b/cloud_top/cloud_bottom/price_vs_cloud/tk_cross/
 chikou_ok/cloud_thickness/kumo_twist`。不得把 `span_a/span_b` 当「未来云」画在 bar 之后。

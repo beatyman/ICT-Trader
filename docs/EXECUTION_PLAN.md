@@ -65,7 +65,9 @@ docker stats --no-stream
   `source_kline_open_time` / `bar_time` 已对齐到原始 K 线，新增
   `/api/signals/{id}/context`（`aligned`、`signal_bar`、前后 bar 数）和
   `?signal=<id>` 图表定位；
-- [ ] P1-2：Ichimoku adapter。
+- [x] P1-2：`IchimokuEngine` 已实现并通过测试：TK 交叉、云层、Chikou、
+  ATR 厚度过滤、4H known-at 协同；尚未接入实时执行链路（先作为独立引擎验证）；
+- [ ] P1-3：Wyckoff adapter。
 
 详细性能数字见 [`PERF_BASELINE.md`](PERF_BASELINE.md)。
 
