@@ -325,7 +325,8 @@
           startTime: Math.floor(b.start_time / 1000),
           endTime: Math.floor(b.end_time / 1000),
           startPrice: b.start_price, endPrice: b.end_price,
-          color: "rgba(120,123,134,.70)", width: 1, label: "BI",
+          color: b.direction === "up" ? "#7fbf9a" : "#c97f7f", width: 1,
+          label: "BI", dash: b.sure === false, direction: b.direction,
         });
       }
       if (chanVisibility.seg !== false) for (const s of (chan.segs || []).slice(-60)) {
@@ -333,7 +334,8 @@
           startTime: Math.floor(s.start_time / 1000),
           endTime: Math.floor(s.end_time / 1000),
           startPrice: s.start_price, endPrice: s.end_price,
-          color: "rgba(84,200,248,.90)", width: 2, label: "SEG",
+          color: s.direction === "up" ? "#7fbf9a" : "#c97f7f", width: 2,
+          label: "SEG", dash: s.sure === false, direction: s.direction,
         });
       }
       for (const z of (chan.zss || []).slice(-6)) {

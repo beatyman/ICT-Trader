@@ -959,113 +959,153 @@
       data: { rectangles: [], segments: [], lines: [] },
     };
 
-    function coords(scope) {
+    // View layer: business data -> CSS-pixel coordinates.
+    function coordinates() {
       const ts = state.chart?.timeScale();
       if (!ts || !state.series) return null;
-      const hr = scope.horizontalPixelRatio;
-      const vr = scope.verticalPixelRatio;
+      const width = (() => {
+        try { return ts.width(); } catch (_) { return 0; }
+      })() || document.getElementById("lwcChart")?.clientWidth || 1000;
       return {
-        hr, vr, width: scope.bitmapSize.width,
+        width,
         toX: t => {
           const x = ts.timeToCoordinate(t);
-          return x == null ? null : x * hr;
+          return x == null ? null : x;
         },
         toY: p => {
           const y = state.series.priceToCoordinate(Number(p));
-          return y == null ? null : y * vr;
+          return y == null ? null : y;
         },
       };
     }
 
-    function drawRectangles(scope) {
-      const c = coords(scope);
-      if (!c) return;
-      const ctx = scope.context;
-      const { hr, vr, width, toX, toY } = c;
-      for (const z of state.data.rectangles) {
-        const projected = window.ICTMath
-          ? window.ICTMath.projectRectangle(z, toX, toY) : null;
-        if (!projected) continue;
-        let { x1, x2, top, height } = projected;
-        if (!Number.isFinite(x2)) x2 = width;
+    function projectRectangles() {
+      const c = coordinates();
+      if (!c) return [];
+      const out = [];
+      for (const z of (state.data.rectangles || [])) {
+        const p = window.ICTMath?.projectRectangle(z, c.toX, c.toY);
+        if (!p || p.x1 == null) continue;
+        let { x1, x2, top, height } = p;
+        if (x2 == null || !Number.isFinite(x2)) x2 = c.width;
         if (x2 < x1) [x1, x2] = [x2, x1];
-        if (x2 - x1 < 2 * hr) x2 = x1 + 3 * hr;
-        height = Math.max(1 * vr, height);
-        ctx.fillStyle = z.fill;
-        ctx.fillRect(x1, top, x2 - x1, height);
-        ctx.strokeStyle = z.border;
-        ctx.lineWidth = Math.max(1, hr);
-        ctx.setLineDash([3 * hr, 3 * hr]);
-        ctx.strokeRect(x1, top, x2 - x1, height);
-        ctx.setLineDash([]);
+        if (x2 < 0 || x1 > c.width) continue;
+        out.push({ ...z, x1, x2, top, height: Math.max(1, height) });
       }
+      return out;
     }
 
-    function drawLines(scope) {
-      const c = coords(scope);
-      if (!c) return;
-      const ctx = scope.context;
-      const { hr, width, toX, toY } = c;
+    function projectSegments() {
+      const c = coordinates();
+      if (!c) return [];
+      const out = [];
       for (const seg of (state.data.segments || [])) {
-        const projected = window.ICTMath
-          ? window.ICTMath.projectSegment(seg, toX, toY) : null;
-        if (!projected) continue;
-        ctx.strokeStyle = seg.color || "rgba(120,123,134,.7)";
-        ctx.lineWidth = Math.max(1, (seg.width || 1) * hr);
-        ctx.setLineDash(seg.dash ? [5 * hr, 4 * hr] : []);
-        ctx.beginPath();
-        ctx.moveTo(projected.x1, projected.y1);
-        ctx.lineTo(projected.x2, projected.y2);
-        ctx.stroke();
-        ctx.setLineDash([]);
+        const p = window.ICTMath?.projectSegment(seg, c.toX, c.toY);
+        if (!p) continue;
+        if (Math.max(p.x1, p.x2) < 0 || Math.min(p.x1, p.x2) > c.width) continue;
+        out.push({ ...seg, ...p });
       }
-      for (const l of state.data.lines) {
-        const y = toY(l.price);
+      return out;
+    }
+
+    function projectLines() {
+      const c = coordinates();
+      if (!c) return [];
+      const out = [];
+      for (const l of (state.data.lines || [])) {
+        const y = c.toY(l.price);
         if (y == null) continue;
-        let x1 = toX(l.startTime);
-        let x2 = toX(l.endTime);
+        let x1 = c.toX(l.startTime);
+        let x2 = c.toX(l.endTime);
         if (x1 == null) x1 = 0;
-        if (x2 == null) x2 = width;
-        ctx.strokeStyle = l.color;
-        ctx.lineWidth = Math.max(1, hr);
-        ctx.setLineDash([5 * hr, 4 * hr]);
-        ctx.beginPath();
-        ctx.moveTo(x1, y);
-        ctx.lineTo(x2, y);
-        ctx.stroke();
-        ctx.setLineDash([]);
+        if (x2 == null) x2 = c.width;
+        if (x2 < 0 || x1 > c.width) continue;
+        out.push({ ...l, x1, x2, y });
       }
+      return out;
     }
 
-    function drawLabels(scope) {
-      const c = coords(scope);
-      if (!c) return;
-      const ctx = scope.context;
-      const { hr, vr, width, toX, toY } = c;
-      ctx.font = `${9 * hr}px Cascadia Code, Consolas, monospace`;
-      ctx.textAlign = "right";
-      ctx.textBaseline = "bottom";
-      for (const z of state.data.rectangles) {
-        if (!z.label) continue;
-        const projected = window.ICTMath
-          ? window.ICTMath.projectRectangle(z, toX, toY) : null;
-        if (!projected) continue;
-        let x2 = Number.isFinite(projected.x2) ? projected.x2 : width;
-        const x1 = Math.min(projected.x1, x2);
-        if (x2 < 0 || x1 > width) continue;
-        ctx.fillStyle = z.labelColor || z.border;
-        ctx.fillText(z.label, Math.min(x2, width) - 3 * hr, projected.top - 2 * vr);
-      }
+    // Renderer layer: canvas calls only; no chart/series/price access.
+    function drawRectangles(pixels, target) {
+      target.useBitmapCoordinateSpace(scope => {
+        const ctx = scope.context, hr = scope.horizontalPixelRatio, vr = scope.verticalPixelRatio;
+        for (const z of pixels) {
+          const x1 = z.x1 * hr, x2 = z.x2 * hr;
+          const top = z.top * vr, height = z.height * vr;
+          ctx.fillStyle = z.fill;
+          ctx.fillRect(x1, top, x2 - x1, height);
+          ctx.strokeStyle = z.border;
+          ctx.lineWidth = Math.max(1, hr);
+          ctx.setLineDash([3 * hr, 3 * hr]);
+          ctx.strokeRect(x1, top, x2 - x1, height);
+          ctx.setLineDash([]);
+        }
+      });
     }
 
-    const view = (zOrder, draw) => ({
-      zOrder: () => zOrder,
-      renderer: () => ({ draw: target => target.useBitmapCoordinateSpace(draw) }),
-    });
+    function drawLines(lines, segments, target) {
+      target.useBitmapCoordinateSpace(scope => {
+        const ctx = scope.context, hr = scope.horizontalPixelRatio, vr = scope.verticalPixelRatio;
+        for (const seg of segments) {
+          ctx.strokeStyle = seg.color || "rgba(120,123,134,.7)";
+          ctx.lineWidth = Math.max(1, (seg.width || 1) * hr);
+          ctx.setLineDash(seg.dash ? [5 * hr, 4 * hr] : []);
+          ctx.beginPath();
+          ctx.moveTo(seg.x1 * hr, seg.y1 * vr);
+          ctx.lineTo(seg.x2 * hr, seg.y2 * vr);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+        for (const l of lines) {
+          ctx.strokeStyle = l.color;
+          ctx.lineWidth = Math.max(1, hr);
+          ctx.setLineDash([5 * hr, 4 * hr]);
+          ctx.beginPath();
+          ctx.moveTo(l.x1 * hr, l.y * vr);
+          ctx.lineTo(l.x2 * hr, l.y * vr);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      });
+    }
+
+    function drawLabels(pixels, target) {
+      target.useBitmapCoordinateSpace(scope => {
+        const ctx = scope.context, hr = scope.horizontalPixelRatio, vr = scope.verticalPixelRatio;
+        ctx.font = `${9 * hr}px Cascadia Code, Consolas, monospace`;
+        ctx.textAlign = "right";
+        ctx.textBaseline = "bottom";
+        for (const z of pixels) {
+          if (!z.label) continue;
+          ctx.fillStyle = z.labelColor || z.border;
+          ctx.fillText(z.label, z.x2 * hr - 3 * hr, z.top * vr - 2 * vr);
+        }
+      });
+    }
+
     const views = [
-      view("bottom", drawRectangles),
-      view("normal", drawLines),
-      view("top", drawLabels),
+      {
+        zOrder: () => "bottom",
+        renderer: () => {
+          const pixels = projectRectangles();
+          return { draw: target => drawRectangles(pixels, target) };
+        },
+      },
+      {
+        zOrder: () => "normal",
+        renderer: () => {
+          const lines = projectLines();
+          const segments = projectSegments();
+          return { draw: target => drawLines(lines, segments, target) };
+        },
+      },
+      {
+        zOrder: () => "top",
+        renderer: () => {
+          const pixels = projectRectangles();
+          return { draw: target => drawLabels(pixels, target) };
+        },
+      },
     ];
     return {
       attached(param) {
@@ -1114,6 +1154,13 @@
         r.fill = up ? bullFill : bearFill;
         r.border = up ? bull : bear;
         r.labelColor = r.border;
+      }
+    }
+    for (const seg of (data.segments || [])) {
+      if (seg.label === "BI" || seg.label === "SEG") {
+        seg.color = seg.direction === "up"
+          ? cssToken("--chan-bi-up", "#7fbf9a")
+          : cssToken("--chan-bi-down", "#c97f7f");
       }
     }
     for (const m of (data.markers || [])) {
@@ -1512,7 +1559,11 @@
     const rects = planSetup ? [] : (ict.rectangles || []);
     const planRect = planSetup ? setupEntryZone(planSetup) : null;
     if (planRect) rects.push(planRect);
-    lwc.overlay?.setData({ rectangles: rects, segments: planSetup ? [] : (ict.segments || []), lines: [] });
+    lwc.overlay?.setData(limitOverlayData({
+      rectangles: rects,
+      segments: planSetup ? [] : (ict.segments || []),
+      lines: [],
+    }));
     lwc.lastLines = lines;
     applyPriceLabels(lines);
   }
@@ -1526,6 +1577,18 @@
       vv += volume;
       return { time: chartTime(b.open_time), value: vv > 0 ? pv / vv : null };
     }).filter(x => x.value !== null);
+  }
+
+  const OVERLAY_LIMITS = { rectangles: 30, lines: 20, segments: 200, markers: 14 };
+
+  function limitOverlayData(data) {
+    const d = data || {};
+    return {
+      rectangles: (d.rectangles || []).slice(-OVERLAY_LIMITS.rectangles),
+      lines: (d.lines || []).slice(-OVERLAY_LIMITS.lines),
+      segments: (d.segments || []).slice(-OVERLAY_LIMITS.segments),
+      markers: (d.markers || []).slice(-OVERLAY_LIMITS.markers),
+    };
   }
 
   function setChartData(bars, fit) {
