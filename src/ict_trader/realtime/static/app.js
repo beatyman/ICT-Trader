@@ -1287,7 +1287,7 @@
     card.hidden = false;
     card.innerHTML = `<div><b>${escapeHtml(setup.symbol)}</b> ${short ? "SHORT" : "LONG"}</div>
       <div class="setup-card-row"><span class="setup-card-status ${status === "OPEN" ? "open" : ""}">${status}</span><span>${Number(setup.rr || 0).toFixed(2)}R</span></div>
-      <div class="setup-card-row"><span>SIG</span><b>${escapeHtml(String(setup.engine_signals?.[0]?.signal_id || setup.setup_id || "").slice(-8))}</b></div>
+      <div class="setup-card-row"><span>SIG</span><b>${escapeHtml(setup.engine_signals?.[0]?.evidence?.bsp_type || String(setup.engine_signals?.[0]?.signal_id || setup.setup_id || "").slice(-8))}</b></div>
       <div class="setup-card-row"><span>ENTRY</span><b>${fmtPrice(setup.entry)}</b></div>
       <div class="setup-card-row"><span>SL</span><b style="color:var(--amber)">${fmtPrice(setup.stop)}</b></div>
       ${setup.status === "OPEN" ? `<div class="setup-card-row"><span>UPL</span><b>${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}</b></div>` : ""}`;
@@ -1397,9 +1397,35 @@
       </span>`).join("");
   }
 
+  function focusedSetupICT(ict, setup, bars) {
+    if (!setup) return ict;
+    const source = Number(setup.engine_signals?.[0]?.source_kline_open_time
+      || setup.created_at || 0);
+    if (!source) return ict;
+    const step = TF_MS[S.tf] || 900000;
+    const from = Math.floor((source - 24 * step) / 1000);
+    const to = Math.floor((source + 4 * step) / 1000);
+    const dir = setup.direction;
+    const rects = (ict.rectangles || []).filter(r => {
+      if (!["FVG", "IFVG", "OB"].includes(r.kind)) return false;
+      if (r.direction !== dir) return false;
+      return Number(r.startTime) >= from && Number(r.startTime) <= to;
+    }).slice(-2);
+    const pick = (kind) => (ict.markers || [])
+      .filter(m => m.kind === kind && m.time >= from && m.time <= to)
+      .slice(-1);
+    const markers = [
+      ...pick("BOS"), ...pick("MSS"),
+      ...pick(dir === "long" ? "SSL_SWEEP" : "BSL_SWEEP"),
+      ...pick("CISD"), ...pick("PO3"), ...pick("AMD"),
+    ];
+    return { ...ict, rectangles: rects, markers };
+  }
+
   function applyChartAnnotations(bars) {
     const ict = themeizeICT(buildICTData(bars));
     const planSetup = activeSetupForChart();
+    const focus = focusedSetupICT(ict, planSetup, bars);
     const lines = [...chartLevels()];
     if (!planSetup) lines.push(...(ict.priceLines || []));
     for (const line of lwc.priceLines) lwc.candles.removePriceLine(line);
@@ -1412,7 +1438,7 @@
         axisLabelVisible: false, title: l.title || l.label || "",
       }));
     }
-    const markers = planSetup ? [] : [...(ict.markers || [])];
+    const markers = planSetup ? [...(focus.markers || [])] : [...(ict.markers || [])];
     const seen = new Set(markers.map(m => m.time));
     const addMarker = (time, direction, text, kind = "SIG") => {
       const t = chartTime(time);
@@ -1458,7 +1484,7 @@
       }
     }
     renderICTSignals(lwc.chart, lwc.candles, { markers: markers.slice(-20) });
-    const rects = planSetup ? [] : (ict.rectangles || []);
+    const rects = planSetup ? [...(focus.rectangles || [])] : (ict.rectangles || []);
     const planRect = planSetup ? setupEntryZone(planSetup) : null;
     if (planRect) rects.push(planRect);
     renderSetupCard(planSetup);
