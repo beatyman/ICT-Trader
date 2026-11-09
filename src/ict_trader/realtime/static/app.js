@@ -1271,7 +1271,7 @@
       try { return lwc.chart.priceScale("right").width(); }
       catch (_) { return 64; }
     })();
-    const rows = (lines || []).filter(l => l.axisLabel !== false).map((l, i) => ({
+    const rows = (lines || []).map((l, i) => ({
       id: `${l.title || l.label || "level"}-${i}`,
       y: lwc.candles.priceToCoordinate(Number(l.price)),
       title: l.title || l.label || "LEVEL",
