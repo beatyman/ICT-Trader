@@ -649,11 +649,16 @@
     const freshness = liveEdge && lastBar?.ingest_time
       ? Math.max(0, num(snap.server_time) - num(lastBar.ingest_time))
       : null;
-    $("#chartFeedNote").textContent = anchorSignal
+    const smtNote = !anchor && S.symbol !== "BTCUSDT"
+      ? (S.smt
+        ? ` · SMT ${S.smt.direction === "bearish" ? "HIGH" : "LOW"} vs ETH`
+        : " · SMT vs ETH: no divergence")
+      : "";
+    $("#chartFeedNote").textContent = anchor
       ? "historical signal context"
       : freshness !== null
-        ? `live candle · ${freshness}ms old · closed-bar signals`
-        : (snap.mode === "demo" ? "simulated tape · closed-bar signals" : "Binance WS · closed-bar signals");
+        ? `live candle · ${freshness}ms old · closed-bar signals${smtNote}`
+        : (snap.mode === "demo" ? "simulated tape · closed-bar signals" : "Binance WS · closed-bar signals") + smtNote;
     $("#sbSymbols").textContent = `${(snap.config?.symbols || []).length} symbols · ${S.tf}`;
   }
 
