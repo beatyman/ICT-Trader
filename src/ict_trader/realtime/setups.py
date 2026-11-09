@@ -198,6 +198,10 @@ class SetupManager:
                     setup.updated_at = now
                     await self._transition(setup, "ENTRY", setup.entry, now,
                                            "trigger zone touched")
+                    # Never evaluate TP on the same tick that opened the
+                    # position: one bar's high/low can contain both prices,
+                    # which would be look-ahead inside the bar.
+                    continue
                 elif self._hits_stop(setup, float(low if low is not None else price),
                                      float(high if high is not None else price)):
                     setup.status = "INVALIDATED"

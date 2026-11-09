@@ -168,7 +168,7 @@ class Settings:
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-flash"
     deepseek_timeout: float = 90.0
-    deepseek_max_tokens: int = 4000
+    deepseek_max_tokens: int = 8000
     deepseek_effort: str = "low"
     ai_auto: bool = False
     ai_auto_min_confidence: float = 0.65
@@ -336,7 +336,7 @@ class Settings:
             deepseek_base_url=_env_str("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             deepseek_model=_env_str("DEEPSEEK_MODEL", "deepseek-flash"),
             deepseek_timeout=_env_float("DEEPSEEK_TIMEOUT", 90.0),
-            deepseek_max_tokens=_env_int("DEEPSEEK_MAX_TOKENS", 4000),
+            deepseek_max_tokens=_env_int("DEEPSEEK_MAX_TOKENS", 8000),
             deepseek_effort=_env_str("DEEPSEEK_EFFORT", "low"),
             ai_auto=_env_bool("AI_AUTO_DECISION", False),
             ai_auto_min_confidence=_env_float("AI_AUTO_MIN_CONFIDENCE", 0.65),
