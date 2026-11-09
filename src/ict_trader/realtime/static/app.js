@@ -23,9 +23,15 @@
     fetchSeq: 0,
     aiBusy: false,
     aiReview: null,
+    dailyBars: [],
+    dailyKey: "",
+    smt: null,
+    smtKey: "",
+    smtBars: [],
     aiHashOpened: false,
     anchorSignalId: null,
     signalLinkOpened: false,
+    symbolLinkOpened: false,
   };
 
   const TF_MS = { "1m": 60000, "5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000, "1d": 86400000 };
@@ -225,6 +231,11 @@
     if (location.hash === "#ai" && !S.aiHashOpened) {
       S.aiHashOpened = true;
       openAiModal();
+    }
+    const linkedSymbol = new URLSearchParams(location.search).get("symbol");
+    if (linkedSymbol && !S.symbolLinkOpened) {
+      S.symbolLinkOpened = true;
+      if ((snap.watchlist || []).some(w => w.symbol === linkedSymbol)) selectSymbol(linkedSymbol);
     }
     const linkedSignal = new URLSearchParams(location.search).get("signal");
     if (linkedSignal && !S.signalLinkOpened) {
@@ -653,6 +664,44 @@
   }
 
   // ------------------------------------------------------------- chart data
+  async function ensureContextData() {
+    const symbol = S.symbol;
+    if (!symbol) return;
+    if (S.dailyKey !== symbol) {
+      S.dailyKey = symbol;
+      S.dailyBars = [];
+      try {
+        const r = await fetch(`/api/klines?symbol=${encodeURIComponent(symbol)}&interval=1d&limit=90`, { cache: "no-store" });
+        if (r.ok) {
+          const d = await r.json();
+          if (S.symbol === symbol) S.dailyBars = d.bars || [];
+        }
+      } catch (_) { /* optional context */ }
+    }
+    const smtKey = `${symbol}|${S.tf}`;
+    if (S.smtKey !== smtKey) {
+      S.smtKey = smtKey;
+      S.smt = null;
+      S.smtBars = [];
+      if (symbol !== "BTCUSDT") {
+        try {
+          const r = await fetch(`/api/klines?symbol=ETHUSDT&interval=${encodeURIComponent(S.tf)}&limit=220&include_live=true`, { cache: "no-store" });
+          if (r.ok) {
+            const d = await r.json();
+            if (S.symbol === symbol && S.tf === smtKey.split("|")[1]) {
+              S.smtBars = d.bars || [];
+              S.smt = computeSMT(S.bars, S.smtBars);
+            }
+          }
+        } catch (_) { /* SMT is optional */ }
+      }
+    }
+    if (S.symbol === symbol) {
+      renderChartHeader(S.snap || {});
+      drawChart(true);
+    }
+  }
+
   async function loadBars() {
     if (!S.symbol) return;
     if (S.phase !== "ready") return;
@@ -683,6 +732,7 @@
       applyLiveBar(S.snap || {});
       renderChartHeader(S.snap || {});
       drawChart();
+      ensureContextData();
       if (S.bars.length) showLatestOhlc();
     } catch (err) {
       if (seq === S.fetchSeq) {
@@ -918,6 +968,80 @@
         : { fill: "rgba(120,123,134,.10)", border: "#787b86", labelColor: "#787b86" };
   }
 
+  function pivots(bars, key, left = 2, right = 2) {
+    const out = [];
+    for (let i = left; i < bars.length - right; i++) {
+      const v = num(bars[i][key]);
+      let ok = true;
+      for (let j = i - left; j <= i + right; j++) {
+        if (j === i) continue;
+        if (key === "high" ? num(bars[j].high) > v : num(bars[j].low) < v) { ok = false; break; }
+      }
+      if (ok) out.push({ i, time: chartTime(bars[i].open_time), price: v });
+    }
+    return out;
+  }
+
+  function computeSMT(bars, ethBars) {
+    if (!bars.length || !ethBars.length) return null;
+    const ethByTime = new Map(ethBars.map(b => [chartTime(b.open_time), b]));
+    const aligned = bars.map(b => ({ s: b, e: ethByTime.get(chartTime(b.open_time)) })).filter(x => x.e);
+    if (aligned.length < 20) return null;
+    const sBars = aligned.map(x => x.s), eBars = aligned.map(x => x.e);
+    const sHighs = pivots(sBars, "high"), eHighs = pivots(eBars, "high");
+    const sLows = pivots(sBars, "low"), eLows = pivots(eBars, "low");
+    if (sHighs.length >= 2 && eHighs.length >= 2) {
+      const sLast = sHighs.at(-1), sPrev = sHighs.at(-2);
+      const eLast = eHighs.at(-1), ePrev = eHighs.at(-2);
+      if (sLast.price > sPrev.price && eLast.price <= ePrev.price) {
+        return { direction: "bearish", time: sLast.time, price: sLast.price, label: "SMT HIGH" };
+      }
+    }
+    if (sLows.length >= 2 && eLows.length >= 2) {
+      const sLast = sLows.at(-1), sPrev = sLows.at(-2);
+      const eLast = eLows.at(-1), ePrev = eLows.at(-2);
+      if (sLast.price < sPrev.price && eLast.price >= ePrev.price) {
+        return { direction: "bullish", time: sLast.time, price: sLast.price, label: "SMT LOW" };
+      }
+    }
+    return null;
+  }
+
+  function dailyLevels(priceLines) {
+    const daily = S.dailyBars || [];
+    if (daily.length < 8) return;
+    const last = daily[daily.length - 1];
+    const d = new Date(num(last.open_time));
+    const dayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    const prevDays = daily.filter(b => num(b.open_time) < dayStart);
+    const prev = prevDays[prevDays.length - 1];
+    if (prev) {
+      priceLines.push({ price: num(prev.high), title: "PDH", color: "#f5a623", lineStyle: 2, lineWidth: 1 });
+      priceLines.push({ price: num(prev.low), title: "PDL", color: "#f5a623", lineStyle: 2, lineWidth: 1 });
+    }
+    const dow = (d.getUTCDay() + 6) % 7;
+    const weekStart = dayStart - dow * 86400000;
+    const prevWeekStart = weekStart - 7 * 86400000;
+    const week = daily.filter(b => {
+      const t = num(b.open_time);
+      return t >= prevWeekStart && t < weekStart;
+    });
+    if (week.length) {
+      priceLines.push({ price: Math.max(...week.map(b => num(b.high))), title: "PWH", color: "#b89dff", lineStyle: 2, lineWidth: 1 });
+      priceLines.push({ price: Math.min(...week.map(b => num(b.low))), title: "PWL", color: "#b89dff", lineStyle: 2, lineWidth: 1 });
+    }
+    const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+    const prevMonthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1);
+    const month = daily.filter(b => {
+      const t = num(b.open_time);
+      return t >= prevMonthStart && t < monthStart;
+    });
+    if (month.length) {
+      priceLines.push({ price: Math.max(...month.map(b => num(b.high))), title: "PMH", color: "#54c8f8", lineStyle: 3, lineWidth: 1 });
+      priceLines.push({ price: Math.min(...month.map(b => num(b.low))), title: "PML", color: "#54c8f8", lineStyle: 3, lineWidth: 1 });
+    }
+  }
+
   function buildICTData(bars) {
     if (!bars.length) return { rectangles: [], priceLines: [], markers: [] };
     const step = TF_MS[S.tf] || 900000;
@@ -1003,6 +1127,20 @@
       priceLines.push({ price: hi, title: "BSL", color: "#ef5350", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
       priceLines.push({ price: lo, title: "SSL", color: "#26a69a", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
       priceLines.push({ price: (hi + lo) / 2, title: "EQ (50%)", color: "#787b86", lineStyle: 0, lineWidth: 1, startTime: first, endTime: end });
+    }
+
+    dailyLevels(priceLines);
+
+    if (S.smt && !S.anchorSignalId) {
+      priceLines.push({
+        price: S.smt.price, title: S.smt.label, color: S.smt.direction === "bearish" ? "#ef5350" : "#26a69a",
+        lineStyle: 2, lineWidth: 1,
+      });
+      markers.push({
+        time: S.smt.time, position: S.smt.direction === "bearish" ? "aboveBar" : "belowBar",
+        shape: "circle", color: S.smt.direction === "bearish" ? "#ef5350" : "#26a69a",
+        text: S.smt.label, kind: "Sweep", direction: S.smt.direction,
+      });
     }
 
     // Chan central zone from the newest real engine signal.

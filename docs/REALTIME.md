@@ -290,7 +290,14 @@ Implemented ICT semantics:
 - `Asian Range` background rectangle and High/Low price lines;
 - `MDO` midnight-open line;
 - `BSL` / `SSL` liquidity lines and `EQ (50%)`;
+- `PDH/PDL`, `PWH/PWL`, `PMH/PML` from daily context;
+- `SMT` high/low divergence against ETH for every symbol except BTC;
 - VWAP, EMA20/50, volume and Setup Entry/SL/TP lines.
+
+The daily context is loaded from `/api/klines?interval=1d&limit=90`; SMT uses
+same-timeframe ETH bars (`/api/klines?symbol=ETHUSDT&...`) and compares the last
+two confirmed swing highs/lows. The overlay is visual only and does not create
+an execution signal.
 
 The primitive uses `timeScale().timeToCoordinate()` and
 `series.priceToCoordinate()`; no DOM-pixel approximation, so pan/zoom/resize

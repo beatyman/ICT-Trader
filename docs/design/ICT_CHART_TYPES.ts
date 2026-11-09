@@ -26,7 +26,7 @@ export interface ICTMarker {
   color: string;
   text: string;
   /** ICT concept: MSS, BOS, Sweep, BSP, SIG. */
-  kind: "MSS" | "BOS" | "Sweep" | "BSP" | "SIG";
+  kind: "MSS" | "BOS" | "Sweep" | "BSP" | "SIG" | "SMT";
   direction: ICTDirection;
 }
 
