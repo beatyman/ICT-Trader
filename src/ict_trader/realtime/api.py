@@ -193,12 +193,13 @@ def create_app(engine: RealtimeEngine) -> FastAPI:
         interval: str | None = Query(None),
         limit: int = Query(240, ge=20, le=2000),
         end_time: int | None = Query(None, ge=0),
+        include_live: bool = Query(False),
     ) -> JSONResponse:
         iv = interval or engine.settings.strategy_interval
-        rows = await engine.klines(symbol, iv, limit, end_time)
+        rows = await engine.klines(symbol, iv, limit, end_time, include_live)
         return JSONResponse({
             "symbol": symbol.upper(), "interval": iv,
-            "end_time": end_time, "bars": rows,
+            "end_time": end_time, "include_live": include_live, "bars": rows,
         })
 
     @app.websocket("/ws")

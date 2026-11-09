@@ -82,8 +82,9 @@ Ports 6379/8123/9000 are bound to `127.0.0.1`; do not expose them publicly.
 | Binance WS ingestion | per venue message | Combined streams; 15m updates are typically every 1–2s near the live edge |
 | Redis latest hash | every WS update | unclosed bar is mutable |
 | Engine → browser snapshot | 1 Hz (`BROADCAST_SECONDS=1`) | includes `live_bars` for every stream |
-| Chart last candle | 1 Hz via WS snapshot | merged client-side; no chart polling required |
+| Chart last candle | 1 Hz via WS snapshot | merged client-side; `/api/klines?include_live=true` also returns it |
 | Historical chart refresh | 60s / symbol change | closed-bar backfill/repair |
+| Watchlist / header price | 1 Hz | uses the same live 15m bar as the chart, not the previous close |
 | Strategy indicators | once per **closed 15m strategy bar**, per symbol | no intrabar signals; `signal_latency_ms` measures close→decision |
 | Paper entry | immediately after a closed-bar signal | next-tick/next-open semantics |
 | Paper TP/SL exits | every WS price tick | stop/target checked on live marks |
@@ -237,8 +238,10 @@ GET /api/signals/{signal_id}/context
 ```
 
 `/api/klines` also accepts `end_time` so the dashboard can load the window
-around a historical signal. Clicking a signal opens its source window, marks
-the exact bar with a vertical `SIG` line, and draws the signal's entry/SL/TP.
+around a historical signal, and `include_live=true` appends the current unclosed
+bar. The watchlist, header price and chart last bar all use this same live
+source. Clicking a signal opens its source window, marks the exact bar with a
+vertical `SIG` line, and draws the signal's entry/SL/TP.
 A shareable URL is available:
 
 ```text

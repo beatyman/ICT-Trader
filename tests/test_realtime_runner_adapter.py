@@ -57,3 +57,12 @@ def test_runner_maps_engine_signal_to_trade_signal(tmp_path, monkeypatch):
     window = runner.frame("BTCUSDT", 240, end_time=last.open_time + 70 * 900_000)
     assert any(int(b.open_time) == signal.bar_time for b in window)
     assert window[-1].open_time == last.open_time
+
+    live = Kline(
+        symbol="BTCUSDT", interval="15m", open_time=last.open_time + 900_000,
+        close_time=last.close_time + 900_000, open=100.0, high=104.0,
+        low=99.0, close=103.25, volume=12.0, is_closed=False,
+    )
+    rows = runner.watchlist({("BTCUSDT", "15m"): live})
+    assert rows[0]["price"] == 103.25
+    assert rows[0]["is_live"] is True

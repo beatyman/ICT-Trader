@@ -354,17 +354,31 @@ class ICTStrategyRunner:
         bars = self.frame(symbol, limit, end_time)
         return [b.to_public() for b in bars]
 
-    def watchlist(self) -> list[dict[str, Any]]:
+    def watchlist(self, latest_bars: dict[tuple[str, str], Kline] | None = None) -> list[dict[str, Any]]:
+        """Return 24h context using the latest *live* 15m bar when available.
+
+        The chart already merges the unclosed bar; the watchlist and header must
+        use the same price source or the dashboard shows the previous close as
+        the "current" price.
+        """
         step = interval_ms(self.interval)
         day_bars = max(2, int(86_400_000 / step))
+        latest_bars = latest_bars or {}
         out = []
         for symbol in self.settings.symbols:
             bars = self.histories.get(symbol)
-            if not bars:
+            live = latest_bars.get((symbol, self.interval))
+            if not bars and live is None:
                 out.append({"symbol": symbol, "price": 0.0, "change_pct": 0.0,
-                            "spark": [], "high": 0.0, "low": 0.0})
+                            "spark": [], "high": 0.0, "low": 0.0, "is_live": False})
                 continue
-            arr = np.fromiter((b.close for b in bars), dtype=float)
+            closes = [b.close for b in bars] if bars else []
+            if live is not None:
+                if closes and live.open_time == bars[-1].open_time:
+                    closes[-1] = live.close
+                elif not closes or live.open_time > bars[-1].open_time:
+                    closes.append(live.close)
+            arr = np.asarray(closes, dtype=float)
             window = arr[-min(len(arr), day_bars):]
             change = (arr[-1] / arr[-len(window)] - 1.0) * 100.0 if len(window) > 1 and arr[-len(window)] else 0.0
             spark = arr[-64:].round(8).tolist()
@@ -375,6 +389,8 @@ class ICTStrategyRunner:
                 "spark": spark,
                 "high": round(float(window.max()), 8),
                 "low": round(float(window.min()), 8),
+                "is_live": bool(live is not None and not live.is_closed),
+                "live_time": int(live.open_time) if live is not None else None,
             })
         return out
 

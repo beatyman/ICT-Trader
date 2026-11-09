@@ -620,7 +620,7 @@
       ? num(anchor.bar_time) + 70 * (TF_MS[S.tf] || 900000)
       : null;
     const url = `/api/klines?symbol=${encodeURIComponent(S.symbol)}&interval=${encodeURIComponent(S.tf)}&limit=220`
-      + (endTime ? `&end_time=${endTime}` : "");
+      + (endTime ? `&end_time=${endTime}` : "&include_live=true");
     try {
       const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) throw new Error("HTTP " + res.status);

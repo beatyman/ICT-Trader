@@ -61,7 +61,7 @@ class FakeEngine:
     async def stop(self):
         self.phase = "stopped"
 
-    async def klines(self, symbol, interval, limit, end_time=None):
+    async def klines(self, symbol, interval, limit, end_time=None, include_live=False):
         now = self.runner.signal.bar_time
         return [Kline(symbol=symbol, interval=interval, open_time=now, close_time=now + 899999,
                       open=1, high=2, low=0.5, close=1.5, volume=10, is_closed=True).to_public()]

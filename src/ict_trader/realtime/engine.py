@@ -580,7 +580,7 @@ class RealtimeEngine:
             "last_update": last_update,
             "strategy": self.runner.snapshot(),
             "signals": [s.to_public() for s in signals[:30]],
-            "watchlist": self.runner.watchlist(),
+            "watchlist": self.runner.watchlist(self.latest_bars),
             "live_bars": [bar.to_public() for bar in self.latest_bars.values()],
             "account": broker["account"],
             "positions": broker["positions"],
@@ -603,21 +603,40 @@ class RealtimeEngine:
         return closed
 
     async def klines(self, symbol: str, interval: str, limit: int = 240,
-                     end_time: int | None = None) -> list[dict[str, Any]]:
+                     end_time: int | None = None,
+                     include_live: bool = False) -> list[dict[str, Any]]:
         limit = max(20, min(int(limit), 2000))
         symbol = symbol.upper()
         if interval == self.settings.strategy_interval:
             rows = self.runner.public_klines(symbol, limit, end_time)
+            rows = self._with_live(symbol, interval, rows, limit, end_time, include_live)
             if rows:
                 return rows
         try:
             bars = await self.redis.get_closed(symbol, interval, limit)
             if bars:
-                return [b.to_public() for b in bars]
+                rows = [b.to_public() for b in bars]
+                return self._with_live(symbol, interval, rows, limit, end_time, include_live)
         except Exception:
             pass
         try:
             bars = await self.ch.load_recent(symbol, interval, limit)
-            return [b.to_public() for b in bars]
+            rows = [b.to_public() for b in bars]
+            return self._with_live(symbol, interval, rows, limit, end_time, include_live)
         except Exception:
             return []
+
+    def _with_live(self, symbol: str, interval: str, rows: list[dict[str, Any]],
+                   limit: int, end_time: int | None,
+                   include_live: bool) -> list[dict[str, Any]]:
+        if not include_live or end_time is not None:
+            return rows
+        live = self.latest_bars.get((symbol, interval))
+        if live is None:
+            return rows
+        if rows and int(live.open_time) == int(rows[-1]["open_time"]):
+            rows[-1] = live.to_public()
+        elif not rows or int(live.open_time) > int(rows[-1]["open_time"]):
+            rows.append(live.to_public())
+            rows = rows[-limit:]
+        return rows

@@ -60,9 +60,10 @@ and the exact signal marker. `/api/signals/{id}/context` returns
 `aligned=true/false` plus the source bar.
 
 The terminal has persisted dark/light themes (`?theme=light` for a preview).
-The chart's last candle is merged from the 1 Hz WebSocket snapshot; historical
-bars are refreshed only every 60 seconds, so live price updates do not depend on
-a polling chart request.
+The chart's last candle, watchlist and header price all use the same live bar:
+it is merged from the 1 Hz WebSocket snapshot and can also be fetched with
+`/api/klines?include_live=true`. Historical bars are refreshed only every 60
+seconds, so live price updates do not depend on a polling chart request.
 
 Project-level agent instructions and the phased backlog live in
 [`docs/PROJECT_PROMPT.md`](docs/PROJECT_PROMPT.md) and
