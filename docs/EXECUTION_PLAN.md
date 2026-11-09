@@ -55,9 +55,13 @@ docker stats --no-stream
   `signals`/`paper_trades` 已改走 buffer；
 - [x] 旧 `signals` 表已在本地 `ict` 库迁移为
   `signals_legacy_20261109_102957`；
-- [ ] P0-4：错误事件 reporter 与告警阈值接入（表已建，写入器已具备）；
-- [ ] P0-5：engine circuit breaker 与生产级 loop-lag 告警；
-- [ ] P1-1：ICT adapter 尚未产出统一 `EngineSignal`。
+- [x] P0-4：结构化 `Observability` reporter 已接入 stream/backfill/persist 错误；
+  `loop_lag_ms` 与 `engine_performance` 写入基础已具备；
+- [x] P0-5：`CircuitBreaker` 已接入 `EngineRegistry`；loop-lag 监控已运行；
+  运营告警（外部通知）仍待接入；
+- [x] P1-1：`ICTEngine` adapter 已接入 `ICTStrategyRunner`，实时路径现在产出
+  统一 `EngineSignal` 后再转 paper `TradeSignal`；
+- [ ] P1-2：Ichimoku adapter。
 
 详细性能数字见 [`PERF_BASELINE.md`](PERF_BASELINE.md)。
 

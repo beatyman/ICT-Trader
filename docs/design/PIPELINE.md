@@ -1,11 +1,11 @@
 # 信号 → 共振 → 规则决策 → Setup → 异步 AI → TP/SL 流水线
 
 > 现状：**AI 仍只是按需人工 review，不是决策流水线**（`realtime/ai.py::DeepSeekReviewer`）。
-> 已实现的只有左侧数据链路与 ICT 一条垂直切片：
-> `StreamSession → ICTStrategyRunner → PaperBroker → signals/paper_trades`。
-> 工作区已有 `EngineSignal` 契约、`EngineRegistry`、`AnalyticsBatchWriter`
-> 与 9 张 analytics 表，但**尚未接线**（registry 没被 `RealtimeEngine` 持有，
-> `setups/tp_sl_events/ai_decisions/...` 没有写入方）。本文用「已实现 / 待实现」标注每一段。
+> `StreamSession → ICTStrategyRunner → ICTEngine(EngineSignal) →
+> PaperBroker → signals(batch writer)/paper_trades` 已接线。
+> `EngineRegistry`、`CircuitBreaker`、`AnalyticsBatchWriter` 与 9 张 analytics 表已实现；
+> registry 尚未被 `RealtimeEngine` 持有，`setups/tp_sl_events/ai_decisions/...`
+> 仍没有写入方。本文用「已实现 / 待实现」标注每一段。
 
 ## 1. 端到端数据流（目标态）
 

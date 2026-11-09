@@ -1,13 +1,12 @@
 # 引擎设计：ICT / Ichimoku / Wyckoff / Chanlun
 
-> 基线：分支 `feat/realtime-paper-trading`，工作区含未提交的 P0-2/P0-3 代码
-> （`realtime/analysis/contracts.py`、`registry.py`、`storage/analytics_schema.py`、
-> `storage/batch_writer.py`、`storage/row_mappers.py`）。本文只描述仓库里真实存在的
-> 入口/函数；「待实现」= 没有 adapter、没有接入信号总线。
+> 基线：分支 `feat/realtime-paper-trading`，已提交 P0 契约/表/批量写入
+> 与 `ICEngine` adapter。本文只描述仓库里真实存在的入口/函数；
+> 「待实现」= 没有 adapter 或没有接入 `RealtimeEngine` 的引擎注册表。
 > 所有性能数字是**本地一次性微基准**（方法见 §5），不是 t4g.medium 的承诺；
 > 未测项一律标 `needs benchmark`。
 
-## 0. 统一契约（已实现，尚未接线）
+## 0. 统一契约（已实现；ICT adapter 已接线，registry 尚未被 RealtimeEngine 持有）
 
 `analysis/contracts.py`：
 

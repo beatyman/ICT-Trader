@@ -23,6 +23,7 @@ from .metrics import Metrics
 from .models import Kline, interval_ms, utc_ms, validate_ohlcv
 from .rest_backfill import BackfillError, RestBackfiller
 from .storage import ClickHouseStore, RedisStore, Wal
+from .storage.observability import Observability
 from .strategy_runner import ICTStrategyRunner, TradeSignal
 
 log = logging.getLogger(__name__)
@@ -63,9 +64,10 @@ class StreamSession:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.engine.metrics.event(
-                    "ERROR", "stream", f"{self.symbol} {self.interval} worker error",
-                    error=str(exc)[:300],
+                await self.engine.observability.error(
+                    "runtime", "stream_worker", "engine",
+                    f"{self.symbol} {self.interval} worker error",
+                    symbol=self.symbol, interval=self.interval, exc=exc,
                 )
                 log.exception("stream worker error %s %s: %s", self.symbol, self.interval, exc)
                 await asyncio.sleep(1.0)
@@ -128,10 +130,11 @@ class StreamSession:
                 raise
             except Exception as exc:
                 self.engine.metrics.inc("closed_process_retry")
-                self.engine.metrics.event(
-                    "ERROR", "stream",
-                    f"closed-bar persistence failed; retaining in queue",
-                    error=str(exc)[:300],
+                await self.engine.observability.error(
+                    "runtime", "closed_persist_failed", "stream",
+                    "closed-bar persistence failed; retaining in queue",
+                    symbol=self.symbol, interval=self.interval,
+                    context={"open_time": bar.open_time}, exc=exc,
                 )
                 await asyncio.sleep(2.0)
 
@@ -154,10 +157,11 @@ class StreamSession:
                      "start": start, "end": end},
                     str(exc),
                 )
-                self.engine.metrics.event(
-                    "ERROR", "backfill",
+                await self.engine.observability.error(
+                    "data_quality", "backfill_failed", "gap",
                     f"{self.symbol} {self.interval} backfill failed; stream stays paused",
-                    error=str(exc)[:300],
+                    symbol=self.symbol, interval=self.interval,
+                    context={"start": start, "end": end}, exc=exc,
                 )
                 await asyncio.sleep(self.engine.settings.backfill_outer_retry_seconds)
                 continue
@@ -225,6 +229,7 @@ class RealtimeEngine:
         self.runner = ICTStrategyRunner(settings, self.metrics)
         self.broker = PaperBroker(settings, self.metrics)
         self.ai = DeepSeekReviewer(settings, self.metrics)
+        self.observability = Observability(self.ch.analytics, self.metrics)
         self.runner.on_signal = self._on_signal
         self.broker.on_trade = self._on_trade
         self.sessions: dict[tuple[str, str], StreamSession] = {}
@@ -235,6 +240,7 @@ class RealtimeEngine:
         self.boot_done = 0
         self.started_at = ""
         self._health_task: asyncio.Task | None = None
+        self._loop_lag_task: asyncio.Task | None = None
         self._health: dict[str, Any] = {
             "redis": {"ok": False, "latency_ms": 0.0},
             "clickhouse": {"ok": False, "latency_ms": 0.0},
@@ -275,6 +281,7 @@ class RealtimeEngine:
                 )
             await self.feed.start(self.dispatch)
             self._health_task = asyncio.create_task(self._health_loop(), name="health-loop")
+            self._loop_lag_task = asyncio.create_task(self._loop_lag_loop(), name="loop-lag")
             self.phase = "ready"
             self.metrics.event(
                 "INFO", "engine",
@@ -314,6 +321,9 @@ class RealtimeEngine:
         if self._health_task is not None:
             self._health_task.cancel()
             self._health_task = None
+        if self._loop_lag_task is not None:
+            self._loop_lag_task.cancel()
+            self._loop_lag_task = None
         await self.ai.close()
         await self.ch.stop()
         await self.rest.close()
@@ -472,6 +482,21 @@ class RealtimeEngine:
         await self.ch.insert_signal(data)
 
     # ------------------------------------------------------------------
+    async def _loop_lag_loop(self) -> None:
+        interval = 0.25
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                started = loop.time()
+                await asyncio.sleep(interval)
+                lag_ms = max(0.0, (loop.time() - started - interval) * 1000.0)
+                await self.observability.loop_lag(lag_ms)
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                self.metrics.event("WARN", "loop_lag", "loop-lag probe failed", error=str(exc)[:200])
+                await asyncio.sleep(1.0)
+
     async def _health_loop(self) -> None:
         tick = 0
         while True:
@@ -493,6 +518,7 @@ class RealtimeEngine:
                         "last_error": self.ch.last_error or self.ch.analytics.last_error,
                     },
                     "wal": wal_stats,
+                    "observability": self.observability.status(),
                     "feed": feed_status,
                     "sessions": {
                         f"{s}:{i}": {

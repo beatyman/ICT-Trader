@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from .circuit import CircuitBreaker
 from .contracts import AnalysisContext, EngineSignal
 
 log = logging.getLogger(__name__)
@@ -40,8 +41,9 @@ class EngineRun:
 
 
 class EngineRegistry:
-    def __init__(self) -> None:
+    def __init__(self, breaker: CircuitBreaker | None = None) -> None:
         self._engines: dict[str, AnalysisEngine] = {}
+        self.breaker = breaker
 
     def register(self, engine: AnalysisEngine) -> None:
         if not isinstance(engine, AnalysisEngine):
@@ -97,22 +99,33 @@ class EngineRegistry:
 
         async def one(engine_id: str) -> EngineRun:
             started = time.perf_counter()
+            if self.breaker is not None and not self.breaker.allow(engine_id):
+                return EngineRun(
+                    engine=engine_id, signals=[], latency_ms=0.0,
+                    error="circuit breaker open",
+                )
             try:
-                return await asyncio.wait_for(
+                run = await asyncio.wait_for(
                     asyncio.to_thread(self.run, engine_id, window, context),
                     timeout=timeout_seconds,
                 )
             except asyncio.TimeoutError:
-                return EngineRun(
+                run = EngineRun(
                     engine=engine_id, signals=[],
                     latency_ms=(time.perf_counter() - started) * 1000.0,
                     error=f"timeout after {timeout_seconds:.1f}s",
                 )
             except Exception as exc:
-                return EngineRun(
+                run = EngineRun(
                     engine=engine_id, signals=[],
                     latency_ms=(time.perf_counter() - started) * 1000.0,
                     error=f"{type(exc).__name__}: {exc}",
                 )
+            if self.breaker is not None:
+                if run.ok:
+                    self.breaker.success(engine_id)
+                else:
+                    self.breaker.failure(engine_id)
+            return run
 
         return await asyncio.gather(*(one(i) for i in ids))

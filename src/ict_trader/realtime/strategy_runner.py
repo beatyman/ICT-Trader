@@ -12,20 +12,21 @@ adapter adds only the live concerns:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import math
 import time
 from collections import deque
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 import numpy as np
 import pandas as pd
 
-from ..concepts import ICTConfig, analyze
-from ..setup import SetupConfig, build_setup
+from ..concepts import ICTConfig
+from ..setup import SetupConfig
+from .analysis.contracts import AnalysisContext
+from .analysis.engines.ict import ICTEngine
 from .config import Settings
 from .metrics import Metrics
 from .models import Kline, interval_ms, ms_to_datetime, utc_ms
@@ -135,6 +136,7 @@ class ICTStrategyRunner:
             fvg_min_width_atr=self._setup_cfg.fvg_min_width_atr,
             sweep_reclaim_bars=self._setup_cfg.sweep_reclaim_bars,
         )
+        self.ict_engine = ICTEngine(self._setup_cfg, self._ict_cfg)
 
     def _build_setup_config(self) -> SetupConfig:
         s = self.settings
@@ -249,73 +251,42 @@ class ICTStrategyRunner:
         frame = pd.DataFrame([b.to_csv_row() for b in bars])
         for col in ("open", "high", "low", "close", "volume"):
             frame[col] = frame[col].astype(float)
-        result = analyze(frame, self._ict_cfg)
-        n = len(frame)
+        context = AnalysisContext(
+            symbol=symbol, interval=self.interval, as_of_ms=utc_ms(),
+        )
         if actionable:
-            # build_setup() accepts any ICTResult. Restricting it to CISDs born
-            # on the just-closed bar avoids rescanning hundreds of old setups.
-            recent = [c for c in result.cisds if int(c.end) >= n - 3]
-            result = replace(result, cisds=recent)
-        setups = build_setup(frame, result, self._setup_cfg)
-        if actionable:
-            setups = [c for c in setups if int(c.end) == len(frame) - 1]
+            engine_signals = self.ict_engine.analyze(frame, context)
         else:
-            setups = setups[-60:]
+            engine_signals = self.ict_engine.scan_history(frame, context)
+
         out: list[TradeSignal] = []
-        closes = frame["close"].to_numpy(float)
-        n = len(frame)
-        for c in setups:
-            idx = int(c.end)
-            if not (0 <= idx < n):
-                continue
-            direction = "long" if c.direction == "bull" else "short"
-            entry = float(closes[idx])
-            stop = float(c.sl)
-            risk = abs(entry - stop)
-            if risk <= 0:
-                continue
-            target = float(c.target) if c.target is not None else (
-                entry + self.settings.rr * risk if direction == "long"
-                else entry - self.settings.rr * risk
-            )
-            if direction == "long" and not (stop < entry < target):
-                continue
-            if direction == "short" and not (target < entry < stop):
-                continue
-            rr = abs(target - entry) / risk
-            if rr < 1.0:
-                continue
-            bar_time = bars[idx].open_time
-            digest = hashlib.sha1(
-                f"{symbol}|{bar_time}|{c.direction}|{c.level:.8f}".encode()
-            ).hexdigest()[:10]
-            checks = {str(k): bool(v) for k, v in (c.checks or {}).items()}
-            parts = {str(k): _jsonable(v) for k, v in (c.quality_parts or {}).items()}
-            passed = [k for k in ("sweep", "pda", "volume", "session", "targets", "smt") if checks.get(k)]
-            thesis = (
-                f"CISD {c.direction} · grade {c.grade} · "
-                f"{' / '.join(passed) if passed else 'base confluence'}"
-            )
+        for engine_signal in engine_signals:
+            evidence = engine_signal.evidence_plain()
+            checks = {str(k): bool(v) for k, v in (evidence.get("checks") or {}).items()}
+            parts = {
+                str(k): _jsonable(v)
+                for k, v in (evidence.get("quality_parts") or {}).items()
+            }
             out.append(TradeSignal(
-                id=f"SIG-{symbol}-{bar_time}-{digest}",
-                symbol=symbol,
-                interval=self.interval,
-                bar_time=bar_time,
-                created_at=utc_ms(),
-                direction=direction,
-                entry=entry,
-                stop=stop,
-                target=target,
-                rr=rr,
-                grade=int(c.grade),
-                quality=float(c.quality),
+                id=engine_signal.signal_id,
+                symbol=engine_signal.symbol,
+                interval=engine_signal.interval,
+                bar_time=engine_signal.source_kline_open_time,
+                created_at=engine_signal.created_at,
+                direction=engine_signal.direction.value,
+                entry=float(evidence["entry"]),
+                stop=float(evidence["stop"]),
+                target=float(evidence["target"]),
+                rr=float(evidence["rr"]),
+                grade=int(evidence["grade"]),
+                quality=float(evidence["quality"]),
                 status="ARMED" if actionable else "HISTORICAL",
                 actionable=actionable,
                 executed=False,
-                reason=thesis,
+                reason=str(evidence.get("thesis") or "Closed-bar ICT setup"),
                 checks=checks,
                 quality_parts=parts,
-                setup_level=float(c.level),
+                setup_level=float(evidence["setup_level"]),
             ))
         return out
 

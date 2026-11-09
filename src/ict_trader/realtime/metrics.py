@@ -35,6 +35,8 @@ class Metrics:
             "strategy_wait_ms": deque(maxlen=512),
             "close_age_ms": deque(maxlen=4096),
             "gap_recovery_ms": deque(maxlen=256),
+            "loop_lag_ms": deque(maxlen=2048),
+            "engine_latency_ms": deque(maxlen=1024),
         }
         self._events: deque[dict[str, Any]] = deque(maxlen=event_limit)
         self._rates: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=8192))
