@@ -42,6 +42,11 @@ def main() -> int:
     ok &= check(len(snap.get("watchlist") or []) > 0, "watchlist populated")
     ok &= check(bool((snap.get("strategy") or {}).get("interval")), "strategy attached")
     ok &= check(bool((snap.get("metrics") or {}).get("latency")), "metrics present")
+    ai = snap.get("ai") or {}
+    if ai.get("configured"):
+        ok &= check(ai.get("model") == "deepseek-flash", "DeepSeek Flash review model")
+    else:
+        print("[INFO] DeepSeek review disabled (DEEPSEEK_API_KEY not set)")
 
     bars = httpx.get(
         args.url + "/api/klines",

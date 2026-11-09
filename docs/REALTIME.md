@@ -198,9 +198,18 @@ build_setup(df_15m, result, SetupConfig(market="crypto", stack=...))
 ![DeepSeek Flash risk review](assets/realtime-ai-review.png)
 
 `DEEPSEEK_API_KEY` lives in `.env` (git-ignored) and is **never sent to the
-browser**. The model is called only when the operator presses `REVIEW`; it
-receives a compact snapshot (last 50 closed bars, selected-symbol signals,
-positions, account, gap/latency health) and returns structured JSON.
+browser**. To enable it:
+
+```powershell
+Copy-Item .env.example .env
+# edit .env:
+# DEEPSEEK_API_KEY=sk-...
+# DEEPSEEK_MODEL=deepseek-flash
+```
+
+The model is called only when the operator presses `AI`/`REVIEW`; it receives a
+compact snapshot (last 50 closed bars, selected-symbol signals, positions,
+account, gap/latency health) and returns structured JSON.
 
 * model: `deepseek-flash`, `reasoning_effort=low`, JSON-object response;
 * role: risk reviewer only — it cannot open, close or modify a paper position;
