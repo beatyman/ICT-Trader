@@ -210,12 +210,8 @@ def analyze_chanlun(df: pd.DataFrame, symbol: str = "SYM", freq: str = "1d") -> 
 
     klus = df_to_klus(df)
     kl_type = getattr(KL_TYPE, FREQ_MAP.get(freq, "K_DAY"))
-    config = CChanConfig({
-        "bi_strict": True, "trigger_step": True, "skip_step": 0,
-        "divergence_rate": float("inf"), "bsp2_follow_1": False, "bsp3_follow_1": False,
-        "min_zs_cnt": 0, "bs1_peak": False, "macd_algo": "peak",
-        "bs_type": "1,2,3a,1p,2s,3b", "print_warning": False, "zs_algo": "normal",
-    })
+    from .chan_config import flat_config
+    config = CChanConfig(flat_config())
     chan = CChan(code=symbol, data_src=None, lv_list=[kl_type], config=config)
     chan.trigger_load({kl_type: klus})
     chan.kl_datas[kl_type].cal_seg_and_zs()

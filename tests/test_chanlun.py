@@ -82,3 +82,31 @@ def test_chanlun_exposes_drawable_structure():
     for b in r.bsps:
         assert b["time"] > 0
         assert b["type"]
+
+
+def test_requested_chan_config_is_loaded_exactly():
+    from ict_trader.chan_config import flat_config
+    from ChanConfig import CChanConfig
+
+    cfg = CChanConfig(flat_config())
+    assert cfg.bi_conf.bi_algo == "normal"
+    assert cfg.bi_conf.is_strict is False
+    assert cfg.bi_conf.gap_as_kl is True
+    assert cfg.bi_conf.bi_end_is_peak is True
+    assert cfg.bi_conf.bi_allow_sub_peak is False
+    assert cfg.seg_conf.seg_algo == "chan"
+    assert cfg.zs_conf.need_combine is True
+    assert cfg.zs_conf.one_bi_zs is False
+    assert cfg.bs_point_conf.b_conf.min_zs_cnt == 1
+    assert cfg.bs_point_conf.b_conf.bsp1_only_multibi_zs is True
+    assert cfg.bs_point_conf.b_conf.bsp2_follow_1 is False
+    assert cfg.bs_point_conf.b_conf.bsp3_follow_1 is False
+    assert cfg.seg_bs_point_conf.b_conf.macd_algo.name == "SLOPE"
+    assert cfg.bs_point_conf.b_conf.macd_algo.name == "PEAK"
+    assert [t.value for t in cfg.bs_point_conf.b_conf.target_types] == [
+        "1", "1p", "2", "2s", "3a", "3b",
+    ]
+    assert cfg.macd_config == {"fast": 12, "slow": 26, "signal": 9}
+    assert cfg.boll_n == 20
+    assert cfg.rsi_cycle == 14
+    assert cfg.kdj_cycle == 9
