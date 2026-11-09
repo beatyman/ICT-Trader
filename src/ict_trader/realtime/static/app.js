@@ -1287,6 +1287,7 @@
     card.hidden = false;
     card.innerHTML = `<div><b>${escapeHtml(setup.symbol)}</b> ${short ? "SHORT" : "LONG"}</div>
       <div class="setup-card-row"><span class="setup-card-status ${status === "OPEN" ? "open" : ""}">${status}</span><span>${Number(setup.rr || 0).toFixed(2)}R</span></div>
+      <div class="setup-card-row"><span>SIG</span><b>${escapeHtml(String(setup.engine_signals?.[0]?.signal_id || setup.setup_id || "").slice(-8))}</b></div>
       <div class="setup-card-row"><span>ENTRY</span><b>${fmtPrice(setup.entry)}</b></div>
       <div class="setup-card-row"><span>SL</span><b style="color:var(--amber)">${fmtPrice(setup.stop)}</b></div>
       ${setup.status === "OPEN" ? `<div class="setup-card-row"><span>UPL</span><b>${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}</b></div>` : ""}`;
@@ -1444,12 +1445,14 @@
     }
     if (planSetup) {
       const e = planSetup.engine_signals?.[0];
-      const bt = chartTime(e?.source_kline_open_time || planSetup.created_at);
-      if (Number.isFinite(bt)) {
+      const source = chartTime(e?.source_kline_open_time || planSetup.created_at);
+      const nearest = bars.some(b => chartTime(b.open_time) === source)
+        ? source : chartTime(bars[bars.length - 1]?.open_time);
+      if (Number.isFinite(nearest)) {
         markers.push({
-          time: bt, position: planSetup.direction === "long" ? "belowBar" : "aboveBar",
+          time: nearest, position: planSetup.direction === "long" ? "belowBar" : "aboveBar",
           color: CHART.entry, shape: planSetup.direction === "long" ? "arrowUp" : "arrowDown",
-          text: "ENTRY", kind: "SIG", direction: planSetup.direction,
+          text: "SIGNAL", kind: "SIG", direction: planSetup.direction,
         });
       }
     }
