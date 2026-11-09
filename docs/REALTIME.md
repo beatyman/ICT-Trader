@@ -4,7 +4,7 @@ This feature branch (`feat/realtime-paper-trading`) turns the research engine
 into a runnable **local realtime terminal**:
 
 ```
-Binance WS / accelerated demo tape
+Binance WS (production) / explicit local demo
         │  combined streams, grouped by interval
         ▼
 per-stream queue → gap state machine → REST backfill / replay
@@ -27,17 +27,23 @@ key is used only for on-demand risk review.
 # 1. Redis 7 + ClickHouse 24.8, memory-capped and tuned
 pwsh -File scripts/dev_up.ps1 -Install
 
-# 2. Accelerated demo tape (deterministic, offline after first seed)
-.\.venv\Scripts\python.exe -m ict_trader.realtime --mode demo
+# 2. Production: live Binance market data, paper execution
+.\.venv\Scripts\python.exe -m ict_trader.realtime
 
 # 3. Open the terminal
 start http://127.0.0.1:8080
 ```
 
-Live Binance market data instead of the demo tape:
+`REALTIME_MODE=live` is the default. The same command is the production path:
 
 ```powershell
-.\.venv\Scripts\python.exe -m ict_trader.realtime --mode live
+.\.venv\Scripts\python.exe -m ict_trader.realtime
+```
+
+Demo is explicit local-only and must never be used for production:
+
+```powershell
+.\.venv\Scripts\python.exe -m ict_trader.realtime --mode demo
 ```
 
 The default live endpoint is `data-api.binance.vision` / 
@@ -75,7 +81,34 @@ docker compose --profile app up -d --build
 
 Ports 6379/8123/9000 are bound to `127.0.0.1`; do not expose them publicly.
 
-## 1.1 Realtime cadence (current behavior)
+## 1.1 Production mode and data provenance
+
+Production startup requires:
+
+```dotenv
+REALTIME_MODE=live
+PAPER_TRADE=true
+```
+
+`live` means **real Binance market data**, not real order routing. The broker
+remains paper-only by design (`PAPER_TRADE=true`; live routing is rejected at
+configuration load).
+
+Every K-line stored in Redis/ClickHouse now carries `source`:
+
+| source | Meaning |
+|---|---|
+| `ws` | Binance combined WebSocket kline event |
+| `rest` | Binance REST bootstrap/backfill |
+| `redis` / `clickhouse` | read-back provenance when a source is absent (legacy) |
+| `demo` | synthetic tape; **rejected before cache in live mode** |
+
+The supervisor guard in `StreamSession._handle_live` drops `source=demo` bars
+before they touch `latest_bars`, Redis, the chart, or the strategy runner.
+`ict.klines` has a `source LowCardinality(String)` column and the current
+production database was rebuilt from live REST/WS data; no demo rows remain.
+
+## 1.2 Realtime cadence (current behavior)
 
 | Layer | Cadence | Notes |
 |---|---|---|
@@ -85,7 +118,7 @@ Ports 6379/8123/9000 are bound to `127.0.0.1`; do not expose them publicly.
 | Chart last candle | 1 Hz via WS snapshot | merged client-side; `/api/klines?include_live=true` also returns it |
 | Historical chart refresh | 60s / symbol change | closed-bar backfill/repair |
 | Watchlist / header price | 1 Hz | uses the same live 15m bar as the chart, not the previous close |
-| Strategy indicators | once per **closed 15m strategy bar**, per symbol | no intrabar signals; `signal_latency_ms` measures close→decision |
+| Strategy indicators | once per **closed 15m strategy bar**, per symbol | real Binance closed bars only; no intrabar signals; `signal_latency_ms` measures close→decision |
 | Paper entry | immediately after a closed-bar signal | next-tick/next-open semantics |
 | Paper TP/SL exits | every WS price tick | stop/target checked on live marks |
 | AI review | **on demand only** | current deepseek review has no automatic per-bar decision; it cannot execute |

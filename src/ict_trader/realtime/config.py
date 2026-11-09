@@ -88,7 +88,7 @@ def _env_list(name: str, default: list[str]) -> list[str]:
 @dataclass(slots=True)
 class Settings:
     # ---- runtime ---------------------------------------------------------
-    mode: str = "demo"                    # demo | live
+    mode: str = "live"                    # live | demo (explicit local-only)
     market: str = "spot"                  # spot | futures
     symbols: list[str] = field(default_factory=lambda: [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
@@ -269,7 +269,7 @@ class Settings:
         rest_default = FUTURES_REST if market == "futures" else SPOT_REST
         data_dir = Path(_env_str("REALTIME_DATA_DIR", str(DEFAULT_DATA_DIR)))
         cfg = cls(
-            mode=_env_str("REALTIME_MODE", "demo").lower(),
+            mode=_env_str("REALTIME_MODE", "live").lower(),
             market=market,
             symbols=_env_list("SYMBOLS", ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"]),
             intervals=_env_list("INTERVALS", ["15m", "1h", "4h", "1d"]),

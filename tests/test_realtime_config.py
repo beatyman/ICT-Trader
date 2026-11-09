@@ -47,3 +47,54 @@ def test_public_dict_does_not_leak_secrets(tmp_path):
     assert public["ai"]["configured"] is True
     assert "sk-secret" not in str(public)
     assert "password" not in str(public)
+
+
+def test_production_default_mode_is_live(tmp_path):
+    cfg = Settings(symbols=["BTCUSDT"], intervals=["15m"], data_dir=tmp_path)
+    assert cfg.mode == "live"
+
+
+def test_kline_source_survives_ch_and_redis(tmp_path):
+    from ict_trader.realtime.models import Kline
+
+    bar = Kline(
+        symbol="BTCUSDT", interval="15m", open_time=1_700_000_000_000,
+        close_time=1_700_000_899_999, open=1.0, high=2.0, low=0.5,
+        close=1.5, volume=10.0, is_closed=True, source="ws",
+    )
+    row = bar.to_ch_row()
+    assert len(row) == 15
+    assert row[-1] == "ws"
+    assert Kline.from_ch_row(row).source == "ws"
+    cached = bar.to_redis()
+    assert cached["source"] == "ws"
+    assert Kline.from_redis(cached).source == "ws"
+
+
+def test_live_mode_rejects_synthetic_bar_before_cache():
+    import asyncio
+    from types import SimpleNamespace
+    from ict_trader.realtime.engine import StreamSession
+    from ict_trader.realtime.metrics import Metrics
+    from ict_trader.realtime.models import Kline
+
+    class Redis:
+        async def update_latest(self, bar):
+            raise AssertionError("demo bar must not reach Redis")
+
+    fake = SimpleNamespace(
+        settings=SimpleNamespace(mode="live"),
+        metrics=Metrics(),
+        latest_bars={},
+        redis=Redis(),
+        observability=None,
+    )
+    session = StreamSession(fake, "BTCUSDT", "15m")
+    bar = Kline(
+        symbol="BTCUSDT", interval="15m", open_time=1_700_000_000_000,
+        close_time=1_700_000_899_999, open=1.0, high=2.0, low=0.5,
+        close=1.5, volume=10.0, is_closed=False, source="demo",
+    )
+    asyncio.run(session._handle_live(bar))
+    assert fake.latest_bars == {}
+    assert fake.metrics.snapshot()["counters"]["rejected_demo_bar"] == 1

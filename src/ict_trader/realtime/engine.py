@@ -79,6 +79,14 @@ class StreamSession:
 
     # ------------------------------------------------------------------
     async def _handle_live(self, bar: Kline) -> None:
+        # Production mode must fail closed: synthetic data can never enter the
+        # live chart, Redis latest cache, or strategy pipeline.
+        if self.engine.settings.mode == "live" and bar.source == "demo":
+            self.engine.metrics.inc("rejected_demo_bar")
+            return
+        if not validate_ohlcv(bar):
+            self.engine.metrics.inc("invalid_live_bar")
+            return
         self.live_count += 1
         self.last_update_time = utc_ms()
         self.engine.latest_bars[(bar.symbol, bar.interval)] = bar
@@ -434,6 +442,12 @@ class RealtimeEngine:
 
     # ------------------------------------------------------------------
     async def _process_closed(self, bar: Kline, *, recovered: bool) -> None:
+        if self.settings.mode == "live" and bar.source == "demo":
+            self.metrics.inc("rejected_demo_bar")
+            return
+        if not validate_ohlcv(bar):
+            self.metrics.inc("invalid_closed_bar")
+            return
         start = time.perf_counter()
         self.latest_bars[(bar.symbol, bar.interval)] = bar
         redis_ms = await self.redis.store_closed(bar, recovered=recovered)

@@ -30,7 +30,7 @@ Most ICT scripts draw boxes and arrows. This one is built around four rules:
 ## Realtime paper terminal
 
 This branch adds a local, Docker-backed realtime paper-trading stack around the
-same frozen setup: Binance combined-stream WS ingestion, Redis hot cache,
+same frozen setup: live Binance combined-stream WS ingestion, Redis hot cache,
 ClickHouse closed-bar storage, gap detection + REST backfill, a SQLite WAL retry
 queue, a closed-bar strategy adapter, a deterministic paper broker and a
 self-contained Canvas dashboard.
@@ -39,8 +39,8 @@ self-contained Canvas dashboard.
 # Redis + ClickHouse (memory-capped, local-only ports)
 pwsh -File scripts/dev_up.ps1 -Install
 
-# Accelerated demo tape; use --mode live for Binance market data
-.\.venv\Scripts\python.exe -m ict_trader.realtime --mode demo
+# Production: real Binance WS/REST, paper execution only
+.\.venv\Scripts\python.exe -m ict_trader.realtime
 
 # http://127.0.0.1:8080
 .\.venv\Scripts\python.exe scripts/smoke_realtime.py

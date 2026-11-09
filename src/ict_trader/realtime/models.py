@@ -28,7 +28,7 @@ INTERVAL_MS: dict[str, int] = {
 CH_COLUMNS = [
     "symbol", "interval", "open_time", "close_time", "open", "high", "low",
     "close", "volume", "quote_volume", "trades", "taker_buy_base",
-    "taker_buy_quote", "ingest_time",
+    "taker_buy_quote", "ingest_time", "source",
 ]
 
 
@@ -97,6 +97,7 @@ class Kline:
             "taker_buy_quote": repr(self.taker_buy_quote),
             "is_closed": "1" if self.is_closed else "0",
             "ingest_time": str(self.ingest_time),
+            "source": self.source,
         }
 
     def to_ch_row(self) -> tuple:
@@ -115,6 +116,7 @@ class Kline:
             float(self.taker_buy_base),
             float(self.taker_buy_quote),
             ms_to_datetime(self.ingest_time),
+            self.source,
         )
 
     def to_public(self) -> dict[str, Any]:
@@ -132,6 +134,7 @@ class Kline:
             "trades": self.trades,
             "is_closed": self.is_closed,
             "ingest_time": self.ingest_time,
+            "source": self.source,
         }
 
     def to_csv_row(self) -> dict[str, Any]:
@@ -214,7 +217,7 @@ class Kline:
             taker_buy_quote=float(row[12]),
             is_closed=True,
             ingest_time=dt_to_ms(row[13]),
-            source="clickhouse",
+            source=str(row[14]) if len(row) > 14 else "clickhouse",
         )
 
     @classmethod
@@ -235,7 +238,7 @@ class Kline:
             taker_buy_quote=float(data.get("taker_buy_quote", 0.0)),
             is_closed=data.get("is_closed") == "1",
             ingest_time=int(data.get("ingest_time", 0)),
-            source="redis",
+            source=data.get("source", "redis"),
         )
 
 

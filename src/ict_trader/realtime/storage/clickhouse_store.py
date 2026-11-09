@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 CH_COLUMNS = [
     "symbol", "interval", "open_time", "close_time", "open", "high", "low",
     "close", "volume", "quote_volume", "trades", "taker_buy_base",
-    "taker_buy_quote", "ingest_time",
+    "taker_buy_quote", "ingest_time", "source",
 ]
 
 
@@ -169,7 +169,8 @@ class ClickHouseStore:
                 trades UInt32,
                 taker_buy_base Float64,
                 taker_buy_quote Float64,
-                ingest_time DateTime64(3, 'UTC')
+                ingest_time DateTime64(3, 'UTC'),
+                source LowCardinality(String) DEFAULT 'unknown'
             )
             ENGINE = ReplacingMergeTree(ingest_time)
             PARTITION BY toYYYYMM(open_time)
@@ -177,6 +178,10 @@ class ClickHouseStore:
             TTL toDateTime(open_time) + INTERVAL {self.retention_days} DAY DELETE
             SETTINGS index_granularity = 8192
             """
+        )
+        self._command_sync(
+            f"ALTER TABLE {db}.klines ADD COLUMN IF NOT EXISTS "
+            "source LowCardinality(String) DEFAULT 'unknown'"
         )
         self._command_sync(
             f"""
@@ -331,7 +336,8 @@ class ClickHouseStore:
     async def load_recent(self, symbol: str, interval: str, limit: int = 200) -> list[Kline]:
         query = f"""
             SELECT symbol, interval, open_time, close_time, open, high, low, close,
-                   volume, quote_volume, trades, taker_buy_base, taker_buy_quote, ingest_time
+                   volume, quote_volume, trades, taker_buy_base, taker_buy_quote, ingest_time,
+                   source
             FROM {self.database}.klines FINAL
             WHERE symbol = {{symbol:String}} AND interval = {{interval:String}}
             ORDER BY open_time DESC
