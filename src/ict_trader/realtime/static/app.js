@@ -1338,7 +1338,9 @@
       try { return lwc.chart.priceScale("right").width(); }
       catch (_) { return 64; }
     })();
-    const rows = (lines || []).map((l, i) => ({
+    const allLines = lines || [];
+    const axisCount = allLines.filter(l => l.axisLabel).length;
+    const rows = allLines.filter(l => !l.axisLabel).map((l, i) => ({
       id: `${l.title || l.label || "level"}-${i}`,
       y: lwc.candles.priceToCoordinate(Number(l.price)),
       title: l.title || l.label || "LEVEL",
@@ -1347,6 +1349,7 @@
     const placed = window.ICTMath
       ? window.ICTMath.layoutPriceLabels(rows, lwc.height || 360, 14, 8)
       : rows;
+    window.__chartLabelStats = { html: placed.length, axis: axisCount };
     layer.innerHTML = placed.map(row => `
       <span class="price-label" style="top:${row.labelY}px;right:${scaleWidth + 8}px;color:${row.color}">
         <b>${escapeHtml(row.title)}</b><span>${fmtPrice(row.price)}</span>

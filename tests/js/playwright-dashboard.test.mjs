@@ -128,7 +128,9 @@ test("full dashboard renders a fixed signal scenario", async () => {
     assert.match(await page.locator("#setupContent").innerText(), /2\.00R|SETUP|ENTRY/i);
     assert.ok(await page.locator(".signal-item").count() >= 1);
     await page.screenshot({ path: path.join(ARTIFACTS, "dashboard-debug.png"), fullPage: false });
-    assert.ok(await page.locator("#priceLabelLayer .price-label").count() >= 1);
+    const labelStats = await page.evaluate(() => window.__chartLabelStats || {});
+    assert.ok(labelStats.axis >= 1, "plan price-axis labels expected");
+    assert.equal(labelStats.html, 0, "plan lines must not duplicate in HTML layer");
     assert.ok(await page.locator("#aiLogList .ai-log-row").count() >= 1);
     assert.ok(await page.locator("#setupCard").isVisible());
     const overlapRatio = await page.evaluate(() => {
