@@ -32,7 +32,7 @@ def test_setup_lifecycle_persists_transitions():
         setup = await manager.on_signal(signal(), now=1_700_000_100_000)
         assert setup is not None
         assert setup.status == "DETECTED"
-        await manager.on_price("BTCUSDT", 100.0, interval="15m", high=100.5, low=99.5,
+        await manager.on_price("BTCUSDT", 100.0, interval="15m", high=100.5, low=98.8,
                                now=1_700_000_200_000)
         assert setup.status == "OPEN"
         await manager.on_price("BTCUSDT", 110.0, interval="15m", high=110.5, low=109.5,
@@ -89,11 +89,43 @@ def test_setup_records_resonance_and_structural_invalidation():
         assert setup.resonance_score == 3
         assert setup.structural_invalidation_price == 98.0
         await manager.on_price("BTCUSDT", 100.0, interval="15m", high=100.5,
-                               low=99.5, now=1_700_000_200_000)
+                               low=98.8, now=1_700_000_200_000)
         assert setup.status == "OPEN"
         await manager.on_price("BTCUSDT", 97.0, interval="15m", high=97.5,
                                low=96.5, now=1_700_000_300_000)
         assert setup.status == "INVALIDATED"
         assert setup.structural_invalidation_status == "hit"
+
+    asyncio.run(run())
+
+
+def test_short_waits_for_upper_edge_and_uses_actual_fill():
+    rows = []
+
+    async def persist_setup(row):
+        rows.append(row)
+
+    async def persist_event(row):
+        rows.append(row)
+
+    async def run():
+        s = EngineSignal(
+            engine="wyckoff", symbol="ETHUSDT", interval="15m", direction="short",
+            signal_type="wyckoff_upthrust", trigger_price_zone=PriceZone(2151.26, 2235.24),
+            invalidation_price=2245.99, confidence=0.9,
+            source_kline_open_time=1_700_000_000_000 // 900_000 * 900_000, engine_version="test",
+            evidence={"target": 2060.0},
+        )
+        manager = SetupManager(persist_setup, persist_event, max_bars=40)
+        setup = await manager.on_signal(s, now=1_700_000_100_000)
+        assert setup.entry == 2235.24
+        await manager.on_price("ETHUSDT", 2151.26, interval="15m",
+                               high=2158.19, low=2128.0, now=1_700_000_200_000)
+        assert setup.status == "DETECTED"
+        await manager.on_price("ETHUSDT", 2235.24, interval="15m",
+                               high=2236.0, low=2200.0, now=1_700_000_300_000)
+        assert setup.status == "OPEN"
+        assert setup.fill_price == 2235.24
+        assert setup.rr > 2.0
 
     asyncio.run(run())

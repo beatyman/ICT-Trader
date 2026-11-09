@@ -60,6 +60,7 @@ class Setup:
     ai_decision: str = ""
     bars_alive: int = 0
     last_price: float = 0.0
+    fill_price: float | None = None
     resonance_score: int = 0
     resonance_breakdown: dict[str, Any] = field(default_factory=dict)
     structural_invalidation_price: float | None = None
@@ -67,6 +68,15 @@ class Setup:
 
     @property
     def entry(self) -> float:
+        # A short must fill at the upper (favourable) edge; a long at the
+        # lower edge.  Before a fill this is the planned limit price, after
+        # the fill it is the actual paper fill.
+        if self.fill_price is not None:
+            return self.fill_price
+        return self.entry_high if self.direction == "short" else self.entry_low
+
+    @property
+    def entry_mid(self) -> float:
         return (self.entry_low + self.entry_high) / 2.0
 
     @property
@@ -91,6 +101,8 @@ class Setup:
             "entry_low": self.entry_low,
             "entry_high": self.entry_high,
             "entry": self.entry,
+            "entry_mid": self.entry_mid,
+            "fill_price": self.fill_price,
             "stop": self.stop,
             "target": self.target,
             "rr": round(self.rr, 3),
@@ -159,7 +171,8 @@ class SetupManager:
         return [s for s in self.all() if s.is_active]
 
     async def on_signal(self, signal: EngineSignal, *, now: int | None = None,
-                        resonance: Any | None = None) -> Setup | None:
+                        resonance: Any | None = None,
+                        min_rr: float = 0.0) -> Setup | None:
         if signal.engine == "ict":
             return None
         now = now or signal.created_at
@@ -188,7 +201,7 @@ class SetupManager:
             structural_invalidation_price=signal.evidence_plain().get(
                 "structural_invalidation_price"),
         )
-        if setup.target <= 0:
+        if setup.target <= 0 or setup.rr < min_rr:
             return None
         self._setups[setup.setup_id] = setup
         await self.persist_setup(setup.setup_row(_now_dt()))
@@ -212,11 +225,13 @@ class SetupManager:
             if setup.status == "DETECTED":
                 if self._hits_entry(setup, float(low if low is not None else price),
                                     float(high if high is not None else price)):
+                    setup.fill_price = (setup.entry_high if setup.direction == "short"
+                                        else setup.entry_low)
                     setup.status = "OPEN"
                     setup.opened_at = now
                     setup.updated_at = now
-                    await self._transition(setup, "ENTRY", setup.entry, now,
-                                           "trigger zone touched")
+                    await self._transition(setup, "ENTRY", setup.fill_price, now,
+                                           "favourable edge touched")
                     # Never evaluate TP on the same tick that opened the
                     # position: one bar's high/low can contain both prices,
                     # which would be look-ahead inside the bar.
@@ -283,7 +298,9 @@ class SetupManager:
 
     @staticmethod
     def _hits_entry(setup: Setup, low: float, high: float) -> bool:
-        return not (high < setup.entry_low or low > setup.entry_high)
+        if setup.direction == "short":
+            return high >= setup.entry_high
+        return low <= setup.entry_low
 
     @staticmethod
     def _hits_stop(setup: Setup, low: float, high: float) -> bool:

@@ -253,9 +253,21 @@
     if (lookback.length) {
       const hi = Math.max(...lookback.map(b => num(b.high)));
       const lo = Math.min(...lookback.map(b => num(b.low)));
+      const lastClose = num(bars[bars.length - 1].close);
+      const swingHighs = pivots(lookback, "high", 2, 2)
+        .filter(p => p.price > lastClose)
+        .filter(p => !lookback.slice(p.i + 1).some(b => num(b.high) > p.price))
+        .sort((a, b) => b.i - a.i);
+      const swingLows = pivots(lookback, "low", 2, 2)
+        .filter(p => p.price < lastClose)
+        .filter(p => !lookback.slice(p.i + 1).some(b => num(b.low) < p.price))
+        .sort((a, b) => b.i - a.i);
+      // BSL/SSL are the nearest unswept swing liquidity, not the 24h range.
+      const bsl = swingHighs.length ? swingHighs[0].price : hi;
+      const ssl = swingLows.length ? swingLows[0].price : lo;
       const first = timeOf(lookback[0].open_time);
-      priceLines.push({ price: hi, title: "BSL", color: "#ef5350", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
-      priceLines.push({ price: lo, title: "SSL", color: "#26a69a", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
+      priceLines.push({ price: bsl, title: "BSL", color: "#ef5350", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
+      priceLines.push({ price: ssl, title: "SSL", color: "#26a69a", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
       priceLines.push({ price: (hi + lo) / 2, title: "EQ (50%)", color: "#787b86", lineStyle: 0, lineWidth: 1, startTime: first, endTime: end, axisLabel: false });
     }
 

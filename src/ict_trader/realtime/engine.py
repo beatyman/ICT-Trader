@@ -641,7 +641,9 @@ class RealtimeEngine:
                         wyckoff_bias=biases["wyckoff"],
                     )
                     self.auxiliary[signal.symbol] = aux.to_public()
-                    await self.setups.on_signal(signal, resonance=aux)
+                    await self.setups.on_signal(
+                        signal, resonance=aux, min_rr=self.settings.rr,
+                    )
                 self.registry_signals.extend(fresh)
                 self.metrics.inc("engine_signal", len(fresh))
                 self.metrics.event(

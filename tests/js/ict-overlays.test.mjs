@@ -199,3 +199,18 @@ test("BSL and SSL sweeps are distinguishable", () => {
   assert.ok(data.markers.some(m => m.kind === "BSL_SWEEP" && m.text === "BSL Sweep"));
   assert.ok(data.markers.some(m => m.kind === "SSL_SWEEP" && m.text === "SSL Sweep"));
 });
+
+
+test("BSL/SSL lines use nearest swing liquidity", () => {
+  const bars = Array.from({ length: 40 }, (_, i) => bar(i, { high: 95, low: 85, open: 90, close: 90 }));
+  bars[10].high = 100;
+  bars[12].high = 105;
+  bars[15].low = 80;
+  bars[17].low = 75;
+  for (let i = 30; i < 40; i++) bars[i].close = 99;
+  const data = ICT.buildICTData(bars, { tf: "15m" });
+  const bsl = data.priceLines.find(l => l.title === "BSL");
+  const ssl = data.priceLines.find(l => l.title === "SSL");
+  assert.equal(bsl.price, 105);
+  assert.equal(ssl.price, 85);
+});
