@@ -110,8 +110,9 @@ class ICTStrategyRunner:
         self.metrics = metrics
         self.interval = settings.strategy_interval
         # One closed 4H cloud needs 52*4H ~= 832 15m bars; 2400 leaves a wide
-        # buffer and cuts per-close CPU by more than half. 1D stacks need ~6500.
-        auto_window = 6500 if "1d" in settings.stack.lower() else 1800
+        # buffer and cuts per-close CPU by more than half. 1D cloud needs
+        # 52+26=78 daily bars -> 8000 15m bars with headroom.
+        auto_window = 8000 if "1d" in settings.stack.lower() else 1800
         self.eval_window = max(400, int(settings.strategy_eval_window or auto_window))
         self.histories: dict[str, deque[Kline]] = {
             s: deque(maxlen=self.eval_window) for s in settings.symbols

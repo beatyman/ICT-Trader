@@ -66,9 +66,9 @@ cd ICT-Trader
 python -m venv .venv
 # Windows
 .venv\Scripts\activate
-pip install -e ".[dev]"
-# realtime extras (Redis, ClickHouse, FastAPI, orjson, websockets)
-pip install -e ".[dev,realtime]"
+# Reproducible path: pinned runtime + test deps, then the project itself.
+pip install -r requirements.lock
+pip install --no-deps -e .
 ```
 
 Optional Futu OpenD:

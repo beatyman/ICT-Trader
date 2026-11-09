@@ -7,7 +7,7 @@ name = "ict-trader"
 version = "0.1.0"
 description = "Reproducible ICT/SMC analysis, frozen setup and event-driven backtest"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
 authors = [{ name = "beatyman" }]
 dependencies = [

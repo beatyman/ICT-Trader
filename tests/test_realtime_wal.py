@@ -26,3 +26,19 @@ def test_wal_pending_delete_and_retry(tmp_path):
     wal.dead_letter("backfill", {"symbol": "ETHUSDT"}, "boom")
     assert wal.stats()["dead_letters"] == 1
     wal.close()
+
+
+def test_analytics_wal_roundtrips_datetime(tmp_path):
+    from datetime import datetime, timezone
+    wal = Wal(tmp_path / "wal.sqlite3")
+    now = datetime.now(timezone.utc)
+    assert wal.add_analytics("signals", ["a", "at"], [(1, now)]) == 1
+    pending = wal.pending_analytics()
+    assert len(pending) == 1
+    _, table, columns, row, _ = pending[0]
+    assert table == "signals"
+    assert columns == ["a", "at"]
+    assert isinstance(row[1], datetime)
+    wal.delete_analytics([pending[0][0]])
+    assert wal.stats()["analytics_pending"] == 0
+    wal.close()

@@ -113,7 +113,7 @@ class Settings:
     # ---- Redis -----------------------------------------------------------
     redis_url: str = "redis://127.0.0.1:6379/0"
     redis_socket_timeout: float = 5.0
-    redis_closed_keep: int = 5000
+    redis_closed_keep: int = 1000        # hot window; 50x3 budget guard
     redis_latest_ttl: int = 172800        # 48h cache (not the system of record)
     redis_closed_ttl: int = 604800        # 7d hot cache
 
@@ -137,7 +137,7 @@ class Settings:
 
     # ---- strategy / paper broker ----------------------------------------
     stack: str = "4h_15m"
-    strategy_eval_window: int = 0      # 0 => auto (2400 for 4H stacks, 6500 for 1D stacks)
+    strategy_eval_window: int = 0      # 0 => auto (1800 for 4H stacks, 8000 for 1D stacks)
     quality_profile: str = "standard"
     require_sweep: bool = True
     allow_short: bool = False
@@ -288,7 +288,7 @@ class Settings:
             demo_seed_source=_env_str("DEMO_SEED_SOURCE", "binance").lower(),
             redis_url=_env_str("REDIS_URL", "redis://127.0.0.1:6379/0"),
             redis_socket_timeout=_env_float("REDIS_SOCKET_TIMEOUT", 5.0),
-            redis_closed_keep=_env_int("REDIS_CLOSED_KEEP", 5000),
+            redis_closed_keep=_env_int("REDIS_CLOSED_KEEP", 1000),
             redis_latest_ttl=_env_int("REDIS_LATEST_TTL", 172800),
             redis_closed_ttl=_env_int("REDIS_CLOSED_TTL", 604800),
             ch_host=_env_str("CLICKHOUSE_HOST", "127.0.0.1"),

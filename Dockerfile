@@ -5,9 +5,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md requirements.lock ./
 COPY src ./src
-RUN pip install --upgrade pip && pip install ".[realtime]"
+# Runtime dependencies are pinned; the project itself is installed --no-deps.
+RUN pip install --upgrade pip \
+    && pip install -r requirements.lock \
+    && pip install --no-deps .
 
 RUN useradd --create-home --uid 10001 ict \
     && mkdir -p /app/data/realtime \

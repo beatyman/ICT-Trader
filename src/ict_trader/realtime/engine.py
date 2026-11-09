@@ -489,7 +489,8 @@ class RealtimeEngine:
                     "clickhouse": {
                         "ok": ch_ok, "latency_ms": round(ch_ms, 2),
                         "rows": self._ch_rows, "queue": self.ch.queue_size,
-                        "last_error": self.ch.last_error,
+                        "analytics_queue": self.ch.analytics_queue_size,
+                        "last_error": self.ch.last_error or self.ch.analytics.last_error,
                     },
                     "wal": wal_stats,
                     "feed": feed_status,

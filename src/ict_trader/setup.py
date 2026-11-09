@@ -32,7 +32,8 @@ from .context import (SwingIndex, candle2_closure, candle3_closure, dealing_rang
 from .pd_arrays import count_path_liquidity, near_arrays
 from .sweeps import nearest_key_target
 from .strategy import StrategyConfig, simulate_cisd
-from .indicators import add_indicators, align_htf, ichimoku, macd, resample_cn_4h, resample_htf
+from .indicators import (add_indicators, align_htf, ichimoku, macd,
+                         mark_htf_known_at, resample_cn_4h, resample_htf)
 from .quality import Displacement, measure_displacement, score_setup
 from .regime import Regime, market_regime
 
@@ -183,6 +184,9 @@ def _drop_incomplete_htf(base: pd.DataFrame, h: pd.DataFrame) -> pd.DataFrame:
 def _htf(df: pd.DataFrame, rule: str, market: str = "cn") -> pd.DataFrame:
     h = resample_cn_4h(df) if (rule == "4h" and market == "cn") else resample_htf(df, rule)
     h = _drop_incomplete_htf(df, h)
+    if not (rule == "4h" and market == "cn"):
+        # Left-labelled resample buckets become knowable only at bucket close.
+        h = mark_htf_known_at(h, rule)
     return align_htf(df, h, ["close", "tenkan", "kijun", "span_a", "span_b", "cloud_top", "cloud_bottom",
                              "macd", "macd_signal", "macd_hist"])
 
@@ -440,7 +444,7 @@ def _raw_htf(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str)
         return _drop_incomplete_htf(df, h.sort_values("date").reset_index(drop=True))
     if tf == "4h" and market == "cn":
         return _drop_incomplete_htf(df, resample_cn_4h(df))
-    return _drop_incomplete_htf(df, resample_htf(df, tf))
+    return mark_htf_known_at(_drop_incomplete_htf(df, resample_htf(df, tf)), tf)
 
 
 def _htf_fvg_zones(df: pd.DataFrame, daily: pd.DataFrame | None,

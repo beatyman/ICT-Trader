@@ -44,6 +44,23 @@ docker stats --no-stream
 
 ---
 
+## 2.1 进度快照（2026-11-09）
+
+- [x] P0-1 部分：`requires-python >=3.12,<3.13`、`requirements.lock`、
+  Docker 使用锁文件、`docs/PERF_BASELINE.md`；
+- [x] P0-2：不可变 `EngineSignal` / `AnalysisContext` / `PriceZone`、
+  引擎 registry、每引擎超时与失败隔离；
+- [x] P0-3：7 张分析表 + `schema_migrations` / `strategy_versions` DDL、
+  legacy `signals` 无损改名迁移、通用 analytics batch writer、
+  `signals`/`paper_trades` 已改走 buffer；
+- [x] 旧 `signals` 表已在本地 `ict` 库迁移为
+  `signals_legacy_20261109_102957`；
+- [ ] P0-4：错误事件 reporter 与告警阈值接入（表已建，写入器已具备）；
+- [ ] P0-5：engine circuit breaker 与生产级 loop-lag 告警；
+- [ ] P1-1：ICT adapter 尚未产出统一 `EngineSignal`。
+
+详细性能数字见 [`PERF_BASELINE.md`](PERF_BASELINE.md)。
+
 ## 3. 技术评审门禁（T0）
 
 在写业务代码前，先产出 6 份短文档/章节，放到 `docs/design/`：
@@ -63,7 +80,8 @@ docker stats --no-stream
 - AI provider 采用 OpenAI-compatible 适配层，DeepSeek V4.1 Flash 为主，
   第二 provider 通过环境变量接入；当前只有 DeepSeek key 时，
   failover 处于“已配置未激活”，不得伪造第二 provider 成功；
-- 依赖锁定采用 `uv.lock` + Python 3.12.x；Docker 与 CI 使用同一 lock。
+- 依赖锁定采用 `pip-compile` 生成的 `requirements.lock` + Python 3.12.x；
+  Docker 与 CI 使用同一 lock。
 
 ---
 
@@ -105,7 +123,7 @@ P5-1 50×3 压测/soak/故障注入 ──► P5-2 AWS 东京部署/chrony/告�
 
 | ID | 任务 | 依赖 | 规模 | 交付物 / DoD |
 |---|---|---|---|---|
-| P0-1 | 锁定 Python 3.12 与依赖；建立性能/内存基线 | T0 | S | `uv.lock`、CI、`docs/PERF_BASELINE.md`；6×15m 的 P50/P99/内存可复现 |
+| P0-1 | 锁定 Python 3.12 与依赖；建立性能/内存基线 | T0 | S | `requirements.lock`、CI、`docs/PERF_BASELINE.md`；6×15m 的 P50/P99/内存可复现 |
 | P0-2 | 统一不可变 `Signal`/`AnalysisEngine` 协议与 registry | T0 | M | `analysis/base.py`；所有引擎只能返回 Signal；重复/非法字段测试 |
 | P0-3 | 7 张表 DDL + 统一 batch writer + repository | P0-2 | L | `SCHEMA.sql`、迁移、writer queue；signal/trade 不再单条插入；失败重试测试 |
 | P0-4 | `error_events` + `engine_performance` + 错误分类 | P0-3 | M | 所有异常结构化落库；可按 module/engine/symbol 查询；MTTR 指标 |
@@ -121,7 +139,7 @@ P5-1 50×3 压测/soak/故障注入 ──► P5-2 AWS 东京部署/chrony/告�
 | P1-1 | ICT adapter（复用 `concepts/cisd/sweeps/setup`） | P0-2 | M | 真实 ICT Signal → 统一 schema；证据含 OB/FVG/sweep/CISD；回归对比现有 setup |
 | P1-2 | Ichimoku adapter（复用 `indicators.py`） | P0-2 | M | TK 交叉、云层、Chikou、三役；9/26/52 可配；多周期确认 |
 | P1-3 | Wyckoff adapter（复用 `wyckoff.py`） | P0-2 | M | 阶段 + Spring/UT/SOS/SOW/LPS 等事件；量价证据；窗口参数 |
-| P1-4 | Chanlun adapter（复用 `chanlun.py`） | P0-2 | L | 分型/笔/线段/中枢/背驰/买卖点；明确 chanpy 依赖与 fallback 一致性 |
+| P1-4 | Chanlun adapter（复用 `chanlun.py`） | P0-2 | L | 分型/笔/线段/中枢/背驰/买卖点；固定 chan.py 版本并校验 commit；修复 `4h→K_60M` 映射；为 fallback 的 `czsc` 缺失补显式降级/禁用路径 |
 | P1-5 | Confluence 聚合 | P1-1..4 | M | 同向、时间窗重叠合并；置信度可解释；无重复 Setup；单测覆盖冲突方向 |
 | P1-6 | ComputeSupervisor + 50 symbols 基准 | P1-1..4 | L | 线程/进程池、每引擎 P50/P99、超时隔离；单次 closed bar 不阻塞 loop |
 

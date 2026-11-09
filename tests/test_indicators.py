@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
 
-from ict_trader.indicators import align_htf, ichimoku, macd, resample_cn_4h, resample_htf
+from ict_trader.indicators import (align_htf, ichimoku, macd, mark_htf_known_at,
+                                   resample_cn_4h, resample_htf)
 
 
 def frame(n=160):
@@ -37,6 +38,19 @@ def test_htf_alignment_is_backward():
     aligned = align_htf(df, htf, ["close"])
     assert len(aligned) == len(df)
     assert aligned["date"].is_monotonic_increasing
+
+
+def test_htf_last_bucket_must_be_complete():
+    df = frame(8)  # 09:30 .. 11:15, so the 11:00 bucket is still forming
+    h = resample_htf(df, "1h")
+    assert h["date"].max() == pd.Timestamp("2026-01-01 10:00")
+    # 09:00 becomes known at 10:00; 10:00 becomes known at 11:00.
+    aligned = align_htf(df, mark_htf_known_at(h, "1h"), ["close"])
+    assert pd.isna(aligned.loc[0, "close"])
+    at_10 = aligned.loc[aligned["date"] == pd.Timestamp("2026-01-01 10:00"), "close"].iloc[0]
+    at_11 = aligned.loc[aligned["date"] == pd.Timestamp("2026-01-01 11:00"), "close"].iloc[0]
+    assert at_10 == h.iloc[0]["close"]
+    assert at_11 == h.iloc[1]["close"]
 
 
 def test_cn_4h_uses_session_closes():

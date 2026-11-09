@@ -10,13 +10,18 @@ import asyncio
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import clickhouse_connect
+import orjson
 from clickhouse_connect.driver.exceptions import ClickHouseError
 
 from ..metrics import Metrics
 from ..models import Kline
+from .analytics_schema import TABLES as ANALYTICS_TABLES, ensure_analytics_schema
+from .batch_writer import AnalyticsBatchWriter
+from .row_mappers import ENGINE_SIGNAL_COLUMNS, engine_signal_row
 from .wal import Wal
 
 log = logging.getLogger(__name__)
@@ -67,6 +72,15 @@ class ClickHouseStore:
         self._retry_task: asyncio.Task | None = None
         self._stopping = False
         self.last_error: str = ""
+        self.schema_info: dict[str, Any] = {}
+        self.analytics = AnalyticsBatchWriter(
+            insert_fn=self._insert_analytics_sync,
+            wal=wal,
+            metrics=metrics,
+            batch_size=max(50, batch_size),
+            flush_seconds=flush_seconds,
+            retry_seconds=retry_seconds,
+        )
 
     # ------------------------------------------------------------------
     @property
@@ -111,6 +125,7 @@ class ClickHouseStore:
         self._stopping = False
         self._writer_task = asyncio.create_task(self._writer_loop(), name="ch-writer")
         self._retry_task = asyncio.create_task(self._retry_loop(), name="ch-wal-retry")
+        await self.analytics.start()
         log.info("ClickHouse connected: %s:%s/%s", self.host, self.port, self.database)
 
     def _command_sync(self, command: str, **kwargs: Any):
@@ -124,6 +139,13 @@ class ClickHouseStore:
     def _insert_sync(self, table: str, rows: list[tuple], columns: list[str]) -> None:
         with self._db_lock:
             self.client.insert(table, rows, column_names=columns)
+
+    def _insert_analytics_sync(self, table: str, rows: list[tuple],
+                               columns: list[str]) -> None:
+        allowed = set(ANALYTICS_TABLES) | {"paper_trades"}
+        if table not in allowed:
+            raise ValueError(f"analytics table not allowed: {table!r}")
+        self._insert_sync(f"{self.database}.{table}", rows, columns)
 
     def _ensure_schema_sync(self) -> None:
         db = self.database
@@ -185,35 +207,14 @@ class ClickHouseStore:
             TTL toDateTime(exit_time) + INTERVAL {self.retention_days} DAY DELETE
             """
         )
-        self._command_sync(
-            f"""
-            CREATE TABLE IF NOT EXISTS {db}.signals
-            (
-                signal_id String,
-                symbol LowCardinality(String),
-                interval LowCardinality(String),
-                bar_time DateTime64(3, 'UTC'),
-                created_at DateTime64(3, 'UTC'),
-                direction LowCardinality(String),
-                entry Float64,
-                stop Float64,
-                target Float64,
-                rr Float64,
-                grade UInt8,
-                quality Float64,
-                status LowCardinality(String),
-                actionable UInt8,
-                executed UInt8,
-                reason String
-            )
-            ENGINE = ReplacingMergeTree(created_at)
-            PARTITION BY toYYYYMM(bar_time)
-            ORDER BY (symbol, signal_id)
-            """
-        )
+        schema = ensure_analytics_schema(self.client, db)
+        self.schema_info = schema
+        if schema.get("legacy_signals_table"):
+            log.warning("legacy signals renamed to %s.%s", db, schema["legacy_signals_table"])
 
     async def stop(self) -> None:
         self._stopping = True
+        await self.analytics.stop()
         if self._writer_task is not None:
             try:
                 await asyncio.wait_for(self._queue.join(), timeout=10.0)
@@ -236,6 +237,10 @@ class ClickHouseStore:
     @property
     def queue_size(self) -> int:
         return self._queue.qsize()
+
+    @property
+    def analytics_queue_size(self) -> int:
+        return self.analytics.queue_size
 
     async def _writer_loop(self) -> None:
         while not self._stopping:
@@ -354,33 +359,53 @@ class ClickHouseStore:
             float(trade["pnl"]), float(trade["fees"]), float(trade["r_multiple"]),
             trade["exit_reason"], trade["created_at_dt"],
         )]
-        try:
-            await asyncio.to_thread(
-                self._insert_sync, f"{self.database}.paper_trades", values, columns,
-            )
-        except Exception as exc:
-            log.warning("paper trade persistence failed: %s", exc)
+        await self.analytics.enqueue("paper_trades", columns, values)
+
+    async def insert_engine_signals(self, signals: list[Any]) -> int:
+        """Batch-write engine-neutral signals; returns buffered row count."""
+        if not signals:
+            return 0
+        rows = [engine_signal_row(signal) for signal in signals]
+        return await self.analytics.enqueue("signals", ENGINE_SIGNAL_COLUMNS, rows)
 
     async def insert_signal(self, signal: dict[str, Any]) -> None:
+        """Persist a legacy dashboard signal through the new Signal contract.
+
+        The execution/UI ``TradeSignal`` predates the engine-neutral contract.
+        This adapter keeps the live terminal working while new engines emit
+        ``EngineSignal`` rows through the same physical table.
+        """
+        entry = float(signal["entry"])
+        level = float(signal.get("setup_level") or entry)
+        low, high = sorted((entry, level))
+        evidence = {
+            "checks": signal.get("checks") or {},
+            "quality_parts": signal.get("quality_parts") or {},
+            "target": signal.get("target"),
+            "rr": signal.get("rr"),
+            "grade": signal.get("grade"),
+            "setup_level": level,
+            "status": signal.get("status"),
+            "actionable": bool(signal.get("actionable")),
+            "executed": bool(signal.get("executed")),
+            "reason": signal.get("reason", ""),
+        }
         columns = [
-            "signal_id", "symbol", "interval", "bar_time", "created_at", "direction",
-            "entry", "stop", "target", "rr", "grade", "quality", "status",
-            "actionable", "executed", "reason",
+            "signal_id", "engine", "engine_version", "symbol", "interval",
+            "direction", "signal_type", "trigger_zone_low", "trigger_zone_high",
+            "invalidation_price", "confidence", "evidence",
+            "source_kline_open_time", "created_at", "ingested_at",
         ]
         values = [(
-            signal["id"], signal["symbol"], signal["interval"], signal["bar_time_dt"],
-            signal["created_at_dt"], signal["direction"], float(signal["entry"]),
-            float(signal["stop"]), float(signal["target"]), float(signal["rr"]),
-            int(signal["grade"]), float(signal["quality"]), signal["status"],
-            int(bool(signal["actionable"])), int(bool(signal["executed"])),
-            signal.get("reason", ""),
+            signal["id"], "ict", "ict_trader-0.1.0", signal["symbol"],
+            signal["interval"], signal["direction"], "ict_cisd",
+            low, high, float(signal["stop"]),
+            max(0.0, min(1.0, float(signal.get("quality") or 0.0))),
+            orjson.dumps(evidence).decode(),
+            signal["bar_time_dt"], signal["created_at_dt"],
+            datetime.now(timezone.utc),
         )]
-        try:
-            await asyncio.to_thread(
-                self._insert_sync, f"{self.database}.signals", values, columns,
-            )
-        except Exception as exc:
-            log.warning("signal persistence failed: %s", exc)
+        await self.analytics.enqueue("signals", columns, values)
 
     async def ping(self) -> tuple[bool, float]:
         start = time.perf_counter()

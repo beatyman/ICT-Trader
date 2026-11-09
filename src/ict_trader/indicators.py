@@ -1,7 +1,8 @@
 """Ichimoku, MACD and HTF alignment helpers.
 
-All HTF frames use right-labelled, right-closed bars so a base-timeframe bar
-only sees an HTF bar after that HTF bar has closed.
+HTF frames are labelled at the bucket open (``label="left"``) and only the
+completed buckets are returned. A base bar therefore sees an HTF bar only after
+that HTF period has actually closed.
 """
 from __future__ import annotations
 
@@ -72,6 +73,14 @@ def resample_htf(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     out = x.resample(rule, label="left", closed="left").agg(
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
     ).dropna(subset=["open", "high", "low", "close"])
+    # A left-labelled bucket at 01:00 covers [01:00, 02:00). If the last base
+    # bar is 01:45, that bucket is still forming and must not be visible to a
+    # base-bar decision. Drop it before computing indicators/alignment.
+    if len(out) and len(df):
+        step = pd.tseries.frequencies.to_offset(rule)
+        last_base = pd.Timestamp(df["date"].iloc[-1])
+        if pd.Timestamp(out.index[-1]) + step > last_base:
+            out = out.iloc[:-1]
     out = out.reset_index()
     return _add_indicators(out)
 
@@ -92,6 +101,21 @@ def resample_cn_4h(df: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True)
     grouped = grouped.dropna(subset=["open", "high", "low", "close"]).sort_values("date")
     return _add_indicators(grouped)
+
+
+def mark_htf_known_at(htf: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Move left-labelled bucket opens to their actual availability time.
+
+    A 09:00-10:00 bucket has a left label of 09:00 but is only knowable at
+    10:00.  ``align_htf`` uses backward as-of joins, so passing the left label
+    would leak the bucket into 09:15-09:45 decisions.  The close-time label is
+    the correct ``known_at`` boundary.
+    """
+    if htf is None or len(htf) == 0:
+        return htf
+    out = htf.copy()
+    out["date"] = pd.to_datetime(out["date"]) + pd.tseries.frequencies.to_offset(rule)
+    return out
 
 
 def align_htf(base: pd.DataFrame, htf: pd.DataFrame, cols: list[str]) -> pd.DataFrame:

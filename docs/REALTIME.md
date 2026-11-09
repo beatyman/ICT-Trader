@@ -163,12 +163,12 @@ build_setup(df_15m, result, SetupConfig(market="crypto", stack=...))
 * A setup is actionable only if its confirmation bar is the bar that just
   closed (`c.end == len(frame)-1`). No intrabar signal, no look-ahead.
 * CPU work runs in a thread and is serialised by a semaphore. Each close uses a
-  bounded evaluation window (1800 bars for 4H stacks, 6500 for 1D stacks) to
+  bounded evaluation window (1800 bars for 4H stacks, 8000 for 1D stacks) to
   keep worst-case latency predictable; the full 5000-bar history is still used
   once at bootstrap to populate the historical signal stream.
 * `ICT_STACK=4h_15m` is the default because it is testable with a 5000-bar
-  bootstrap. For `1d_4h_15m`, set `BOOTSTRAP_BARS=7000` (or more) so the 1D
-  cloud exists.
+  bootstrap. For `1d_4h_15m`, set `BOOTSTRAP_BARS=8000` (or more) so the 1D
+  cloud (`52+26` daily bars) exists.
 * Entry is the first mark after the close (next-open semantics at tick
   resolution). Stop is the CISD invalidation wick; target is the frozen setup
   target or a fixed `RR`.
