@@ -558,7 +558,7 @@ class RealtimeEngine:
     def snapshot(self) -> dict[str, Any]:
         broker = self.broker.snapshot()
         metrics = self.metrics.snapshot()
-        signals = self.runner.signals
+        signals = self.runner.visible_signals()
         last_update = 0
         if self.feed is not None:
             last_update = int(getattr(self.feed, "last_message_ms", 0) or 0)

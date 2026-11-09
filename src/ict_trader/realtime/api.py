@@ -136,7 +136,7 @@ def create_app(engine: RealtimeEngine) -> FastAPI:
 
     @app.get("/api/signals")
     async def signals() -> JSONResponse:
-        return JSONResponse([s.to_public() for s in engine.runner.signals[:50]])
+        return JSONResponse([s.to_public() for s in engine.runner.visible_signals()[:50]])
 
     @app.get("/api/signals/{signal_id}/context")
     async def signal_context(signal_id: str) -> JSONResponse:

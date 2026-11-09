@@ -171,11 +171,11 @@ class ICTStrategyRunner:
             signals = await asyncio.to_thread(self._compute, symbol, full, False)
         async with self._locks[symbol]:
             self.histories[symbol] = deque(closed[-self.eval_window:], maxlen=self.eval_window)
-        # Keep only setups whose source K-line remains in the retained chart
-        # history. This guarantees the UI can always resolve signal.bar_time
-        # to a bar returned by /api/klines.
-        cutoff = closed[-min(len(closed), self.eval_window)].open_time
-        signals = [s for s in signals if s.bar_time >= cutoff]
+        # Keep only setups whose source K-line actually remains in the retained
+        # chart history. A timestamp cutoff alone is not enough: a REST gap can
+        # make the first retained bar later than the cutoff.
+        retained = {b.open_time for b in self.histories[symbol]}
+        signals = [s for s in signals if s.bar_time in retained]
         signals = sorted(signals, key=lambda x: x.bar_time)[-30:]
         for signal in signals:
             signal.status = "HISTORICAL"
@@ -307,8 +307,19 @@ class ICTStrategyRunner:
         keep = {s.id for s in self.signals}
         self._signal_index = {k: v for k, v in self._signal_index.items() if k in keep}
 
+    def signal_has_source_bar(self, signal: TradeSignal) -> bool:
+        history = self.histories.get(signal.symbol)
+        if not history:
+            return False
+        return any(int(b.open_time) == int(signal.bar_time) for b in history)
+
+    def visible_signals(self) -> list[TradeSignal]:
+        """Only signals whose source K-line is still in the chart window."""
+        return [s for s in self.signals if self.signal_has_source_bar(s)]
+
     def get_signal(self, signal_id: str) -> TradeSignal | None:
-        return self._signal_index.get(signal_id)
+        signal = self._signal_index.get(signal_id)
+        return signal if signal and self.signal_has_source_bar(signal) else None
 
     def update_signal(self, signal_id: str, *, status: str | None = None,
                       executed: bool | None = None, order_id: str | None = None,
@@ -375,5 +386,5 @@ class ICTStrategyRunner:
             "eval_errors": self.eval_errors,
             "last_eval_ms": self.last_eval_ms,
             "last_eval_duration_ms": {k: round(v, 1) for k, v in self.last_eval_duration_ms.items()},
-            "signals": [s.to_public() for s in self.signals[:30]],
+            "signals": [s.to_public() for s in self.visible_signals()[:30]],
         }
