@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -70,7 +71,33 @@ class ChanlunResult:
     bias: str = "wait"                     # long / short / wait
     bsp_type: str = "none"                 # 1买/1卖/2买/2卖/3买/3卖/none
     bsp_count: int = 0
+    bis: list = field(default_factory=list)
+    segs: list = field(default_factory=list)
+    zss: list = field(default_factory=list)
+    bsps: list = field(default_factory=list)
+    divergences: list = field(default_factory=list)
     reasons: list = field(default_factory=list)
+
+    def to_public(self) -> dict:
+        return {
+            "bi_count": self.bi_count,
+            "seg_count": self.seg_count,
+            "zs_count": self.zs_count,
+            "last_bi_direction": self.last_bi_direction,
+            "last_zs_zd": self.last_zs_zd,
+            "last_zs_zg": self.last_zs_zg,
+            "price": self.price,
+            "position": self.position,
+            "bias": self.bias,
+            "bsp_type": self.bsp_type,
+            "bsp_count": self.bsp_count,
+            "bis": self.bis,
+            "segs": self.segs,
+            "zss": self.zss,
+            "bsps": self.bsps,
+            "divergences": self.divergences,
+            "reasons": self.reasons,
+        }
 
 
 def df_to_klus(df: pd.DataFrame, auto: bool = False):
@@ -105,6 +132,62 @@ def _bsp_type_to_str(types) -> str:
     m = {BSP_TYPE.T1: "1买", BSP_TYPE.T1P: "1卖", BSP_TYPE.T2: "2买",
          BSP_TYPE.T2S: "2卖", BSP_TYPE.T3A: "3买", BSP_TYPE.T3B: "3卖"}
     return ",".join(m.get(t, str(t)) for t in types)
+
+
+def _ctime_ms(t) -> int:
+    """CTime is local-naive; chan.py input bars are UTC, so rebuild as UTC."""
+    return int(datetime(t.year, t.month, t.day, t.hour, t.minute,
+                        getattr(t, "second", 0), tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _klu_ms(klu) -> int:
+    return _ctime_ms(klu.time)
+
+
+def _bi_dict(bi) -> dict:
+    return {
+        "start_time": _klu_ms(bi.get_begin_klu()),
+        "end_time": _klu_ms(bi.get_end_klu()),
+        "start_price": float(bi.get_begin_val()),
+        "end_price": float(bi.get_end_val()),
+        "direction": "up" if bi.is_up() else "down",
+        "sure": bool(getattr(bi, "is_sure", True)),
+    }
+
+
+def _seg_dict(seg) -> dict:
+    return {
+        "start_time": _klu_ms(seg.get_begin_klu()),
+        "end_time": _klu_ms(seg.get_end_klu()),
+        "start_price": float(seg.get_begin_val()),
+        "end_price": float(seg.get_end_val()),
+        "direction": "up" if seg.is_up() else "down",
+        "sure": bool(getattr(seg, "is_sure", True)),
+    }
+
+
+def _zs_dict(zs) -> dict:
+    return {
+        "start_time": _klu_ms(zs.begin),
+        "end_time": _klu_ms(zs.end),
+        "low": float(zs.low),
+        "high": float(zs.high),
+        "mid": float((zs.low + zs.high) / 2.0),
+        "begin_bi": int(zs.begin_bi.idx),
+        "end_bi": int(zs.end_bi.idx),
+    }
+
+
+def _bsp_dict(bsp) -> dict:
+    types = bsp.type2str()
+    return {
+        "time": _klu_ms(bsp.klu),
+        "price": float(bsp.klu.low if bsp.is_buy else bsp.klu.high),
+        "is_buy": bool(bsp.is_buy),
+        "type": types,
+        "bi_idx": int(getattr(bsp.bi, "idx", -1)),
+        "divergence": types.startswith("1") or "1p" in types or "1买" in types or "1卖" in types,
+    }
 
 
 def analyze_chanlun(df: pd.DataFrame, symbol: str = "SYM", freq: str = "1d") -> ChanlunResult:
@@ -143,6 +226,13 @@ def analyze_chanlun(df: pd.DataFrame, symbol: str = "SYM", freq: str = "1d") -> 
     res.zs_count = len(kline.zs_list)
     res.price = float(df["close"].iloc[-1])
 
+    res.bis = [_bi_dict(b) for b in list(kline.bi_list)[-200:]]
+    res.segs = [_seg_dict(s) for s in list(kline.seg_list)[-100:]]
+    res.zss = [_zs_dict(z) for z in list(kline.zs_list)[-30:]]
+    bsp_list = kline.bs_point_lst
+    all_bsp_raw = bsp_list.getSortedBspList() if hasattr(bsp_list, "getSortedBspList") else []
+    res.bsps = [_bsp_dict(b) for b in list(all_bsp_raw)[-60:]]
+    res.divergences = [b for b in res.bsps if b.get("divergence")]
     if kline.bi_list:
         last = kline.bi_list[-1]
         res.last_bi_direction = "up" if last.dir == 1 else "down"

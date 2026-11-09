@@ -63,3 +63,22 @@ def test_chanlun_zs_bounds():
             assert r.price < r.last_zs_zd
         else:
             assert r.last_zs_zd <= r.price <= r.last_zs_zg
+
+
+def test_chanlun_exposes_drawable_structure():
+    r = analyze_chanlun(_df(300), "TEST", "1d")
+    pub = r.to_public()
+    for key in ("bis", "segs", "zss", "bsps", "divergences"):
+        assert key in pub
+    for b in r.bis:
+        assert b["start_time"] > 0 and b["end_time"] >= b["start_time"]
+        if b["direction"] == "up":
+            assert b["end_price"] > b["start_price"]
+        else:
+            assert b["end_price"] < b["start_price"]
+    for z in r.zss:
+        assert z["low"] < z["high"]
+        assert z["start_time"] <= z["end_time"]
+    for b in r.bsps:
+        assert b["time"] > 0
+        assert b["type"]

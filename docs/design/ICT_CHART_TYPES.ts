@@ -55,8 +55,19 @@ export interface ICTRectangle {
   labelColor: string;
 }
 
+export interface ICTSegment {
+  startTime: UnixSeconds;
+  endTime: UnixSeconds;
+  startPrice: number;
+  endPrice: number;
+  color: string;
+  width: 1 | 2;
+  label: "BI" | "SEG";
+}
+
 export interface ICTData {
   markers: ICTMarker[];
   priceLines: ICTPriceLine[];
   rectangles: ICTRectangle[];
+  segments: ICTSegment[];
 }

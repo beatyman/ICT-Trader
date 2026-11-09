@@ -797,6 +797,24 @@ class RealtimeEngine:
             self.metrics.event("WARN", "risk", f"manual flatten closed {closed} paper position(s)")
         return closed
 
+    async def chan_structure(self, symbol: str, interval: str,
+                             limit: int = 700) -> dict[str, Any]:
+        """Return real chan.py structure for the chart overlay."""
+        rows = await self.klines(symbol, interval, max(120, min(limit, 2000)))
+        if not rows:
+            return {"bi_count": 0, "seg_count": 0, "zs_count": 0,
+                    "bis": [], "segs": [], "zss": [], "bsps": [],
+                    "divergences": []}
+        frame = pd.DataFrame([{
+            "date": datetime.fromtimestamp(int(r["open_time"]) / 1000.0, tz=timezone.utc),
+            "open": float(r["open"]), "high": float(r["high"]),
+            "low": float(r["low"]), "close": float(r["close"]),
+            "volume": float(r.get("volume", 0.0)),
+        } for r in rows])
+        from ..chanlun import analyze_chanlun
+        result = await asyncio.to_thread(analyze_chanlun, frame, symbol.upper(), interval)
+        return result.to_public()
+
     async def klines(self, symbol: str, interval: str, limit: int = 240,
                      end_time: int | None = None,
                      include_live: bool = False) -> list[dict[str, Any]]:

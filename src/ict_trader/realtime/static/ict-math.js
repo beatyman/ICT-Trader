@@ -116,6 +116,7 @@
     const snap = options.snap || {};
     const smt = options.smt || null;
     const daily = options.dailyBars || [];
+    const chan = options.chan || null;
     const step = TF_MS[tf] || 900000;
     const last = bars[bars.length - 1];
     const end = timeOf(last.open_time) + step / 1000;
@@ -129,6 +130,7 @@
     const rectangles = [];
     const priceLines = [];
     const markers = [];
+    const segments = [];
     const startIdx = Math.max(2, bars.length - 140);
     const minGap = Math.max(atr * 0.035, Math.abs(num(last.close)) * 0.00005);
     const addRect = (kind, direction, startTime, low, high, label, endTime = end) => {
@@ -282,6 +284,52 @@
       });
     }
 
+    if (chan) {
+      for (const b of (chan.bis || []).slice(-120)) {
+        segments.push({
+          startTime: Math.floor(b.start_time / 1000),
+          endTime: Math.floor(b.end_time / 1000),
+          startPrice: b.start_price, endPrice: b.end_price,
+          color: "rgba(120,123,134,.70)", width: 1, label: "BI",
+        });
+      }
+      for (const s of (chan.segs || []).slice(-60)) {
+        segments.push({
+          startTime: Math.floor(s.start_time / 1000),
+          endTime: Math.floor(s.end_time / 1000),
+          startPrice: s.start_price, endPrice: s.end_price,
+          color: "rgba(84,200,248,.90)", width: 2, label: "SEG",
+        });
+      }
+      for (const z of (chan.zss || []).slice(-6)) {
+        rectangles.push({
+          kind: "ChanZS", direction: "neutral",
+          startTime: Math.floor(z.start_time / 1000),
+          endTime: Math.floor(z.end_time / 1000),
+          low: z.low, high: z.high,
+          fill: "rgba(184,157,255,.13)", border: "rgba(184,157,255,.52)",
+          label: "CHAN ZS", labelColor: "rgba(184,157,255,.52)",
+        });
+      }
+      for (const b of (chan.bsps || []).slice(-16)) {
+        markers.push({
+          time: Math.floor(b.time / 1000),
+          position: b.is_buy ? "belowBar" : "aboveBar",
+          shape: "circle", color: b.is_buy ? "#26a69a" : "#ef5350",
+          text: b.type || (b.is_buy ? "BSP" : "BSP"), kind: "BSP",
+          direction: b.is_buy ? "bullish" : "bearish",
+        });
+      }
+      for (const d of (chan.divergences || []).slice(-4)) {
+        markers.push({
+          time: Math.floor(d.time / 1000),
+          position: d.is_buy ? "belowBar" : "aboveBar",
+          shape: "square", color: "#b89dff", text: "DIV", kind: "DIV",
+          direction: d.is_buy ? "bullish" : "bearish",
+        });
+      }
+    }
+
     // Chan zone from live engine evidence only.
     let chanZone = null;
     const candidates = [];
@@ -346,12 +394,22 @@
     const ifvg = rectangles.filter(r => r.kind === "IFVG").slice(-4);
     const ob = rectangles.filter(r => r.kind === "OB").slice(-4);
     const session = rectangles.filter(r => r.kind === "AsianRange");
-    const chan = rectangles.filter(r => r.kind === "ChanZS");
+    const chanRect = rectangles.filter(r => r.kind === "ChanZS").slice(-6);
     return {
-      rectangles: [...fvg, ...ifvg, ...ob, ...session, ...chan].slice(-16),
+      rectangles: [...fvg, ...ifvg, ...ob, ...session, ...chanRect].slice(-20),
       priceLines: priceLines.slice(-12),
-      markers: markers.slice(-12),
+      markers: markers.slice(-20),
+      segments: segments.slice(-140),
     };
+  }
+
+  function projectSegment(segment, timeToX, priceToY) {
+    const x1 = timeToX(segment.startTime);
+    const x2 = timeToX(segment.endTime);
+    const y1 = priceToY(segment.startPrice);
+    const y2 = priceToY(segment.endPrice);
+    if (x1 == null || x2 == null || y1 == null || y2 == null) return null;
+    return { x1, x2, y1, y2 };
   }
 
   function projectRectangle(rect, timeToX, priceToY) {
@@ -371,6 +429,6 @@
 
   return {
     TF_MS, timeOf, pivots, computeSMT, dailyLevels, buildICTData,
-    projectRectangle, palette,
+    projectRectangle, projectSegment, palette,
   };
 });

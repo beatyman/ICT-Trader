@@ -20,3 +20,9 @@ scripts/install_verify_proxy.sh
 
 # Memdoor memory tool (project rules cache, not code)
 .memdoor/
+
+# JS test tooling
+tests/js/node_modules/
+tests/js/artifacts/
+
+pytest-of-*/

@@ -123,3 +123,24 @@ test("all overlay timestamps are Unix seconds and prices are finite", () => {
     assert.ok(Number.isFinite(l.price));
   }
 });
+
+
+test("Chan structure is converted to BI/SEG lines, ZS rectangles and BSP markers", () => {
+  const bars = flat();
+  const chan = {
+    bis: [{ start_time: BASE, end_time: BASE + 5 * STEP, start_price: 90, end_price: 100, direction: "up", sure: true }],
+    segs: [{ start_time: BASE, end_time: BASE + 10 * STEP, start_price: 88, end_price: 105, direction: "up", sure: true }],
+    zss: [{ start_time: BASE + 2 * STEP, end_time: BASE + 8 * STEP, low: 95, high: 102 }],
+    bsps: [{ time: BASE + 5 * STEP, price: 100, is_buy: true, type: "2买", divergence: false }],
+    divergences: [{ time: BASE + 5 * STEP, price: 100, is_buy: true, type: "1买", divergence: true }],
+  };
+  const data = ICT.buildICTData(bars, { tf: "15m", chan });
+  assert.ok(data.segments.some(s => s.label === "BI"));
+  assert.ok(data.segments.some(s => s.label === "SEG" && s.width === 2));
+  assert.ok(data.rectangles.some(r => r.kind === "ChanZS" && r.low === 95 && r.high === 102));
+  assert.ok(data.markers.some(m => m.kind === "BSP" && m.text === "2买" && m.direction === "bullish"));
+  assert.ok(data.markers.some(m => m.kind === "DIV" && m.text === "DIV"));
+  assert.deepEqual(ICT.projectSegment(data.segments[0], t => t, p => p), {
+    x1: ICT.timeOf(BASE), x2: ICT.timeOf(BASE + 5 * STEP), y1: 90, y2: 100,
+  });
+});

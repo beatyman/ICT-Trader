@@ -60,7 +60,7 @@ and the exact signal marker. `/api/signals/{id}/context` returns
 `aligned=true/false` plus the source bar.
 
 Overlay calculation and coordinate mapping are covered by Node tests:
-`node --test tests/js/ict-overlays.test.mjs`.
+`npm test --prefix tests/js` (overlay math + fixed-viewport Playwright).
 
 The terminal has persisted dark/light themes (`?theme=light` for a preview).
 The chart's last candle, watchlist and header price all use the same live bar:

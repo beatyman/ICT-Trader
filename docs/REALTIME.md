@@ -316,8 +316,10 @@ drawn by a series primitive, not a separate canvas:
 - **ICT FVG**: 3-candle imbalance, exact `open_time` start/end.
 - **ICT order block**: last opposite candle before a displacement candle.
 - **Liquidity**: recent 24h high/low reference lines.
-- **Chan ZS**: latest Chan engine signal's `last_zs_zd/zg`, drawn from its
-  source bar to the right edge.
+- **Chan ZS**: real chan.py `zs_list` ranges, not an approximation;
+- **Chan BI / SEG**: real `bi_list` and `seg_list` polylines;
+- **Chan BSP / DIV**: real `bs_point_lst` markers, with `1买/1卖` labelled as
+  divergence;
 - **VWAP**: cumulative typical-price VWAP line.
 - **EMA20/50**, volume, Entry/Stop/Target price lines and `SIG` markers.
 
@@ -333,7 +335,8 @@ the backend.
 Calculation and drawing are tested separately:
 
 ```powershell
-node --test tests/js/ict-overlays.test.mjs
+npm install --prefix tests/js
+npm test --prefix tests/js
 node --check src/ict_trader/realtime/static/app.js
 .\.venv\Scripts\python.exe -m pytest -q
 ```
@@ -342,6 +345,15 @@ The Node suite asserts exact FVG/IFVG bounds, CISD, bull/bear OB, PO3/AMD,
 PDH/PDL/PWH/PWL/PMH/PML and ETH SMT fixtures. `projectRectangle` is tested with
 deterministic `timeToX`/`priceToY` functions, so the primitive’s time/price
 mapping has an exact pixel contract before it is rendered by Lightweight Charts.
+
+The Playwright test uses a fixed `1200x700` viewport and fixture candles, then
+asserts the real Lightweight Charts `timeToCoordinate` / `priceToCoordinate`
+values for an FVG rectangle and an SMT marker. It writes
+`tests/js/artifacts/overlay-fixed-viewport.png` for visual inspection.
+
+Chan structure is returned by `/api/chan/structure` directly from chan.py:
+`bis` (笔), `segs` (线段), `zss` (中枢), `bsps` (买卖点) and `divergences` (1类
+背驰). The browser draws BI/SEG polylines, ZS rectangles and BSP/DIV markers.
 
 ### Dark / light theme
 

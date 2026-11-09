@@ -28,6 +28,8 @@
     smt: null,
     smtKey: "",
     smtBars: [],
+    chanStructure: null,
+    chanKey: "",
     aiHashOpened: false,
     anchorSignalId: null,
     signalLinkOpened: false,
@@ -701,6 +703,18 @@
         } catch (_) { /* SMT is optional */ }
       }
     }
+    const chanKey = `${symbol}|${S.tf}`;
+    if (S.chanKey !== chanKey) {
+      S.chanKey = chanKey;
+      S.chanStructure = null;
+      try {
+        const r = await fetch(`/api/chan/structure?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(S.tf)}&limit=700`, { cache: "no-store" });
+        if (r.ok) {
+          const d = await r.json();
+          if (S.chanKey === chanKey) S.chanStructure = d;
+        }
+      } catch (_) { /* optional Chan context */ }
+    }
     if (S.symbol === symbol) {
       renderChartHeader(S.snap || {});
       drawChart(true);
@@ -885,7 +899,7 @@
   function createOverlayPrimitive() {
     const state = {
       chart: null, series: null, requestUpdate: null,
-      data: { rectangles: [], lines: [] },
+      data: { rectangles: [], segments: [], lines: [] },
     };
     const renderer = {
       draw(target) {
@@ -927,6 +941,18 @@
             ctx.textBaseline = "bottom";
             ctx.fillText(z.label, x2 - 3 * hr, top - 2 * vr);
           }
+          for (const seg of (state.data.segments || [])) {
+            const projected = window.ICTMath
+              ? window.ICTMath.projectSegment(seg, toX, toY)
+              : null;
+            if (!projected) continue;
+            ctx.strokeStyle = seg.color || "rgba(120,123,134,.7)";
+            ctx.lineWidth = Math.max(1, (seg.width || 1) * hr);
+            ctx.beginPath();
+            ctx.moveTo(projected.x1, projected.y1);
+            ctx.lineTo(projected.x2, projected.y2);
+            ctx.stroke();
+          }
           for (const l of state.data.lines) {
             const y = toY(l.price);
             if (y == null) continue;
@@ -957,7 +983,7 @@
       paneViews() { return [view]; },
       updateAllViews() {},
       setData(data) {
-        state.data = data || { rectangles: [], lines: [] };
+        state.data = data || { rectangles: [], segments: [], lines: [] };
         state.requestUpdate?.();
       },
     };
@@ -1031,6 +1057,7 @@
         snap: S.snap,
         dailyBars: S.dailyBars,
         smt: S.smt,
+        chan: S.chanStructure,
       });
     }
     return { rectangles: [], priceLines: [], markers: [] };
@@ -1262,7 +1289,7 @@
       addMarker(e.source_kline_open_time, e.direction, e.evidence?.bsp_type || "CHAN");
     }
     renderICTSignals(lwc.chart, lwc.candles, { markers: markers.slice(-20) });
-    lwc.overlay?.setData({ rectangles: ict.rectangles || [], lines: [] });
+    lwc.overlay?.setData({ rectangles: ict.rectangles || [], segments: ict.segments || [], lines: [] });
   }
 
   function vwapData(bars) {
@@ -1351,7 +1378,7 @@
       lwc.ema20.setData([]);
       lwc.ema50.setData([]);
       lwc.vwap?.setData([]);
-      lwc.overlay?.setData({ rectangles: [], lines: [] });
+      lwc.overlay?.setData({ rectangles: [], segments: [], lines: [] });
       lwc.candles.setMarkers([]);
       lwc.lastLen = 0;
     }

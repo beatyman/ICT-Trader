@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test ict-overlays.test.mjs playwright-overlay.test.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.65.0"
+  }
+}
