@@ -902,6 +902,13 @@ class RealtimeEngine:
             "selected": self.settings.symbols[0] if self.settings.symbols else "",
         }
 
+    def review(self, days: int = 7) -> dict[str, Any]:
+        from .review import build_review
+        cutoff = utc_ms() - max(1, int(days)) * 86_400_000
+        trades = [t.to_public() for t in self.broker.trades
+                  if int(t.exit_time) >= cutoff]
+        return build_review(trades, [s.to_public() for s in self.setups.all()])
+
     async def flatten_all(self) -> int:
         """Close every paper position at the latest mark (local UI control)."""
         closed = 0

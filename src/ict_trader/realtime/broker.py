@@ -111,6 +111,8 @@ class TradeRecord:
     r_multiple: float
     exit_reason: str
     created_at: int
+    mfe_r: float = 0.0
+    mae_r: float = 0.0
 
     def to_public(self) -> dict[str, Any]:
         return {
@@ -131,6 +133,8 @@ class TradeRecord:
             "fees": round(self.fees, 2),
             "r_multiple": round(self.r_multiple, 2),
             "exit_reason": self.exit_reason,
+            "mfe_r": round(self.mfe_r, 3),
+            "mae_r": round(self.mae_r, 3),
             "created_at": self.created_at,
         }
 
@@ -388,6 +392,8 @@ class PaperBroker:
             r_multiple=net / risk_amount if risk_amount > 0 else 0.0,
             exit_reason=reason,
             created_at=now,
+            mfe_r=position.mfe,
+            mae_r=position.mae,
         )
         self.trades.append(trade)
         self.trades = self.trades[-500:]

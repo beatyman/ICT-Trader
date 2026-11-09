@@ -211,6 +211,10 @@ def create_app(engine: RealtimeEngine) -> FastAPI:
             "bars": bars,
         })
 
+    @app.get("/api/review")
+    async def review(days: int = Query(7, ge=1, le=90)) -> JSONResponse:
+        return JSONResponse(engine.review(days))
+
     @app.get("/api/ai/status")
     async def ai_status() -> JSONResponse:
         return JSONResponse(engine.ai.status())

@@ -204,13 +204,21 @@ class ClickHouseStore:
                 fees Float64,
                 r_multiple Float64,
                 exit_reason LowCardinality(String),
-                created_at DateTime64(3, 'UTC')
+                created_at DateTime64(3, 'UTC'),
+                mfe_r Float64 DEFAULT 0,
+                mae_r Float64 DEFAULT 0
             )
             ENGINE = ReplacingMergeTree(created_at)
             PARTITION BY toYYYYMM(exit_time)
             ORDER BY (symbol, trade_id)
             TTL toDateTime(exit_time) + INTERVAL {self.retention_days} DAY DELETE
             """
+        )
+        self._command_sync(
+            f"ALTER TABLE {db}.paper_trades ADD COLUMN IF NOT EXISTS mfe_r Float64 DEFAULT 0"
+        )
+        self._command_sync(
+            f"ALTER TABLE {db}.paper_trades ADD COLUMN IF NOT EXISTS mae_r Float64 DEFAULT 0"
         )
         schema = ensure_analytics_schema(self.client, db)
         self.schema_info = schema
@@ -364,6 +372,7 @@ class ClickHouseStore:
             float(trade["target"]), float(trade["quantity"]), float(trade["notional"]),
             float(trade["pnl"]), float(trade["fees"]), float(trade["r_multiple"]),
             trade["exit_reason"], trade["created_at_dt"],
+            float(trade.get("mfe_r", 0)), float(trade.get("mae_r", 0)),
         )]
         await self.analytics.enqueue("paper_trades", columns, values)
 
