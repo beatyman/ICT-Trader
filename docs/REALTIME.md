@@ -121,13 +121,42 @@ production database was rebuilt from live REST/WS data; no demo rows remain.
 | Strategy indicators | once per **closed 15m strategy bar**, per symbol | real Binance closed bars only; no intrabar signals; `signal_latency_ms` measures close→decision |
 | Paper entry | immediately after a closed-bar signal | next-tick/next-open semantics |
 | Paper TP/SL exits | every WS price tick | stop/target checked on live marks |
-| AI review | **on demand only** | current deepseek review has no automatic per-bar decision; it cannot execute |
+| AI review | on demand **and** auto for new high-confidence setups | async, per-symbol cooldown; never executes |
 
 The engine is realtime for market data and risk exits, but the strategy is
 deliberately closed-bar. Calling the strategy on every tick would create
 repainting/look-ahead signals. If automatic AI decisions are enabled later, the
 trigger must be one high-confidence `actionable` signal, not every closed bar,
 with a per-symbol cooldown and concurrency limit.
+
+## 1.3 Multi-engine registry and future-only setups
+
+`RealtimeEngine` now owns a real `EngineRegistry` with `IchimokuEngine`,
+`WyckoffEngine` and `ChanEngine`. They run in shadow mode on the just-closed
+strategy bar, with independent timeouts and a circuit breaker. Results are
+written to `engine_performance`; new signals go to `signals` and become Setup
+rows. They do not route orders.
+
+Only signals created after process start enter the lifecycle. Bootstrap
+history is intentionally not backfilled. `setups` transitions:
+
+```text
+DETECTED → OPEN → CLOSED (TP/SL)
+    └────→ INVALIDATED / EXPIRED
+```
+
+Every transition writes `setups` and `tp_sl_events`; source bar, engine,
+entry zone, stop and target are retained. APIs: `/api/engines`, `/api/setups`,
+`/api/ai/decisions`.
+
+### Automatic AI decision log
+
+With `AI_AUTO_DECISION=true`, a setup above `AI_AUTO_MIN_CONFIDENCE` triggers
+one asynchronous DeepSeek review per symbol per `AI_AUTO_COOLDOWN_SECONDS`.
+The full input snapshot, raw model output, parsed decision, token usage,
+latency and error status are written to `ai_decisions`; the AI modal shows the
+latest history. The AI never routes orders; setup management continues if the
+model is unavailable.
 
 ## 2. Code map
 

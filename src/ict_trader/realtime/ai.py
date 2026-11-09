@@ -139,6 +139,11 @@ class DeepSeekReviewer:
             (w for w in (snapshot.get("watchlist") or []) if w.get("symbol") == symbol),
             {},
         )
+        active_setup = next(
+            (s for s in (snapshot.get("setups") or [])
+             if s.get("symbol") == symbol and s.get("status") in {"DETECTED", "OPEN"}),
+            None,
+        )
         latest_bars = [
             {
                 "t": ms_to_datetime(b.open_time).isoformat(),
@@ -167,8 +172,11 @@ class DeepSeekReviewer:
                 "low_24h": selected.get("low"),
             },
             "closed_bars": latest_bars,
+            "active_setup": active_setup,
             "signals_for_selected_symbol": signal_rows,
             "signals_note": (
+                "no ICT TradeSignal for the selected symbol; active_setup is the only candidate"
+                if active_setup is not None and not signal_rows else
                 "no signals for the selected symbol; do not infer one"
                 if not signal_rows else "newest first"
             ),
@@ -206,7 +214,8 @@ class DeepSeekReviewer:
         # click storms and surprise token spend.
         async with self._lock:
             now = time.monotonic()
-            if now - self._last_call < 15.0 and self._last_review is not None:
+            if (now - self._last_call < 15.0 and self._last_review is not None
+                    and self._last_review.get("symbol") == symbol):
                 return self._last_review
             self._last_call = now
             context = self._context(snapshot, bars, symbol)
@@ -260,6 +269,7 @@ class DeepSeekReviewer:
                 self._last_error = ""
                 result = {
                     **review,
+                    "raw_output": content[:20000],
                     "model": data.get("model", self.settings.deepseek_model),
                     "model_name": "DeepSeek-V4.1-Flash",
                     "usage": usage,

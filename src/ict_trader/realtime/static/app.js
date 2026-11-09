@@ -72,6 +72,7 @@
   const STATUS_LABEL = {
     ARMED: "ARMED", EXECUTED: "FILLED", REJECTED: "REJECTED",
     HISTORICAL: "HISTORICAL", CLOSED: "CLOSED",
+    DETECTED: "ARMED", OPEN: "OPEN", INVALIDATED: "INVALID", EXPIRED: "EXPIRED",
   };
 
   function coin(symbol) {
@@ -371,9 +372,25 @@
   }
 
   // ------------------------------------------------------------- setup
+  function setupToSignal(s) {
+    return {
+      id: s.setup_id, setup_id: s.setup_id, symbol: s.symbol, interval: s.interval,
+      direction: s.direction, status: s.status === "DETECTED" ? "ARMED"
+        : s.status === "OPEN" ? "EXECUTED" : s.status,
+      entry: s.entry, stop: s.stop, target: s.target, rr: s.rr,
+      quality: s.confidence, grade: 0, bar_time: s.created_at,
+      engine: s.engine, checks: {},
+      reason: `${s.engine.toUpperCase()} setup · ${s.confidence * 100 | 0}% confidence`,
+    };
+  }
+
   function latestSignal(snap) {
-    const signals = snap.signals || [];
-    return signals.find(s => ["ARMED", "EXECUTED", "CLOSED", "REJECTED"].includes(s.status)) || signals[0] || null;
+    const activeSetup = (snap.setups || []).find(s => ["DETECTED", "OPEN"].includes(s.status))
+      || (snap.setups || [])[0];
+    if (activeSetup) return setupToSignal(activeSetup);
+    const signals = (snap.signals || []).filter(s => s.status !== "HISTORICAL");
+    return signals.find(s => ["ARMED", "EXECUTED", "CLOSED", "REJECTED"].includes(s.status))
+      || signals[0] || null;
   }
 
   function renderSetup(snap) {
@@ -411,23 +428,35 @@
         </div>
         <div class="setup-metrics">
           <div class="setup-metric"><span>R:R</span><b class="good">${num(sig.rr).toFixed(2)}R</b></div>
-          <div class="setup-metric"><span>GRADE</span><b>${num(sig.grade)} / 7</b></div>
+          <div class="setup-metric"><span>CONF</span><b>${score}%</b></div>
           <div class="setup-metric"><span>TF</span><b>${escapeHtml(sig.interval || "15m")}</b></div>
         </div>
         <div class="setup-checks">${chips}</div>
-        <div class="setup-foot"><span>${shortDate(sig.bar_time)} · UTC+8</span><span>${escapeHtml(sig.id.slice(-6))}</span></div>
+        <div class="setup-foot"><span>${escapeHtml(sig.engine || "ICT")} · ${shortDate(sig.bar_time)} · UTC+8</span><span>${escapeHtml((sig.id || "").slice(-6))}</span></div>
       </div>`;
   }
 
   // ------------------------------------------------------------- signals
   function renderSignals(snap) {
-    const all = snap.signals || [];
-    const rows = S.filter === "live"
-      ? all.filter(s => s.actionable)
-      : all;
+    const setupRows = (snap.setups || []).map(setupToSignal);
+    const engineRows = (snap.engine_signals || []).map(e => ({
+      id: e.signal_id, symbol: e.symbol, interval: e.interval,
+      direction: e.direction, status: "DETECTED",
+      entry: e.trigger_price_zone?.mid, stop: e.invalidation_price,
+      target: e.evidence?.target, rr: e.evidence?.rr || 0,
+      bar_time: e.source_kline_open_time, engine: e.engine,
+      quality: e.confidence, reason: e.evidence?.thesis || e.signal_type,
+    }));
+    const ictRows = (snap.signals || []).filter(s => s.status !== "HISTORICAL");
+    const seen = new Set();
+    let rows = [...setupRows, ...engineRows, ...ictRows]
+      .filter(s => s.id && !seen.has(s.id) && seen.add(s.id));
+    if (S.filter === "live") {
+      rows = rows.filter(s => ["DETECTED", "OPEN", "ARMED", "EXECUTED"].includes(s.status));
+    }
     const list = $("#signalList");
     if (!rows.length) {
-      list.innerHTML = `<div class="empty-mini">${S.filter === "live" ? "no actionable setup yet" : "awaiting first evaluation"}</div>`;
+      list.innerHTML = `<div class="empty-mini">${S.filter === "live" ? "waiting for the next valid signal" : "no live signals yet"}</div>`;
       return;
     }
     list.innerHTML = rows.slice(0, 8).map(s => {
@@ -437,8 +466,8 @@
         <div class="signal-item ${s.id === S.anchorSignalId ? "active" : ""}" data-symbol="${escapeHtml(s.symbol)}" data-signal-id="${escapeHtml(s.id)}" title="${escapeHtml(s.reason || "")}">
           <div class="signal-arrow ${isLong ? "long" : "short"}">${isLong ? "↗" : "↘"}</div>
           <div class="signal-main">
-            <div class="line1"><b>${escapeHtml(s.symbol.replace("USDT", ""))}</b><em>${isLong ? "LONG" : "SHORT"}</em><em style="color:var(--muted-2)">${shortDate(s.bar_time).split(",")[1] || ""}</em></div>
-            <div class="line2"><span>${fmtPrice(s.entry)}</span><span>${num(s.rr).toFixed(2)}R</span><span>G${num(s.grade)}</span></div>
+            <div class="line1"><b>${escapeHtml(s.symbol.replace("USDT", ""))}</b><em>${isLong ? "LONG" : "SHORT"}</em><em style="color:var(--muted-2)">${escapeHtml((s.engine || "ICT").toUpperCase())} · ${shortDate(s.bar_time).split(",")[1] || ""}</em></div>
+            <div class="line2"><span>${fmtPrice(s.entry)}</span><span>${num(s.rr).toFixed(2)}R</span><span>${Math.round(num(s.quality) * 100)}%</span></div>
           </div>
           <span class="signal-status ${st}">${STATUS_LABEL[s.status] || s.status || "—"}</span>
         </div>`;
@@ -1092,6 +1121,19 @@
     return `<ul>${items.map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`;
   }
 
+  function aiHistoryHtml() {
+    const rows = (S.snap?.ai_decisions || []).slice(0, 5);
+    if (!rows.length) return "";
+    return `<div class="ai-history"><h3>AUTO DECISION LOG</h3>${rows.map(d => `
+      <div class="ai-history-row">
+        <span class="ai-history-time">${shortDate(d.created_at).split(",")[1] || ""}</span>
+        <b>${escapeHtml(d.symbol || "")}</b>
+        <em class="${escapeHtml(d.verdict || "caution")}">${escapeHtml((d.verdict || "?").toUpperCase())} · ${num(d.confidence)}%</em>
+        <span>${escapeHtml(d.headline || "")}</span>
+        <small>${num(d.latency_ms).toFixed(0)}ms · ${num(d.total_tokens)} tok</small>
+      </div>`).join("")}</div>`;
+  }
+
   function renderAiReview(review) {
     const v = AI_VERDICT[review.verdict] || AI_VERDICT.caution;
     const usage = review.usage || {};
@@ -1117,7 +1159,7 @@
           <span><b>${escapeHtml(review.model_name || "DeepSeek-V4.1-Flash")}</b> · ${num(review.latency_ms).toFixed(0)}ms · ${tokens} tokens</span>
           <span>${escapeHtml(review.reviewed_at || "")} · ${escapeHtml(review.disclaimer || "advisory only")}</span>
         </div>
-      </div>`;
+      </div>${aiHistoryHtml()}`;
   }
 
   // ------------------------------------------------------------- controls

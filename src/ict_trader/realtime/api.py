@@ -138,6 +138,23 @@ def create_app(engine: RealtimeEngine) -> FastAPI:
     async def signals() -> JSONResponse:
         return JSONResponse([s.to_public() for s in engine.runner.visible_signals()[:50]])
 
+    @app.get("/api/ai/decisions")
+    async def ai_decisions() -> JSONResponse:
+        return JSONResponse(list(engine.ai_decisions)[-50:])
+
+    @app.get("/api/engines")
+    async def engines() -> JSONResponse:
+        return JSONResponse({
+            "registry": list(engine.registry.names()),
+            "breaker": engine.registry.breaker.snapshot() if engine.registry.breaker else {},
+            "runs": list(engine.registry_runs),
+            "signals": [s.to_public() for s in list(engine.registry_signals)[-30:]],
+        })
+
+    @app.get("/api/setups")
+    async def setups() -> JSONResponse:
+        return JSONResponse([s.to_public() for s in engine.setups.all()[:100]])
+
     @app.get("/api/signals/{signal_id}/context")
     async def signal_context(signal_id: str) -> JSONResponse:
         signal = engine.runner.get_signal(signal_id)

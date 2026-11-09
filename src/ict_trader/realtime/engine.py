@@ -8,11 +8,17 @@ backfills, replays and only then resumes normal processing.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
+import pandas as pd
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
+from .analysis import AnalysisContext, CircuitBreaker, EngineRegistry, EngineSignal
+from .analysis.engines import ChanConfig, ChanEngine, IchimokuConfig, IchimokuEngine, WyckoffConfig, WyckoffEngine
 from .ai import DeepSeekReviewer
 from .broker import PaperBroker
 from .config import Settings
@@ -25,6 +31,7 @@ from .rest_backfill import BackfillError, RestBackfiller
 from .storage import ClickHouseStore, RedisStore, Wal
 from .storage.observability import Observability
 from .strategy_runner import ICTStrategyRunner, TradeSignal
+from .setups import SetupManager
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +97,9 @@ class StreamSession:
         self.live_count += 1
         self.last_update_time = utc_ms()
         self.engine.latest_bars[(bar.symbol, bar.interval)] = bar
+        await self.engine.setups.on_price(
+            bar.symbol, bar.close, high=bar.high, low=bar.low, now=utc_ms(),
+        )
         start = time.perf_counter()
         try:
             latency = await self.engine.redis.update_latest(bar)
@@ -236,9 +246,26 @@ class RealtimeEngine:
             metrics=self.metrics,
         )
         self.runner = ICTStrategyRunner(settings, self.metrics)
+        self.registry = EngineRegistry(CircuitBreaker())
+        self.registry.register(IchimokuEngine(IchimokuConfig()))
+        self.registry.register(WyckoffEngine(WyckoffConfig()))
+        self.registry.register(ChanEngine(ChanConfig(freq=settings.strategy_interval)))
+        self.registry_signals: deque[EngineSignal] = deque(maxlen=200)
+        self.registry_runs: deque[dict[str, Any]] = deque(maxlen=100)
+        self._registry_sem = asyncio.Semaphore(1)
+        self._registry_tasks: set[asyncio.Task] = set()
+        self._registry_keys: set[tuple[str, str, int]] = set()
         self.broker = PaperBroker(settings, self.metrics)
         self.ai = DeepSeekReviewer(settings, self.metrics)
         self.observability = Observability(self.ch.analytics, self.metrics)
+        self.ai_decisions: deque[dict[str, Any]] = deque(maxlen=50)
+        self._ai_sem = asyncio.Semaphore(1)
+        self._ai_last: dict[str, float] = {}
+        self._ai_tasks: set[asyncio.Task] = set()
+        self.setups = SetupManager(
+            self.ch.insert_setup, self.ch.insert_tp_sl_event,
+            on_created=self._on_setup_created,
+        )
         self.runner.on_signal = self._on_signal
         self.broker.on_trade = self._on_trade
         self.sessions: dict[tuple[str, str], StreamSession] = {}
@@ -441,6 +468,143 @@ class RealtimeEngine:
         session.push(bar)
 
     # ------------------------------------------------------------------
+    def _schedule_registry(self, bar: Kline) -> None:
+        if bar.interval != self.settings.strategy_interval:
+            return
+        key = (bar.symbol, bar.interval, bar.open_time)
+        if key in self._registry_keys:
+            return
+        self._registry_keys.add(key)
+
+        async def runner() -> None:
+            try:
+                async with self._registry_sem:
+                    await self._run_registry(bar)
+            finally:
+                self._registry_keys.discard(key)
+                self._registry_tasks.discard(task)
+
+        task = asyncio.create_task(runner(), name=f"registry-{bar.symbol}-{bar.open_time}")
+        self._registry_tasks.add(task)
+
+    async def _on_setup_created(self, setup) -> None:
+        if not self.settings.ai_auto or not self.ai.available:
+            return
+        if setup.confidence < self.settings.ai_auto_min_confidence:
+            return
+        now = time.monotonic()
+        if now - self._ai_last.get(setup.symbol, 0.0) < self.settings.ai_auto_cooldown_seconds:
+            return
+        self._ai_last[setup.symbol] = now
+        task = asyncio.create_task(self._auto_review(setup), name=f"ai-{setup.setup_id}")
+        self._ai_tasks.add(task)
+        task.add_done_callback(self._ai_tasks.discard)
+
+    async def _auto_review(self, setup) -> None:
+        """Async, non-blocking review of a newly created future setup."""
+        async with self._ai_sem:
+            bars = self.runner.frame(setup.symbol, self.runner.eval_window)
+            snapshot = self.snapshot()
+            started = time.perf_counter()
+            try:
+                review = await self.ai.review(snapshot, bars, setup.symbol)
+                status = 1
+                error = ""
+            except Exception as exc:
+                review = {"verdict": "reject", "confidence": 0, "headline": "AI unavailable",
+                          "summary": str(exc)[:500], "raw_output": ""}
+                status = 4
+                error = f"{type(exc).__name__}: {exc}"
+            now = utc_ms()
+            parsed = json.dumps(review, ensure_ascii=False, default=str)
+            input_snapshot = json.dumps({
+                "setup": setup.to_public(),
+                "mode": self.settings.mode,
+                "as_of": now,
+                "closed_bars": len(bars),
+            }, ensure_ascii=False, default=str)
+            decision_id = "AI-" + hashlib.sha1(
+                f"{setup.setup_id}|{now}".encode()
+            ).hexdigest()[:22]
+            usage = review.get("usage") or {}
+            prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+            total_tokens = int(usage.get("total_tokens", 0) or 0)
+            latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000.0))
+            await self.ch.insert_ai_decision((
+                decision_id, setup.setup_id, setup.symbol, setup.interval,
+                "deepseek", self.settings.deepseek_model, "auto-setup-v1",
+                input_snapshot, str(review.get("raw_output", ""))[:20000],
+                parsed, status, latency_ms, prompt_tokens, completion_tokens,
+                total_tokens, 0.0, datetime.fromtimestamp(now / 1000.0, tz=timezone.utc), datetime.now(timezone.utc),
+            ))
+            setup.ai_decision_id = decision_id
+            setup.ai_confidence = float(review.get("confidence", 0) or 0) / 100.0
+            setup.ai_decision = str(review.get("verdict", "reject"))
+            await self.setups.persist_setup(setup.setup_row(datetime.now(timezone.utc)))
+            self.ai_decisions.append({
+                "decision_id": decision_id, "setup_id": setup.setup_id,
+                "symbol": setup.symbol, "verdict": review.get("verdict"),
+                "confidence": review.get("confidence"), "headline": review.get("headline"),
+                "summary": review.get("summary"), "status": status, "error": error,
+                "latency_ms": latency_ms, "total_tokens": total_tokens,
+                "created_at": now, "parsed": review,
+            })
+            self.metrics.inc("ai_auto_review")
+            self.metrics.event(
+                "INFO", "ai",
+                f"auto review {review.get('verdict')} for {setup.symbol} "
+                f"({review.get('confidence')}%)",
+                symbol=setup.symbol,
+            )
+
+    async def _run_registry(self, bar: Kline) -> None:
+        """Run non-ICT engines in shadow mode on the just-closed real bar."""
+        history = self.runner.frame(bar.symbol, self.runner.eval_window, bar.open_time)
+        if len(history) < 120:
+            return
+        frame = pd.DataFrame([b.to_csv_row() for b in history])
+        for col in ("open", "high", "low", "close", "volume"):
+            frame[col] = frame[col].astype(float)
+        context = AnalysisContext(bar.symbol, bar.interval, utc_ms())
+        runs = await self.registry.analyze_all(
+            frame, context, timeout_seconds=8.0,
+            engine_ids=["ichimoku", "wyckoff", "chan"],
+        )
+        for run in runs:
+            version = self.registry.get(run.engine).version
+            await self.observability.engine_timing(
+                run.engine, version, bar.symbol, bar.interval,
+                bar.open_time, run.latency_ms,
+                bar_count=len(frame),
+                status="ok" if run.ok else "error",
+                error=run.error,
+            )
+            self.registry_runs.append({
+                "engine": run.engine, "symbol": bar.symbol,
+                "source_kline_open_time": bar.open_time,
+                "latency_ms": round(run.latency_ms, 1),
+                "signals": len(run.signals), "error": run.error,
+            })
+            if not run.signals:
+                continue
+            fresh = []
+            known = {s.signal_id for s in self.registry_signals}
+            for signal in run.signals:
+                if signal.signal_id not in known:
+                    known.add(signal.signal_id)
+                    fresh.append(signal)
+            if fresh:
+                await self.ch.insert_engine_signals(fresh)
+                for signal in fresh:
+                    await self.setups.on_signal(signal)
+                self.registry_signals.extend(fresh)
+                self.metrics.inc("engine_signal", len(fresh))
+                self.metrics.event(
+                    "INFO", "registry",
+                    f"{bar.symbol} {bar.interval} · {len(fresh)} new engine signal(s)",
+                )
+
     async def _process_closed(self, bar: Kline, *, recovered: bool) -> None:
         if self.settings.mode == "live" and bar.source == "demo":
             self.metrics.inc("rejected_demo_bar")
@@ -473,6 +637,10 @@ class RealtimeEngine:
         for symbol in closes:
             await self.broker.close_time_stop(symbol, bar.close)
         await self.runner.on_closed(bar)
+        await self.setups.on_bar(bar.symbol, high=bar.high, low=bar.low,
+                                 close=bar.close, now=utc_ms())
+        if not recovered:
+            self._schedule_registry(bar)
         if self.runner.last_eval_ms.get(bar.symbol) == bar.open_time:
             elapsed = self.runner.last_eval_duration_ms.get(bar.symbol)
             if elapsed is not None:
@@ -494,6 +662,10 @@ class RealtimeEngine:
             self.runner.update_signal(signal.id, status="REJECTED", executed=False, reason=result.reason)
             self.metrics.inc("signal_rejected")
         await self._persist_signal(signal)
+        await self.setups.on_ict_signal(
+            signal, accepted=result.accepted,
+            fill=float(getattr(result, "fill", 0.0) or signal.entry),
+        )
 
     async def _on_trade(self, trade) -> None:
         self.runner.update_signal(trade.signal_id, status="CLOSED")
@@ -596,13 +768,20 @@ class RealtimeEngine:
             "signals": [s.to_public() for s in signals[:30]],
             "watchlist": self.runner.watchlist(self.latest_bars),
             "live_bars": [bar.to_public() for bar in self.latest_bars.values()],
+            "engine_signals": [s.to_public() for s in list(self.registry_signals)[-30:]],
+            "setups": [s.to_public() for s in self.setups.all()[:30]],
+            "engines": {
+                "registry": list(self.registry.names()),
+                "breaker": self.registry.breaker.snapshot() if self.registry.breaker else {},
+            },
             "account": broker["account"],
             "positions": broker["positions"],
             "trades": broker["trades"],
             "equity_curve": broker["equity_curve"],
             "stats": broker["stats"],
             "metrics": metrics,
-            "ai": self.ai.status(),
+            "ai": {**self.ai.status(), "auto": self.settings.ai_auto},
+            "ai_decisions": list(self.ai_decisions)[-20:],
             "selected": self.settings.symbols[0] if self.settings.symbols else "",
         }
 

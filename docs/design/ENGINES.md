@@ -6,7 +6,7 @@
 > 所有性能数字是**本地一次性微基准**（方法见 §5），不是 t4g.medium 的承诺；
 > 未测项一律标 `needs benchmark`。
 
-## 0. 统一契约（已实现；ICT adapter 已接线，registry 尚未被 RealtimeEngine 持有）
+## 0. 统一契约（已实现；ICT adapter 已接线，registry 已由 RealtimeEngine 持有并以影子模式运行）
 
 `analysis/contracts.py`：
 
@@ -97,7 +97,7 @@ chikou_ok/cloud_thickness/kumo_twist`。不得把 `span_a/span_b` 当「未来�
   当前 `setup._htf()` / `_raw_htf()` 已接入，其他未来模块不得绕过；
 - TK 交叉是「状态」还是「事件」必须先在 adapter 里定死，否则同一根 bar 会反复出信号。
 
-## 3. Wyckoff（算法已实现；无 adapter）
+## 3. Wyckoff（已实现 adapter）
 
 入口：`wyckoff.detect_wyckoff(df, trend_len=50, pivot_len=3, min_range_bars=15,
 max_range_bars=300, max_leg_bars=300, ...) -> (WyckoffState, phases: list[int])`；
@@ -121,7 +121,7 @@ max_range_bars=300, max_leg_bars=300, ...) -> (WyckoffState, phases: list[int])`
 - 输出没有 symbol/interval，也没有 `confirmed_at`，时间戳需 adapter 按窗口起点换算；
 - 单根 bar 的 `phases` 会随新数据回退（状态机重跑），落库要用 `engine_version` 标记。
 
-## 4. Chanlun（算法已实现；无 adapter）
+## 4. Chanlun（已实现 adapter）
 
 入口：`chanlun.analyze_chanlun(df, symbol="SYM", freq="1d") -> ChanlunResult`；
 `chanpy_available()`；`df_to_klus()`；`FREQ_MAP`。结果含 `bi_count/seg_count/zs_count`、

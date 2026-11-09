@@ -67,7 +67,9 @@ docker stats --no-stream
   `?signal=<id>` 图表定位；
 - [x] P1-2：`IchimokuEngine` 已实现并通过测试：TK 交叉、云层、Chikou、
   ATR 厚度过滤、4H known-at 协同；尚未接入实时执行链路（先作为独立引擎验证）；
-- [ ] P1-3：Wyckoff adapter。
+- [x] P1-3：`WyckoffEngine` + `ChanEngine` adapter 已完成；仅对新收盘 bar 运行，
+  影子模式，不直接下单。
+- [ ] P1-5：Confluence 聚合。
 
 详细性能数字见 [`PERF_BASELINE.md`](PERF_BASELINE.md)。
 

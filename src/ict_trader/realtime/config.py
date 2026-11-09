@@ -170,6 +170,9 @@ class Settings:
     deepseek_timeout: float = 90.0
     deepseek_max_tokens: int = 4000
     deepseek_effort: str = "low"
+    ai_auto: bool = False
+    ai_auto_min_confidence: float = 0.65
+    ai_auto_cooldown_seconds: float = 300.0
 
     def __post_init__(self) -> None:
         self.symbols = [s.upper() for s in self.symbols]
@@ -335,6 +338,9 @@ class Settings:
             deepseek_timeout=_env_float("DEEPSEEK_TIMEOUT", 90.0),
             deepseek_max_tokens=_env_int("DEEPSEEK_MAX_TOKENS", 4000),
             deepseek_effort=_env_str("DEEPSEEK_EFFORT", "low"),
+            ai_auto=_env_bool("AI_AUTO_DECISION", False),
+            ai_auto_min_confidence=_env_float("AI_AUTO_MIN_CONFIDENCE", 0.65),
+            ai_auto_cooldown_seconds=_env_float("AI_AUTO_COOLDOWN_SECONDS", 300.0),
         )
         for key, value in overrides.items():
             if value is not None and hasattr(cfg, key):

@@ -722,3 +722,14 @@ html[data-theme="light"] .instrument-sub .chart-source { color: #68788d !importa
 html[data-theme="light"] .chart-foot,
 html[data-theme="light"] .legend span { color: #65758a; }
 html[data-theme="light"] .statusbar b { color: #3f5268; }
+.ai-history { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+.ai-history h3 { margin: 0 0 7px; font: 700 8px var(--mono); letter-spacing: .12em; color: var(--muted); }
+.ai-history-row { display: grid; grid-template-columns: 58px 64px 86px minmax(0,1fr) auto; gap: 6px; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.04); font: 7px var(--mono); color: var(--muted); }
+.ai-history-row b { color: var(--text); }
+.ai-history-row em { font-style: normal; }
+.ai-history-row em.support { color: var(--green); }
+.ai-history-row em.caution { color: var(--amber); }
+.ai-history-row em.reject { color: var(--red); }
+.ai-history-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-2); }
+.ai-history-row small { color: var(--muted-2); white-space: nowrap; }
+html[data-theme="light"] .ai-history-row { border-bottom-color: rgba(23,44,74,.07); }

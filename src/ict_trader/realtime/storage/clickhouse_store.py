@@ -367,6 +367,36 @@ class ClickHouseStore:
         )]
         await self.analytics.enqueue("paper_trades", columns, values)
 
+    async def insert_setup(self, row: tuple) -> None:
+        columns = [
+            "setup_id", "symbol", "interval", "direction", "status",
+            "created_at", "opened_at", "closed_at", "updated_at",
+            "signal_ids", "engine_signals", "ai_decision_id", "ai_confidence",
+            "ai_decision", "entry_price", "entry_type", "position_size",
+            "tp_planned", "sl_planned", "risk_reward_planned", "tp_actual",
+            "sl_actual", "exit_price", "pnl", "pnl_pct", "fees",
+            "engine_version", "strategy_version", "prompt_version", "ingested_at",
+        ]
+        await self.analytics.enqueue("setups", columns, [row])
+
+    async def insert_tp_sl_event(self, row: tuple) -> None:
+        columns = [
+            "event_id", "setup_id", "symbol", "interval", "event_type",
+            "leg_index", "planned_price", "actual_price", "size_pct",
+            "slippage_bps", "reason", "event_time", "created_at", "ingested_at",
+        ]
+        await self.analytics.enqueue("tp_sl_events", columns, [row])
+
+    async def insert_ai_decision(self, row: tuple) -> None:
+        columns = [
+            "decision_id", "setup_id", "symbol", "interval", "provider",
+            "model", "prompt_version", "input_snapshot", "raw_output",
+            "parsed_decision", "decision_status", "latency_ms",
+            "prompt_tokens", "completion_tokens", "total_tokens",
+            "cost_usd", "created_at", "ingested_at",
+        ]
+        await self.analytics.enqueue("ai_decisions", columns, [row])
+
     async def insert_engine_signals(self, signals: list[Any]) -> int:
         """Batch-write engine-neutral signals; returns buffered row count."""
         if not signals:
