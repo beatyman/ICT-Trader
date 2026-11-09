@@ -398,11 +398,13 @@
 
   // ------------------------------------------------------------- setup
   function setupToSignal(s) {
+    const risk = Math.abs(num(s.entry) - num(s.stop));
+    const rr = risk > 0 ? Math.abs(num(s.target) - num(s.entry)) / risk : num(s.rr);
     return {
       id: s.setup_id, setup_id: s.setup_id, symbol: s.symbol, interval: s.interval,
       direction: s.direction, status: s.status === "DETECTED" ? "ARMED"
         : s.status === "OPEN" ? "EXECUTED" : s.status,
-      entry: s.entry, stop: s.stop, target: s.target, rr: s.rr,
+      entry: s.entry, stop: s.stop, target: s.target, rr,
       quality: s.confidence, grade: 0, bar_time: s.created_at,
       engine: s.engine, checks: {},
       reason: `${s.engine.toUpperCase()} setup · ${s.confidence * 100 | 0}% confidence`,
@@ -1301,10 +1303,12 @@
     if (setup) {
       const targets = (setup.tp_levels && setup.tp_levels.length)
         ? setup.tp_levels : [setup.target];
+      const risk = Math.abs(Number(setup.entry) - Number(setup.stop));
+      const rr = target => risk > 0 ? Math.abs(Number(target) - Number(setup.entry)) / risk : 0;
       const tps = targets.map((price, i) => ({
         price,
         color: i === 0 ? CHART.target : i === 1 ? "rgba(38,166,154,.78)" : "rgba(38,166,154,.54)",
-        label: `TP${i + 1} · ${(setup.tp_rr?.[i] ?? setup.rr).toFixed(2)}R`,
+        label: `TP${i + 1} · ${rr(price).toFixed(2)}R`,
         dash: false,
       }));
       return [

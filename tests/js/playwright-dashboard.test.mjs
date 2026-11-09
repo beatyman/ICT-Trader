@@ -53,7 +53,7 @@ test("full dashboard renders a fixed signal scenario", async () => {
     direction: "short", status: "OPEN", created_at: last.open_time,
     opened_at: last.open_time, closed_at: null,
     entry_low: 1.08, entry_high: 1.09, entry: 1.085,
-    stop: 1.12, target: 1.04, rr: 2.0, confidence: 0.66,
+    stop: 1.12, target: 1.015, rr: 2.0, confidence: 0.66,
     engine: "chan", engine_version: "chan-test",
     signal_ids: ["SIG-CHAN-FIXTURE"],
     engine_signals: [{
