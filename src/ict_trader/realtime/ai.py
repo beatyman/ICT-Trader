@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -70,6 +71,31 @@ SYSTEM_PROMPT = """你是一名只做风险审查的加密货币量化副驾。
 如果 support，必须给出方向、entry 区间、stop、至少一个 target，且 RR>=2.0。
 你只提出 paper trading plan；最终执行由 deterministic paper broker 完成。
 """
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert numpy/pandas scalars and nested containers to JSON-native."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(v) for v in value]
+    # numpy scalar / pandas scalar
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            return _jsonable(value.item())
+        except Exception:
+            pass
+    if hasattr(value, "tolist") and callable(value.tolist):
+        try:
+            return _jsonable(value.tolist())
+        except Exception:
+            pass
+    return str(value)
 
 
 class AiReviewError(RuntimeError):
@@ -234,7 +260,7 @@ class DeepSeekReviewer:
                     and self._last_review.get("symbol") == symbol):
                 return self._last_review
             self._last_call = now
-            context = self._context(snapshot, bars, symbol, context)
+            context = _jsonable(self._context(snapshot, bars, symbol, context))
             user_prompt = (
                 "审查以下模拟盘 JSON。只审查 selected_symbol 对应的信号；"
                 "若没有该标的的可执行 setup，直接说 no active setup，"

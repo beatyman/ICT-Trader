@@ -108,3 +108,17 @@ def test_ai_trade_plan_is_validated_and_parsed():
     raw = '{"verdict":"support","confidence":80,"headline":"ok","summary":"plan","invalidation":"x","trade_plan":{"open":true,"direction":"long","entry_low":100,"entry_high":101,"stop":98,"targets":[106],"size_pct":0.1,"reason":"x"}}'
     parsed = DeepSeekReviewer._parse(raw)
     assert parsed["trade_plan"]["direction"] == "long"
+
+
+def test_ai_jsonable_handles_numpy_scalars():
+    import numpy as np
+    from ict_trader.realtime.ai import _jsonable
+    payload = {"price": np.float64(1.23), "bars": [np.float64(2.0)],
+               "ok": np.bool_(True), "nan": np.float64("nan")}
+    out = _jsonable(payload)
+    assert out["price"] == 1.23
+    assert out["bars"] == [2.0]
+    assert out["ok"] is True
+    assert out["nan"] is None
+    import orjson
+    orjson.dumps(out)  # must be JSON-serializable
