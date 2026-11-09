@@ -130,6 +130,30 @@ test("full dashboard renders a fixed signal scenario", async () => {
     await page.screenshot({ path: path.join(ARTIFACTS, "dashboard-debug.png"), fullPage: false });
     assert.ok(await page.locator("#priceLabelLayer .price-label").count() >= 1);
     assert.ok(await page.locator("#aiLogList .ai-log-row").count() >= 1);
+    assert.ok(await page.locator("#setupCard").isVisible());
+    const overlapRatio = await page.evaluate(() => {
+      const boxes = [...document.querySelectorAll("#priceLabelLayer .price-label")]
+        .map(el => el.getBoundingClientRect());
+      let overlaps = 0, pairs = 0;
+      for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+        pairs++;
+        const a = boxes[i], b = boxes[j];
+        if (!(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top)) overlaps++;
+      }
+      return pairs ? overlaps / pairs : 0;
+    });
+    assert.ok(overlapRatio <= 0.05, `label overlap ratio ${overlapRatio}`);
+    const fps = await page.evaluate(() => new Promise(resolve => {
+      let frames = 0;
+      const start = performance.now();
+      const step = now => {
+        frames++;
+        if (now - start < 350) requestAnimationFrame(step);
+        else resolve(frames * 1000 / (now - start));
+      };
+      requestAnimationFrame(step);
+    }));
+    assert.ok(fps >= 20, `fps ${fps}`);
     assert.ok(await page.locator("#chartWrap canvas").count() >= 1);
     await page.locator("#chanBtn").click();
     assert.equal(await page.locator(".legend-toggle[data-chan].active").count(), 0);

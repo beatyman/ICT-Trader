@@ -809,3 +809,10 @@ html[data-theme="light"] .price-label { background: rgba(255,255,255,.96); }
 .ai-log-row .ai-log-status.success { color: var(--green); }
 .ai-log-row .ai-log-status.error { color: var(--red); }
 .ai-log-row .ai-log-status.degraded { color: var(--amber); }
+
+.setup-card { position: absolute; top: 10px; right: 86px; z-index: 5; width: 164px; padding: 6px 8px; border: 1px solid rgba(157,184,214,.18); border-radius: 4px; background: rgba(7,12,18,.86); font: 7px var(--mono); color: var(--muted); pointer-events: none; }
+.setup-card b { color: var(--text); font-weight: 600; }
+.setup-card .setup-card-row { display: flex; justify-content: space-between; gap: 6px; margin-top: 2px; }
+.setup-card .setup-card-status { color: var(--amber); letter-spacing: .08em; }
+.setup-card .setup-card-status.open { color: var(--green); }
+html[data-theme="light"] .setup-card { background: rgba(255,255,255,.94); }
