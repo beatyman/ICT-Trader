@@ -1072,16 +1072,69 @@
       });
     };
 
-    // ICT FVG: 3-candle imbalance. Bullish = candle1.high < candle3.low.
+    // ICT FVG: 3-candle imbalance. A later close through the far edge
+    // converts the failed gap into an Inverse FVG (IFVG).
     for (let i = startIdx; i < bars.length - 1; i++) {
       const a = bars[i - 2], c = bars[i];
       if (!a || !c) continue;
       const bullGap = num(c.low) - num(a.high);
       const bearGap = num(a.low) - num(c.high);
       if (bullGap > minGap) {
-        addRect("FVG", "bullish", chartTime(a.open_time), num(a.high), num(c.low), "FVG");
+        let failed = false;
+        for (let j = i + 1; j < bars.length; j++) {
+          if (num(bars[j].close) < num(a.high)) { failed = true; break; }
+        }
+        if (failed) {
+          addRect("IFVG", "bearish", chartTime(a.open_time), num(a.high), num(c.low), "IFVG");
+        } else {
+          addRect("FVG", "bullish", chartTime(a.open_time), num(a.high), num(c.low), "FVG");
+        }
       } else if (bearGap > minGap) {
-        addRect("FVG", "bearish", chartTime(a.open_time), num(c.high), num(a.low), "FVG");
+        let failed = false;
+        for (let j = i + 1; j < bars.length; j++) {
+          if (num(bars[j].close) > num(a.low)) { failed = true; break; }
+        }
+        if (failed) {
+          addRect("IFVG", "bullish", chartTime(a.open_time), num(c.high), num(a.low), "IFVG");
+        } else {
+          addRect("FVG", "bearish", chartTime(a.open_time), num(c.high), num(a.low), "FVG");
+        }
+      }
+    }
+
+    // CISD: a bullish close through the open of a 2+ bearish run (and mirror).
+    let runDir = 0, runCount = 0, runOpen = 0;
+    for (let i = startIdx; i < bars.length; i++) {
+      const b = bars[i], o = num(b.open), c = num(b.close);
+      const bull = c > o;
+      const dir = bull ? 1 : c < o ? -1 : 0;
+      if (dir === 0) continue;
+      if (dir !== runDir) {
+        runDir = dir; runCount = 1; runOpen = o;
+      } else {
+        runCount += 1;
+      }
+      if (dir === 1 && runCount === 1 && runOpen) {
+        // runOpen belongs to the prior bearish run only if we just flipped.
+      }
+      if (dir === 1 && i > startIdx) {
+        const prev = bars[i - 1];
+        if (num(prev.close) < num(prev.open) && c > runOpen && i >= 2) {
+          // runOpen may be current bar's open after the flip; use the first
+          // bearish candle's open from the two-bar lookback instead.
+          const firstBear = bars[i - 2];
+          if (num(firstBear.close) < num(firstBear.open) && c > num(firstBear.open)) {
+            markers.push({ time: chartTime(b.open_time), position: "belowBar", shape: "square", color: "#26a69a", text: "CISD", kind: "CISD", direction: "bullish" });
+          }
+        }
+      } else if (dir === -1 && i > startIdx) {
+        const prev = bars[i - 1];
+        if (num(prev.close) > num(prev.open) && i >= 2) {
+          const firstBull = bars[i - 2];
+          if (num(firstBull.close) > num(firstBull.open) && c < num(firstBull.open)) {
+            markers.push({ time: chartTime(b.open_time), position: "aboveBar", shape: "square", color: "#ef5350", text: "CISD", kind: "CISD", direction: "bearish" });
+          }
+        }
       }
     }
 
@@ -1132,6 +1185,36 @@
       priceLines.push({ price: hi, title: "BSL", color: "#ef5350", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
       priceLines.push({ price: lo, title: "SSL", color: "#26a69a", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
       priceLines.push({ price: (hi + lo) / 2, title: "EQ (50%)", color: "#787b86", lineStyle: 0, lineWidth: 1, startTime: first, endTime: end });
+    }
+
+    // PO3 / AMD: Asian accumulation -> Judas manipulation -> distribution.
+    if (asianBars.length >= 4) {
+      const aHi = Math.max(...asianBars.map(b => num(b.high)));
+      const aLo = Math.min(...asianBars.map(b => num(b.low)));
+      const asianEndTime = chartTime(asianBars[asianBars.length - 1].open_time) + step / 1000;
+      const after = bars.filter(b => chartTime(b.open_time) >= asianEndTime && new Date(num(b.open_time)).toISOString().slice(0, 10) === lastDate);
+      const sweep = after.find(b => (num(b.high) > aHi && num(b.close) < aHi) || (num(b.low) < aLo && num(b.close) > aLo));
+      if (sweep) {
+        const bearSweep = num(sweep.high) > aHi && num(sweep.close) < aHi;
+        markers.push({
+          time: chartTime(sweep.open_time), position: bearSweep ? "aboveBar" : "belowBar",
+          shape: "circle", color: bearSweep ? "#ef5350" : "#26a69a",
+          text: "AMD", kind: "AMD", direction: bearSweep ? "bearish" : "bullish",
+        });
+        const sweepIdx = bars.indexOf(sweep);
+        const displacement = bars.slice(sweepIdx + 1).find(b => {
+          const body = Math.abs(num(b.close) - num(b.open));
+          const sameDir = bearSweep ? num(b.close) < num(b.open) : num(b.close) > num(b.open);
+          return sameDir && body > atr * 1.1;
+        });
+        if (displacement) {
+          markers.push({
+            time: chartTime(displacement.open_time), position: bearSweep ? "aboveBar" : "belowBar",
+            shape: "arrowDown", color: bearSweep ? "#ef5350" : "#26a69a",
+            text: "PO3", kind: "PO3", direction: bearSweep ? "bearish" : "bullish",
+          });
+        }
+      }
     }
 
     dailyLevels(priceLines);
@@ -1208,11 +1291,12 @@
     }
 
     const fvg = rectangles.filter(r => r.kind === "FVG").slice(-8);
+    const ifvg = rectangles.filter(r => r.kind === "IFVG").slice(-4);
     const ob = rectangles.filter(r => r.kind === "OB").slice(-4);
     const session = rectangles.filter(r => r.kind === "AsianRange");
     const chan = rectangles.filter(r => r.kind === "ChanZS");
     return {
-      rectangles: [...fvg, ...ob, ...session, ...chan].slice(-14),
+      rectangles: [...fvg, ...ifvg, ...ob, ...session, ...chan].slice(-16),
       priceLines: priceLines.slice(-12),
       markers: markers.slice(-12),
     };

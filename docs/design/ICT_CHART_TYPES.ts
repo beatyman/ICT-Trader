@@ -26,7 +26,7 @@ export interface ICTMarker {
   color: string;
   text: string;
   /** ICT concept: MSS, BOS, Sweep, BSP, SIG. */
-  kind: "MSS" | "BOS" | "Sweep" | "BSP" | "SIG" | "SMT";
+  kind: "MSS" | "BOS" | "Sweep" | "BSP" | "SIG" | "SMT" | "CISD" | "PO3" | "AMD";
   direction: ICTDirection;
 }
 
@@ -43,7 +43,7 @@ export interface ICTPriceLine {
 }
 
 export interface ICTRectangle {
-  kind: "FVG" | "OB" | "AsianRange" | "ChanZS";
+  kind: "FVG" | "IFVG" | "OB" | "AsianRange" | "ChanZS";
   direction: ICTDirection;
   startTime: UnixSeconds;
   endTime: UnixSeconds;

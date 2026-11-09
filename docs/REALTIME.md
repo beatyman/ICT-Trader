@@ -286,6 +286,11 @@ Implemented ICT semantics:
 
 - `MSS` / `BOS` / `Sweep` markers from confirmed pivots;
 - `FVG` rectangles: 3-candle imbalance, bullish green/bearish red;
+- `IFVG`: a failed FVG after a close through its far edge, drawn as the
+  inverse polarity;
+- `CISD`: change in state of delivery, close through a 2+ candle run;
+- `PO3 / AMD`: Asian accumulation -> Judas/manipulation sweep -> distribution
+  displacement;
 - `OB` rectangles: last opposite candle before displacement;
 - `Asian Range` background rectangle and High/Low price lines;
 - `MDO` midnight-open line;
