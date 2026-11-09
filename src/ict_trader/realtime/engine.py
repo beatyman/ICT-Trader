@@ -394,6 +394,10 @@ class RealtimeEngine:
                 raise RuntimeError(f"only {len(rows)} eligible USDT symbols")
             self.universe = rows
             self.settings.symbols = [r["symbol"] for r in rows]
+            # The runner allocates per-symbol histories/locks in __init__;
+            # rebuild it after the volume universe changes the symbol set.
+            self.runner = ICTStrategyRunner(self.settings, self.metrics)
+            self.runner.on_signal = self._on_signal
             self.boot_total = len(self.settings.streams)
             self.metrics.event(
                 "INFO", "universe",
