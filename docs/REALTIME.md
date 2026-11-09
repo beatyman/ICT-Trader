@@ -330,6 +330,18 @@ resize. FVG/OB are visual context derived from closed bars; they are not
 additional executable signals. The signal/setup lifecycle remains owned by
 the backend.
 
+### ICT array lifecycle and AI scan
+
+`ict_arrays` is the canonical lifecycle table for FVG/IFVG/OB/CISD and Dealing
+Range (`array_id`, type, direction, upper/lower, anchor, formed/swept/
+invalidated times, `is_active`). The chart API persists the selected active
+arrays plus the most recent three inactive arrays; old arrays are not rendered.
+
+`AI_SCAN_SECONDS=300` adds a five-minute scan task in addition to the
+new-15m-setup event. It only reviews active setups without an existing
+`ai_decision_id`, and the per-symbol cooldown still applies. AI calls remain
+async and never enter the feed loop.
+
 ### Backend overlay source
 
 `GET /api/chart/overlays?symbol=&interval=&limit=1800` returns canonical

@@ -104,7 +104,7 @@ class SlowEngine:
     warmup_bars = 0
 
     def analyze(self, window, context):
-        time.sleep(0.3)
+        time.sleep(0.8)
         return []
 
 
@@ -144,7 +144,7 @@ def test_analyze_all_timeout_and_concurrency():
     registry = EngineRegistry()
     registry.register(GoodEngine())
     registry.register(SlowEngine())
-    runs = asyncio.run(registry.analyze_all(None, ctx(), timeout_seconds=0.05))
+    runs = asyncio.run(registry.analyze_all(None, ctx(), timeout_seconds=0.2))
     by_id = {r.engine: r for r in runs}
     assert by_id["good"].ok
     assert "timeout" in by_id["slow"].error

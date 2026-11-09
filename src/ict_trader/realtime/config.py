@@ -173,6 +173,7 @@ class Settings:
     ai_auto: bool = False
     ai_auto_min_confidence: float = 0.65
     ai_auto_cooldown_seconds: float = 300.0
+    ai_scan_seconds: float = 300.0
 
     def __post_init__(self) -> None:
         self.symbols = [s.upper() for s in self.symbols]
@@ -341,6 +342,7 @@ class Settings:
             ai_auto=_env_bool("AI_AUTO_DECISION", False),
             ai_auto_min_confidence=_env_float("AI_AUTO_MIN_CONFIDENCE", 0.65),
             ai_auto_cooldown_seconds=_env_float("AI_AUTO_COOLDOWN_SECONDS", 300.0),
+            ai_scan_seconds=_env_float("AI_SCAN_SECONDS", 300.0),
         )
         for key, value in overrides.items():
             if value is not None and hasattr(cfg, key):

@@ -43,3 +43,24 @@ def test_backend_overlays_public_converts_to_seconds():
         assert r["start_time"] < 10**11  # seconds, not milliseconds
         assert r["end_time"] >= r["start_time"]
         assert r["low"] <= r["high"]
+
+
+def test_ict_arrays_lifecycle_and_rows():
+    from ict_trader.realtime.analysis.arrays import build_ict_arrays
+
+    df = frame()
+    df.loc[50, ["open", "high", "low", "close"]] = [102.0, 102.2, 99.8, 100.0]
+    df.loc[51, ["open", "high", "low", "close"]] = [100.0, 104.5, 99.8, 104.0]
+    df.loc[60, ["open", "high", "low", "close"]] = [100.0, 100.2, 99.0, 99.2]
+    df.loc[61, ["open", "high", "low", "close"]] = [99.2, 99.4, 98.8, 99.0]
+    df.loc[62, ["open", "high", "low", "close"]] = [99.2, 101.5, 99.1, 101.0]
+    arrays = build_ict_arrays(df, "XRPUSDT", "15m")
+    assert arrays
+    assert any(a.array_type == "FVG" and a.is_active for a in arrays)
+    assert any(a.array_type == "OB" for a in arrays)
+    assert any(a.array_type == "CISD" for a in arrays)
+    assert any(a.array_type == "DEALING_RANGE" for a in arrays)
+    for a in arrays:
+        assert a.array_id.startswith("ARR-")
+        assert len(a.row()) == 15
+        assert a.price_upper >= a.price_lower

@@ -23,7 +23,7 @@ MIGRATION_NAME = "analytics_contract_v2"
 
 TABLES = (
     "signals", "setups", "tp_sl_events", "ai_decisions", "llm_api_calls",
-    "error_events", "engine_performance", "strategy_versions",
+    "error_events", "engine_performance", "strategy_versions", "ict_arrays",
 )
 
 
@@ -234,6 +234,31 @@ def _ddl(database: str) -> list[str]:
         SETTINGS index_granularity = 8192
         """,
         f"""
+        CREATE TABLE IF NOT EXISTS {db}.ict_arrays
+        (
+            array_id String,
+            symbol LowCardinality(String),
+            interval LowCardinality(String),
+            array_type LowCardinality(String),
+            direction LowCardinality(String),
+            price_upper Float64,
+            price_lower Float64,
+            anchor_price Nullable(Float64),
+            formed_at DateTime64(3, 'UTC'),
+            swept_at Nullable(DateTime64(3, 'UTC')),
+            invalidated_at Nullable(DateTime64(3, 'UTC')),
+            is_active UInt8,
+            htf_range_id String,
+            engine_version String,
+            ingested_at DateTime64(3, 'UTC')
+        )
+        ENGINE = ReplacingMergeTree(ingested_at)
+        PARTITION BY toYYYYMM(formed_at)
+        ORDER BY (symbol, interval, array_id)
+        TTL toDateTime(formed_at) + INTERVAL 730 DAY DELETE
+        SETTINGS index_granularity = 8192
+        """,
+        f"""
         CREATE TABLE IF NOT EXISTS {db}.strategy_versions
         (
             strategy_version String,
@@ -302,6 +327,16 @@ def ensure_analytics_schema(client: Any, database: str) -> dict[str, Any]:
     legacy = _migrate_legacy_signals(client, database)
     for statement in _ddl(database):
         client.command(statement)
+    for column, definition in (
+        ("htf_range_id", "String DEFAULT ''"),
+        ("resonance_score", "Float64 DEFAULT 0"),
+        ("resonance_breakdown", "String DEFAULT '{}'"),
+        ("structural_invalidation_price", "Nullable(Float64)"),
+        ("structural_invalidation_status", "String DEFAULT ''"),
+    ):
+        client.command(
+            f"ALTER TABLE {database}.setups ADD COLUMN IF NOT EXISTS {column} {definition}"
+        )
 
     checksum = schema_checksum()
     client.command(

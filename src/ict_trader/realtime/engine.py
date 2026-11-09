@@ -279,6 +279,7 @@ class RealtimeEngine:
         self.started_at = ""
         self._health_task: asyncio.Task | None = None
         self._loop_lag_task: asyncio.Task | None = None
+        self._ai_scan_task: asyncio.Task | None = None
         self._health: dict[str, Any] = {
             "redis": {"ok": False, "latency_ms": 0.0},
             "clickhouse": {"ok": False, "latency_ms": 0.0},
@@ -320,6 +321,8 @@ class RealtimeEngine:
             await self.feed.start(self.dispatch)
             self._health_task = asyncio.create_task(self._health_loop(), name="health-loop")
             self._loop_lag_task = asyncio.create_task(self._loop_lag_loop(), name="loop-lag")
+            if self.settings.ai_auto and self.ai.available:
+                self._ai_scan_task = asyncio.create_task(self._ai_scan_loop(), name="ai-scan")
             self.phase = "ready"
             self.metrics.event(
                 "INFO", "engine",
@@ -362,6 +365,9 @@ class RealtimeEngine:
         if self._loop_lag_task is not None:
             self._loop_lag_task.cancel()
             self._loop_lag_task = None
+        if self._ai_scan_task is not None:
+            self._ai_scan_task.cancel()
+            self._ai_scan_task = None
         await self.ai.close()
         await self.ch.stop()
         await self.rest.close()
@@ -488,7 +494,24 @@ class RealtimeEngine:
         task = asyncio.create_task(runner(), name=f"registry-{bar.symbol}-{bar.open_time}")
         self._registry_tasks.add(task)
 
+    async def _ai_scan_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(max(30.0, self.settings.ai_scan_seconds))
+                for setup in self.setups.active():
+                    if not setup.ai_decision_id:
+                        await self._on_setup_created(setup)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("AI scan loop failed: %s", exc)
+                await self.observability.error(
+                    "ai", "scan_loop", "engine", "AI scan loop failed", exc=exc,
+                )
+
     async def _on_setup_created(self, setup) -> None:
+        if setup.ai_decision_id:
+            return
         if not self.settings.ai_auto or not self.ai.available:
             return
         if setup.confidence < self.settings.ai_auto_min_confidence:
@@ -796,6 +819,21 @@ class RealtimeEngine:
         if closed:
             self.metrics.event("WARN", "risk", f"manual flatten closed {closed} paper position(s)")
         return closed
+
+    async def ict_arrays(self, symbol: str, interval: str,
+                         limit: int = 700) -> list[dict[str, Any]]:
+        rows = await self.klines(symbol, interval, max(40, min(limit, 2000)))
+        if not rows:
+            return []
+        frame = pd.DataFrame([{
+            "date": datetime.fromtimestamp(int(r["open_time"]) / 1000.0, tz=timezone.utc),
+            "open": float(r["open"]), "high": float(r["high"]),
+            "low": float(r["low"]), "close": float(r["close"]),
+        } for r in rows])
+        from .analysis.arrays import build_ict_arrays
+        arrays = build_ict_arrays(frame, symbol, interval)
+        await self.ch.insert_ict_arrays(arrays)
+        return [a.to_public() for a in arrays]
 
     async def chart_overlays(self, symbol: str, interval: str,
                              limit: int = 700) -> dict[str, Any]:

@@ -367,6 +367,18 @@ class ClickHouseStore:
         )]
         await self.analytics.enqueue("paper_trades", columns, values)
 
+    async def insert_ict_arrays(self, arrays: list[Any]) -> int:
+        columns = [
+            "array_id", "symbol", "interval", "array_type", "direction",
+            "price_upper", "price_lower", "anchor_price", "formed_at",
+            "swept_at", "invalidated_at", "is_active", "htf_range_id",
+            "engine_version", "ingested_at",
+        ]
+        rows = [a.row() for a in arrays]
+        if rows:
+            await self.analytics.enqueue("ict_arrays", columns, rows)
+        return len(rows)
+
     async def insert_setup(self, row: tuple) -> None:
         columns = [
             "setup_id", "symbol", "interval", "direction", "status",
