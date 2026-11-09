@@ -22,6 +22,33 @@
   --sans: "Bahnschrift", "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
   --radius: 12px;
   --shadow: 0 22px 60px rgba(0, 0, 0, 0.34);
+
+  /* drawing protocol tokens */
+  --chart-up: #2ce5a3;
+  --chart-down: #ff6273;
+  --chart-grid: rgba(157,184,214,.055);
+  --chart-axis: rgba(123,138,158,.58);
+  --ict-bullish-fill: rgba(127,191,154,.11);
+  --ict-bullish-line: #7fbf9a;
+  --ict-bearish-fill: rgba(201,127,127,.11);
+  --ict-bearish-line: #c97f7f;
+  --ict-ifvg-fill: rgba(165,139,214,.12);
+  --ict-ifvg-line: #a58bd6;
+  --ict-swept-fill: rgba(111,118,128,.035);
+  --ict-swept-line: rgba(111,118,128,.28);
+  --ict-entry: #c9d2dc;
+  --ict-sl: #d5a25b;
+  --ict-tp1: #4f9f86;
+  --ict-tp2: #69b39c;
+  --ict-tp3: #8ac7b3;
+  --chan-bi-up: #7fbf9a;
+  --chan-bi-down: #c97f7f;
+  --chan-zs-fill: rgba(165,139,214,.06);
+  --chan-zs-line: rgba(165,139,214,.55);
+  --chan-bsp-buy: #7fbf9a;
+  --chan-bsp-sell: #c97f7f;
+  --label-bg: rgba(7,12,18,.92);
+  --label-text: #e9eef6;
 }
 
 * { box-sizing: border-box; }
@@ -603,6 +630,28 @@ html[data-theme="light"] {
   --violet: #5e49b4;
   --shadow: 0 18px 45px rgba(27, 48, 78, 0.1);
 }
+  --ict-bullish-fill: rgba(7,132,94,.10);
+  --ict-bullish-line: #07845e;
+  --ict-bearish-fill: rgba(196,59,76,.10);
+  --ict-bearish-line: #c43b4c;
+  --ict-ifvg-fill: rgba(94,73,180,.10);
+  --ict-ifvg-line: #5e49b4;
+  --ict-swept-fill: rgba(80,90,105,.035);
+  --ict-swept-line: rgba(80,90,105,.25);
+  --ict-entry: #34465e;
+  --ict-sl: #a56b12;
+  --ict-tp1: #08745f;
+  --ict-tp2: #288a72;
+  --ict-tp3: #4a9f86;
+  --chan-bi-up: #07845e;
+  --chan-bi-down: #c43b4c;
+  --chan-zs-fill: rgba(94,73,180,.05);
+  --chan-zs-line: rgba(94,73,180,.42);
+  --chan-bsp-buy: #07845e;
+  --chan-bsp-sell: #c43b4c;
+  --label-bg: rgba(255,255,255,.96);
+  --label-text: #26384e;
+
 html[data-theme="light"] body {
   background:
     radial-gradient(1100px 650px at 76% -12%, rgba(78, 146, 220, 0.13), transparent 60%),

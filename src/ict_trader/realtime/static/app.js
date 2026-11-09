@@ -1083,6 +1083,53 @@
     };
   }
 
+  function cssToken(name, fallback = "") {
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
+  }
+
+  function themeizeICT(data) {
+    if (!data) return data;
+    const bull = cssToken("--ict-bullish-line", "#7fbf9a");
+    const bullFill = cssToken("--ict-bullish-fill", "rgba(127,191,154,.11)");
+    const bear = cssToken("--ict-bearish-line", "#c97f7f");
+    const bearFill = cssToken("--ict-bearish-fill", "rgba(201,127,127,.11)");
+    const ifvg = cssToken("--ict-ifvg-line", "#a58bd6");
+    const ifvgFill = cssToken("--ict-ifvg-fill", "rgba(165,139,214,.12)");
+    const swept = cssToken("--ict-swept-line", "rgba(111,118,128,.28)");
+    const sweptFill = cssToken("--ict-swept-fill", "rgba(111,118,128,.035)");
+    for (const r of (data.rectangles || [])) {
+      if (r.kind === "ChanZS") {
+        r.fill = cssToken("--chan-zs-fill", "rgba(165,139,214,.06)");
+        r.border = cssToken("--chan-zs-line", "rgba(165,139,214,.55)");
+        r.labelColor = r.border;
+      } else if (r.kind === "IFVG") {
+        r.fill = ifvgFill; r.border = ifvg; r.labelColor = ifvg;
+      } else if (r.kind === "ENTRY") {
+        r.fill = "rgba(41,98,255,.08)";
+        r.border = cssToken("--ict-entry", "#c9d2dc");
+        r.labelColor = r.border;
+      } else if (r.direction === "bullish" || r.direction === "bearish") {
+        const up = r.direction === "bullish";
+        r.fill = up ? bullFill : bearFill;
+        r.border = up ? bull : bear;
+        r.labelColor = r.border;
+      }
+    }
+    for (const m of (data.markers || [])) {
+      if (m.direction === "bullish") m.color = bull;
+      else if (m.direction === "bearish") m.color = bear;
+    }
+    for (const l of (data.priceLines || [])) {
+      const title = String(l.title || l.label || "");
+      if (title === "BSL" || title.startsWith("TP")) l.color = title === "BSL" ? bear : cssToken("--ict-tp1", "#4f9f86");
+      else if (title === "SSL") l.color = bull;
+      else if (title === "SL") l.color = cssToken("--ict-sl", "#d5a25b");
+      else if (title === "ENTRY") l.color = cssToken("--ict-entry", "#c9d2dc");
+    }
+    return data;
+  }
+
   function ictPalette(direction) {
     return direction === "bullish"
       ? { fill: "rgba(38,166,154,.17)", border: "#26a69a", labelColor: "#26a69a" }
@@ -1338,6 +1385,9 @@
     if (!S.snap) return [];
     const setup = activeSetupForChart();
     if (setup) {
+      CHART.entry = cssToken("--ict-entry", CHART.entry);
+      CHART.stop = cssToken("--ict-sl", CHART.stop);
+      CHART.target = cssToken("--ict-tp1", CHART.target);
       const targets = (setup.tp_levels && setup.tp_levels.length)
         ? setup.tp_levels : [setup.target];
       const risk = Math.abs(Number(setup.entry) - Number(setup.stop));
@@ -1401,7 +1451,7 @@
   }
 
   function applyChartAnnotations(bars) {
-    const ict = buildICTData(bars);
+    const ict = themeizeICT(buildICTData(bars));
     const planSetup = activeSetupForChart();
     const lines = [...chartLevels()];
     if (!planSetup) lines.push(...(ict.priceLines || []));
