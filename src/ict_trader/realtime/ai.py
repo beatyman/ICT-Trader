@@ -53,8 +53,21 @@ SYSTEM_PROMPT = """你是一名只做风险审查的加密货币量化副驾。
   "risk_flags": ["具体风险", "..."],
   "execution_notes": ["若执行需要注意的点", "..."],
   "invalidation": "什么情况说明当前判断失效",
-  "data_quality": "对数据完整性的简短评价"
+  "data_quality": "对数据完整性的简短评价",
+  "trade_plan": {
+    "open": true/false,
+    "direction": "long" | "short",
+    "entry_low": 数字,
+    "entry_high": 数字,
+    "stop": 数字,
+    "targets": [TP1, TP2, TP3],
+    "size_pct": 0.0-0.30,
+    "reason": "为什么这个计划可执行"
+  }
 }
+如果 verdict 不是 support，trade_plan.open 必须为 false。
+如果 support，必须给出方向、entry 区间、stop、至少一个 target，且 RR>=2.0。
+你只提出 paper trading plan；最终执行由 deterministic paper broker 完成。
 """
 
 
@@ -326,6 +339,7 @@ class DeepSeekReviewer:
             "execution_notes": [str(x) for x in (obj.get("execution_notes") or [])][:8],
             "invalidation": str(obj.get("invalidation") or ""),
             "data_quality": str(obj.get("data_quality") or ""),
+            "trade_plan": obj.get("trade_plan"),
         }
         from .ai_schema import ReviewDecision
         try:

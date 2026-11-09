@@ -90,3 +90,21 @@ def test_ai_schema_rejects_out_of_range_confidence():
         ReviewDecision(verdict="support", confidence=101, headline="x")
     valid = ReviewDecision(verdict="caution", confidence=50, headline="x")
     assert valid.verdict == "caution"
+
+
+def test_ai_trade_plan_is_validated_and_parsed():
+    from ict_trader.realtime.ai_schema import AITradePlan, ReviewDecision
+    from ict_trader.realtime.ai import DeepSeekReviewer
+
+    plan = AITradePlan(
+        open=True, direction="long", entry_low=100, entry_high=101,
+        stop=98, targets=[106, 110], size_pct=0.1, reason="ICT+chan",
+    )
+    decision = ReviewDecision(
+        verdict="support", confidence=80, headline="ok",
+        summary="plan", invalidation="below 98", trade_plan=plan,
+    )
+    assert decision.trade_plan.open is True
+    raw = '{"verdict":"support","confidence":80,"headline":"ok","summary":"plan","invalidation":"x","trade_plan":{"open":true,"direction":"long","entry_low":100,"entry_high":101,"stop":98,"targets":[106],"size_pct":0.1,"reason":"x"}}'
+    parsed = DeepSeekReviewer._parse(raw)
+    assert parsed["trade_plan"]["direction"] == "long"

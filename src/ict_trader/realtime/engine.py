@@ -589,6 +589,60 @@ class RealtimeEngine:
         self._ai_tasks.add(task)
         task.add_done_callback(self._ai_tasks.discard)
 
+    async def _execute_ai_plan(self, setup, review: dict[str, Any]) -> dict[str, Any]:
+        """Execute a validated support plan as a paper order.
+
+        The AI never touches the exchange; PaperBroker remains the executor.
+        """
+        plan = review.get("trade_plan") or {}
+        if str(review.get("verdict")) != "support" or not plan.get("open"):
+            return {"accepted": False, "reason": "no support plan"}
+        direction = str(plan.get("direction") or setup.direction)
+        stop = float(plan.get("stop") or setup.stop)
+        targets = [float(x) for x in (plan.get("targets") or []) if float(x) > 0]
+        if not targets:
+            targets = [float(setup.target)]
+        entry = float(plan.get("entry_low") or setup.entry)
+        entry = (entry + float(plan.get("entry_high") or entry)) / 2.0
+        live = self.latest_bars.get((setup.symbol, setup.interval))
+        if live is not None and live.close > 0:
+            entry = float(live.close)  # direct paper open at current mark
+        risk = abs(entry - stop)
+        if risk <= 0:
+            return {"accepted": False, "reason": "zero stop distance"}
+        target = targets[0]
+        if direction == "long" and not (stop < entry < target):
+            return {"accepted": False, "reason": "invalid long price order"}
+        if direction == "short" and not (target < entry < stop):
+            return {"accepted": False, "reason": "invalid short price order"}
+        rr = abs(target - entry) / risk
+        if rr < 2.0:
+            return {"accepted": False, "reason": f"RR {rr:.2f} below 2.0"}
+        signal = TradeSignal(
+            id=setup.setup_id, symbol=setup.symbol, interval=setup.interval,
+            bar_time=int(setup.engine_signals[0].get("source_kline_open_time")
+                         if setup.engine_signals else setup.created_at),
+            created_at=utc_ms(), direction=direction,
+            entry=entry, stop=stop, target=target, rr=rr,
+            grade=5, quality=float(review.get("confidence", 0) or 0) / 100.0,
+            status="ARMED", actionable=True, executed=False,
+            reason="AI support plan",
+        )
+        result = await self.broker.execute(signal, entry, bar_time=signal.bar_time)
+        if result.accepted:
+            setup.fill_price = float(result.fill)
+            setup.status = "OPEN"
+            setup.opened_at = utc_ms()
+            setup.updated_at = setup.opened_at
+            await self.setups.persist_setup(setup.setup_row(datetime.now(timezone.utc)))
+            self.metrics.event(
+                "INFO", "ai_execution",
+                f"AI paper {direction} {setup.symbol} @ {result.fill:.6g}",
+                symbol=setup.symbol,
+            )
+        return {"accepted": bool(result.accepted), "reason": result.reason,
+                "fill": float(result.fill) if result.accepted else None, "rr": round(rr, 3)}
+
     async def _auto_review(self, setup) -> None:
         """Async, non-blocking review of a newly created future setup."""
         async with self._ai_sem:
@@ -632,13 +686,15 @@ class RealtimeEngine:
             setup.ai_confidence = float(review.get("confidence", 0) or 0) / 100.0
             setup.ai_decision = str(review.get("verdict", "reject"))
             await self.setups.persist_setup(setup.setup_row(datetime.now(timezone.utc)))
+            execution = await self._execute_ai_plan(setup, review)
+            review["execution"] = execution
             self.ai_decisions.append({
                 "decision_id": decision_id, "setup_id": setup.setup_id,
                 "symbol": setup.symbol, "verdict": review.get("verdict"),
                 "confidence": review.get("confidence"), "headline": review.get("headline"),
                 "summary": review.get("summary"), "status": status, "error": error,
                 "latency_ms": latency_ms, "total_tokens": total_tokens,
-                "created_at": now, "parsed": review,
+                "created_at": now, "parsed": review, "execution": execution,
             })
             self.metrics.inc("ai_auto_review")
             self.metrics.event(
