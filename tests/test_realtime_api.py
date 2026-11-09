@@ -14,10 +14,21 @@ from ict_trader.realtime.models import Kline  # noqa: E402
 
 class FakeRunner:
     def __init__(self) -> None:
-        self.signals = []
+        from ict_trader.realtime.strategy_runner import TradeSignal
+        self.signal = TradeSignal(
+            id="SIG-ALIGN", symbol="BTCUSDT", interval="15m",
+            bar_time=1_700_000_000_000, created_at=1_700_000_000_000,
+            direction="long", entry=1.5, stop=1.4, target=1.7, rr=2.0,
+            grade=4, quality=0.7, status="HISTORICAL", actionable=False,
+            executed=False, reason="alignment test", setup_level=1.5,
+        )
+        self.signals = [self.signal]
 
-    def frame(self, symbol, limit=80):
+    def frame(self, symbol, limit=80, end_time=None):
         return []
+
+    def get_signal(self, signal_id):
+        return self.signal if signal_id == self.signal.id else None
 
 
 class FakeAI:
@@ -50,8 +61,8 @@ class FakeEngine:
     async def stop(self):
         self.phase = "stopped"
 
-    async def klines(self, symbol, interval, limit):
-        now = 1_700_000_000_000
+    async def klines(self, symbol, interval, limit, end_time=None):
+        now = self.runner.signal.bar_time
         return [Kline(symbol=symbol, interval=interval, open_time=now, close_time=now + 899999,
                       open=1, high=2, low=0.5, close=1.5, volume=10, is_closed=True).to_public()]
 
@@ -71,7 +82,8 @@ class FakeEngine:
                 "sessions": {},
             },
             "last_update": 1_700_000_000_000,
-            "strategy": {"interval": "15m"}, "signals": [], "watchlist": [],
+            "strategy": {"interval": "15m"},
+            "signals": [self.runner.signal.to_public()], "watchlist": [],
             "account": {"equity": 100000, "initial_equity": 100000,
                         "open_risk_pct": 0, "open_risk": 0, "daily_pnl": 0,
                         "return_pct": 0},
@@ -98,6 +110,12 @@ def test_dashboard_routes_and_websocket(tmp_path):
         assert ai.json()["configured"] is False
         review = client.post("/api/ai/review", json={"symbol": "BTCUSDT"})
         assert review.status_code == 503
+        missing = client.get("/api/signals/not-found/context")
+        assert missing.status_code == 404
+        ctx = client.get("/api/signals/SIG-ALIGN/context")
+        assert ctx.status_code == 200
+        assert ctx.json()["aligned"] is True
+        assert ctx.json()["signal_bar"]["close"] == 1.5
         with client.websocket_connect("/ws") as ws:
             payload = ws.receive_json()
             assert payload["trading_mode"] == "PAPER"

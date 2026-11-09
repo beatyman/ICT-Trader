@@ -56,12 +56,15 @@ docker stats --no-stream
 - [x] 旧 `signals` 表已在本地 `ict` 库迁移为
   `signals_legacy_20261109_102957`；
 - [~] P0-4：结构化 `Observability` reporter 已接入 stream/backfill/persist 错误；
-  `loop_lag_ms` 与 `engine_performance` 写入方法已具备；AI/ClickHouse 内部错误
-  尚未全部改走 reporter（仍部分只进 metrics）；
+  `loop_lag_ms` 与 `engine_performance` 已实际落库（当前 ICT 评估样本可查）；
+  AI/ClickHouse 内部错误尚未全部改走 reporter（仍部分只进 metrics）；
 - [~] P0-5：`CircuitBreaker` 已接入 `EngineRegistry`，但实时策略路径尚未持有 registry；
   loop-lag 监控已运行；外部通知/告警路由仍待接入；
 - [x] P1-1：`ICTEngine` adapter 已接入 `ICTStrategyRunner`，实时路径现在产出
   统一 `EngineSignal` 后再转 paper `TradeSignal`；
+  `source_kline_open_time` / `bar_time` 已对齐到原始 K 线，新增
+  `/api/signals/{id}/context`（`aligned`、`signal_bar`、前后 bar 数）和
+  `?signal=<id>` 图表定位；
 - [ ] P1-2：Ichimoku adapter。
 
 详细性能数字见 [`PERF_BASELINE.md`](PERF_BASELINE.md)。

@@ -71,6 +71,7 @@ class TradeSignal:
             "symbol": self.symbol,
             "interval": self.interval,
             "bar_time": self.bar_time,
+            "source_kline_open_time": self.bar_time,
             "created_at": self.created_at,
             "direction": self.direction,
             "entry": round(self.entry, 8),
@@ -170,7 +171,11 @@ class ICTStrategyRunner:
             signals = await asyncio.to_thread(self._compute, symbol, full, False)
         async with self._locks[symbol]:
             self.histories[symbol] = deque(closed[-self.eval_window:], maxlen=self.eval_window)
-        # Keep the most recent 120 days' setups, capped for a compact dashboard.
+        # Keep only setups whose source K-line remains in the retained chart
+        # history. This guarantees the UI can always resolve signal.bar_time
+        # to a bar returned by /api/klines.
+        cutoff = closed[-min(len(closed), self.eval_window)].open_time
+        signals = [s for s in signals if s.bar_time >= cutoff]
         signals = sorted(signals, key=lambda x: x.bar_time)[-30:]
         for signal in signals:
             signal.status = "HISTORICAL"
@@ -302,6 +307,9 @@ class ICTStrategyRunner:
         keep = {s.id for s in self.signals}
         self._signal_index = {k: v for k, v in self._signal_index.items() if k in keep}
 
+    def get_signal(self, signal_id: str) -> TradeSignal | None:
+        return self._signal_index.get(signal_id)
+
     def update_signal(self, signal_id: str, *, status: str | None = None,
                       executed: bool | None = None, order_id: str | None = None,
                       reason: str | None = None) -> None:
@@ -318,14 +326,19 @@ class ICTStrategyRunner:
             signal.reason = f"{signal.reason} · {reason}" if signal.reason else reason
 
     # ------------------------------------------------------------------
-    def frame(self, symbol: str, limit: int = 240) -> list[Kline]:
+    def frame(self, symbol: str, limit: int = 240,
+              end_time: int | None = None) -> list[Kline]:
         hist = self.histories.get(symbol.upper())
         if not hist:
             return []
-        return list(hist)[-limit:]
+        bars = list(hist)
+        if end_time is not None:
+            bars = [b for b in bars if b.open_time <= int(end_time)]
+        return bars[-limit:]
 
-    def public_klines(self, symbol: str, limit: int = 240) -> list[dict[str, Any]]:
-        bars = self.frame(symbol, limit)
+    def public_klines(self, symbol: str, limit: int = 240,
+                      end_time: int | None = None) -> list[dict[str, Any]]:
+        bars = self.frame(symbol, limit, end_time)
         return [b.to_public() for b in bars]
 
     def watchlist(self) -> list[dict[str, Any]]:

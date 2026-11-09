@@ -193,6 +193,36 @@ build_setup(df_15m, result, SetupConfig(market="crypto", stack=...))
 * WebSocket snapshot at 1 Hz, `/api/snapshot`, `/api/klines`,
   `/api/health`, `/api/docs`.
 
+### Signal ↔ K-line alignment
+
+Every paper signal carries `source_kline_open_time` (also exposed as
+`bar_time`), and its entry is the **close of that exact bar**. The alignment is
+checked by the API, not inferred by the UI:
+
+```text
+GET /api/signals/{signal_id}/context
+→ signal, signal_bar, bars_before, bars_after, aligned=true/false, bars[]
+```
+
+`/api/klines` also accepts `end_time` so the dashboard can load the window
+around a historical signal. Clicking a signal opens its source window, marks
+the exact bar with a vertical `SIG` line, and draws the signal's entry/SL/TP.
+A shareable URL is available:
+
+```text
+http://127.0.0.1:8080/?signal=<signal_id>
+```
+
+![Signal aligned to source K-line](assets/realtime-signal-kline.png)
+
+The alignment test (`tests/test_realtime_runner_adapter.py`,
+`tests/test_realtime_ict_adapter.py`, `tests/test_realtime_api.py`) asserts:
+
+- `source_kline_open_time` equals the source bar `open_time`;
+- `entry` equals that bar's close;
+- the context endpoint returns `aligned=true`;
+- stale signals outside the retained chart window are not shown as markers.
+
 ### DeepSeek V4.1 Flash risk review
 
 ![DeepSeek V4.1 Flash risk review](assets/realtime-ai-review.png)

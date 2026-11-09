@@ -58,6 +58,22 @@ def test_ict_engine_emits_immutable_signal(monkeypatch):
     assert sig.engine_version == "ict_trader-0.1.0"
 
 
+def test_ict_engine_signal_entry_matches_source_bar_close(monkeypatch):
+    import ict_trader.realtime.analysis.engines.ict as ict_module
+    df = frame(1500)
+    c = cisd(end=1499)
+    monkeypatch.setattr(
+        ict_module, "analyze",
+        lambda data, cfg: ICTResult(bars=data, cisds=[c]),
+    )
+    monkeypatch.setattr(ict_module, "build_setup", lambda data, res, cfg: [c])
+    engine = ICTEngine(SetupConfig(market="crypto"), ICTConfig(cisd_all=True))
+    ctx = AnalysisContext("BTCUSDT", "15m", 1_700_000_000_000)
+    sig = engine.analyze(df, ctx)[0]
+    assert sig.source_kline_open_time == int(df["date"].iloc[1499].timestamp() * 1000)
+    assert sig.evidence_plain()["entry"] == float(df["close"].iloc[1499])
+
+
 def test_ict_engine_ignores_stale_setup_for_actionable(monkeypatch):
     import ict_trader.realtime.analysis.engines.ict as ict_module
     c = cisd(end=1400)

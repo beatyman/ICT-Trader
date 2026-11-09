@@ -138,6 +138,29 @@ def create_app(engine: RealtimeEngine) -> FastAPI:
     async def signals() -> JSONResponse:
         return JSONResponse([s.to_public() for s in engine.runner.signals[:50]])
 
+    @app.get("/api/signals/{signal_id}/context")
+    async def signal_context(signal_id: str) -> JSONResponse:
+        signal = engine.runner.get_signal(signal_id)
+        if signal is None:
+            return JSONResponse({"ok": False, "error": "signal not found"}, status_code=404)
+        from .models import interval_ms
+        step = interval_ms(signal.interval)
+        end = signal.bar_time + 70 * step
+        bars = await engine.klines(signal.symbol, signal.interval, 180, end)
+        aligned_bar = next(
+            (b for b in bars if int(b["open_time"]) == int(signal.bar_time)),
+            None,
+        )
+        return JSONResponse({
+            "ok": True,
+            "signal": signal.to_public(),
+            "aligned": aligned_bar is not None,
+            "signal_bar": aligned_bar,
+            "bars_before": sum(1 for b in bars if int(b["open_time"]) < signal.bar_time),
+            "bars_after": sum(1 for b in bars if int(b["open_time"]) > signal.bar_time),
+            "bars": bars,
+        })
+
     @app.get("/api/ai/status")
     async def ai_status() -> JSONResponse:
         return JSONResponse(engine.ai.status())
@@ -169,10 +192,14 @@ def create_app(engine: RealtimeEngine) -> FastAPI:
         symbol: str = Query(...),
         interval: str | None = Query(None),
         limit: int = Query(240, ge=20, le=2000),
+        end_time: int | None = Query(None, ge=0),
     ) -> JSONResponse:
         iv = interval or engine.settings.strategy_interval
-        rows = await engine.klines(symbol, iv, limit)
-        return JSONResponse({"symbol": symbol.upper(), "interval": iv, "bars": rows})
+        rows = await engine.klines(symbol, iv, limit, end_time)
+        return JSONResponse({
+            "symbol": symbol.upper(), "interval": iv,
+            "end_time": end_time, "bars": rows,
+        })
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:

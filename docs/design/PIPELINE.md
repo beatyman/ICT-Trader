@@ -4,6 +4,8 @@
 > `StreamSession → ICTStrategyRunner → ICTEngine(EngineSignal) →
 > PaperBroker → signals(batch writer)/paper_trades` 已接线。
 > `EngineRegistry`、`CircuitBreaker`、`AnalyticsBatchWriter` 与 9 张 analytics 表已实现；
+> `signals` 已对齐到 `source_kline_open_time`，并提供
+> `/api/signals/{id}/context` 验证 `aligned=true`。
 > registry 尚未被 `RealtimeEngine` 持有，`setups/tp_sl_events/ai_decisions/...`
 > 仍没有写入方。本文用「已实现 / 待实现」标注每一段。
 

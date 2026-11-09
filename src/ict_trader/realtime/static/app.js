@@ -24,7 +24,11 @@
     aiBusy: false,
     aiReview: null,
     aiHashOpened: false,
+    anchorSignalId: null,
+    signalLinkOpened: false,
   };
+
+  const TF_MS = { "1m": 60000, "5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000, "1d": 86400000 };
 
   const COINS = {
     BTCUSDT: ["₿", "coin-btc"],
@@ -167,6 +171,9 @@
     }
 
     if (snap.ai?.last_review && !S.aiReview) S.aiReview = snap.ai.last_review;
+    if (S.anchorSignalId && !(snap.signals || []).some(s => s.id === S.anchorSignalId)) {
+      S.anchorSignalId = null;
+    }
 
     renderAll(snap);
 
@@ -176,6 +183,12 @@
     if (location.hash === "#ai" && !S.aiHashOpened) {
       S.aiHashOpened = true;
       openAiModal();
+    }
+    const linkedSignal = new URLSearchParams(location.search).get("signal");
+    if (linkedSignal && !S.signalLinkOpened) {
+      S.signalLinkOpened = true;
+      const sig = (snap.signals || []).find(s => s.id === linkedSignal);
+      if (sig) selectSignal(sig.id);
     }
     if (S.phase === "ready" && wasFirst) {
       showToast("Engine ready", `${snap.config.symbols.length} symbols · paper execution only`, "success");
@@ -386,7 +399,7 @@
       const isLong = s.direction === "long";
       const st = (s.status || "").toLowerCase();
       return `
-        <div class="signal-item" data-symbol="${escapeHtml(s.symbol)}" title="${escapeHtml(s.reason || "")}">
+        <div class="signal-item ${s.id === S.anchorSignalId ? "active" : ""}" data-symbol="${escapeHtml(s.symbol)}" data-signal-id="${escapeHtml(s.id)}" title="${escapeHtml(s.reason || "")}">
           <div class="signal-arrow ${isLong ? "long" : "short"}">${isLong ? "↗" : "↘"}</div>
           <div class="signal-main">
             <div class="line1"><b>${escapeHtml(s.symbol.replace("USDT", ""))}</b><em>${isLong ? "LONG" : "SHORT"}</em><em style="color:var(--muted-2)">${shortDate(s.bar_time).split(",")[1] || ""}</em></div>
@@ -521,12 +534,30 @@
     icon.textContent = glyph;
     icon.className = "coin " + cls;
     $("#chartSymbol").textContent = sym;
-    $("#chartPrice").textContent = row ? fmtPrice(row.price) : "—";
+    const anchorSignal = S.anchorSignalId
+      ? (snap.signals || []).find(s => s.id === S.anchorSignalId)
+      : null;
+    $("#chartPrice").textContent = anchorSignal
+      ? fmtPrice(anchorSignal.entry)
+      : (row ? fmtPrice(row.price) : "—");
     const ch = num(row?.change_pct);
     const chEl = $("#chartChange");
-    chEl.textContent = row ? `${ch >= 0 ? "+" : ""}${ch.toFixed(2)}%` : "—";
-    chEl.className = "delta" + (ch < 0 ? " down" : "");
-    $("#chartSource").textContent = `${S.tf.toUpperCase()} · CLOSED BARS`;
+    if (anchorSignal) {
+      chEl.textContent = "SIGNAL BAR";
+      chEl.className = "delta";
+      chEl.style.color = "var(--amber)";
+    } else {
+      chEl.textContent = row ? `${ch >= 0 ? "+" : ""}${ch.toFixed(2)}%` : "—";
+      chEl.className = "delta" + (ch < 0 ? " down" : "");
+      chEl.style.color = "";
+    }
+    $("#chartSource").textContent = anchorSignal
+      ? `${S.tf.toUpperCase()} · SIGNAL CONTEXT`
+      : `${S.tf.toUpperCase()} · CLOSED BARS`;
+    const badge = $("#chartAnchor");
+    badge.hidden = !anchorSignal;
+    if (anchorSignal) badge.textContent = `SIG ${shortDate(anchorSignal.bar_time)}`;
+    $("#liveChartBtn").hidden = !anchorSignal;
     $("#chartFeedNote").textContent = snap.mode === "demo" ? "simulated tape · closed-bar signals" : "Binance WS · closed-bar signals";
     $("#sbSymbols").textContent = `${(snap.config?.symbols || []).length} symbols · ${S.tf}`;
   }
@@ -545,8 +576,16 @@
     const firstLoad = !S.bars.length;
     S.chartLoading = true;
     if (firstLoad) $("#chartLoading").classList.remove("hidden");
+    const anchor = S.anchorSignalId
+      ? (S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
+      : null;
+    const endTime = anchor
+      ? num(anchor.bar_time) + 70 * (TF_MS[S.tf] || 900000)
+      : null;
+    const url = `/api/klines?symbol=${encodeURIComponent(S.symbol)}&interval=${encodeURIComponent(S.tf)}&limit=220`
+      + (endTime ? `&end_time=${endTime}` : "");
     try {
-      const res = await fetch(`/api/klines?symbol=${encodeURIComponent(S.symbol)}&interval=${encodeURIComponent(S.tf)}&limit=240`, { cache: "no-store" });
+      const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) throw new Error("HTTP " + res.status);
       const data = await res.json();
       if (seq !== S.fetchSeq) return;
@@ -571,20 +610,45 @@
 
   function selectSymbol(symbol) {
     if (!symbol) return;
-    if (S.symbol === symbol && S.chartLoaded) return;
+    if (S.symbol === symbol && S.chartLoaded && !S.anchorSignalId) return;
+    S.anchorSignalId = null;
     S.symbol = symbol;
     S.chartLoaded = false;
     S.bars = [];
     renderWatchlist(S.snap || {});
     renderChartHeader(S.snap || {});
+    renderSignals(S.snap || {});
+    loadBars();
+  }
+
+  function selectSignal(signalId) {
+    const signal = (S.snap?.signals || []).find(s => s.id === signalId);
+    if (!signal) return;
+    S.anchorSignalId = signal.id;
+    S.symbol = signal.symbol;
+    if (S.tf !== signal.interval) {
+      S.tf = signal.interval;
+      $$("#tfTabs .tf").forEach(b => b.classList.toggle("active", b.dataset.tf === S.tf));
+    }
+    S.chartLoaded = false;
+    S.bars = [];
+    renderWatchlist(S.snap || {});
+    renderChartHeader(S.snap || {});
+    renderSignals(S.snap || {});
     loadBars();
   }
 
   function showLatestOhlc() {
-    const b = S.bars[S.bars.length - 1];
+    const anchor = S.anchorSignalId
+      ? (S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
+      : null;
+    const b = anchor
+      ? S.bars.find(x => num(x.open_time) === num(anchor.bar_time))
+      : S.bars[S.bars.length - 1];
     if (!b) return;
     const up = b.close >= b.open;
-    $("#chartOhlc").innerHTML = `<span>O <b>${fmtPrice(b.open)}</b></span> <span>H <b>${fmtPrice(b.high)}</b></span> <span>L <b>${fmtPrice(b.low)}</b></span> <span>C <b class="${up ? "up" : "down"}">${fmtPrice(b.close)}</b></span>`;
+    const prefix = anchor ? "SIG " : "";
+    $("#chartOhlc").innerHTML = `<span>${prefix}O <b>${fmtPrice(b.open)}</b></span> <span>H <b>${fmtPrice(b.high)}</b></span> <span>L <b>${fmtPrice(b.low)}</b></span> <span>C <b class="${up ? "up" : "down"}">${fmtPrice(b.close)}</b></span>`;
   }
 
   // ------------------------------------------------------------- canvas chart
@@ -640,12 +704,17 @@
         { price: pos.target, color: "rgba(44,229,163,.8)", label: "TARGET", dash: [4, 4] },
       ];
     }
-    const sig = (S.snap.signals || []).find(s => s.symbol === S.symbol && s.status === "ARMED");
+    const anchored = S.anchorSignalId
+      ? (S.snap.signals || []).find(s => s.id === S.anchorSignalId)
+      : null;
+    const sig = anchored || (S.snap.signals || []).find(
+      s => s.symbol === S.symbol && s.status === "ARMED",
+    );
     if (sig) {
       return [
-        { price: sig.entry, color: "rgba(242,184,75,.7)", label: "SIGNAL", dash: [3, 5] },
-        { price: sig.stop, color: "rgba(255,98,115,.65)", label: "SL", dash: [3, 5] },
-        { price: sig.target, color: "rgba(44,229,163,.65)", label: "TP", dash: [3, 5] },
+        { price: sig.entry, color: "rgba(242,184,75,.75)", label: "SIGNAL", dash: [3, 5] },
+        { price: sig.stop, color: "rgba(255,98,115,.7)", label: "SL", dash: [3, 5] },
+        { price: sig.target, color: "rgba(44,229,163,.7)", label: "TP", dash: [3, 5] },
       ];
     }
     return [];
@@ -763,6 +832,32 @@
       ctx.fillText(level.label, m.l + plotW - 4, y - 7);
     });
 
+    // Selected signal must point to the exact source K-line open_time.
+    const anchor = S.anchorSignalId
+      ? (S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
+      : null;
+    if (anchor) {
+      const idx = bars.findIndex(b => num(b.open_time) === num(anchor.bar_time));
+      if (idx >= 0) {
+        const x = xFor(idx);
+        ctx.save();
+        ctx.setLineDash([2, 4]);
+        ctx.strokeStyle = "rgba(242,184,75,.7)";
+        ctx.beginPath(); ctx.moveTo(x, m.t); ctx.lineTo(x, m.t + priceH + volH + 7); ctx.stroke();
+        ctx.restore();
+        const y = yFor(num(anchor.entry));
+        ctx.fillStyle = "#f2b84b";
+        ctx.beginPath();
+        ctx.moveTo(x, y - 9);
+        ctx.lineTo(x - 4, y - 16);
+        ctx.lineTo(x + 4, y - 16);
+        ctx.closePath(); ctx.fill();
+        ctx.font = "bold 7px Cascadia Code, Consolas, monospace";
+        ctx.textAlign = "left";
+        ctx.fillText("SIG", x + 5, m.t + 8);
+      }
+    }
+
     // Last price tag.
     const last = bars[bars.length - 1];
     const lastY = yFor(num(last.close));
@@ -837,7 +932,7 @@
     const pos = (snap.positions || []).find(p => p.symbol === S.symbol);
     const sig = (snap.signals || []).find(s => s.symbol === S.symbol && s.status === "ARMED");
     const lastBar = S.bars[S.bars.length - 1];
-    const key = [pos?.id, pos?.last, sig?.id, sig?.status, lastBar?.close_time].join("|");
+    const key = [S.anchorSignalId, pos?.id, pos?.last, sig?.id, sig?.status, lastBar?.close_time].join("|");
     if (key !== S.lastChartKey) {
       S.lastChartKey = key;
       drawChart();
@@ -973,16 +1068,27 @@
     });
     $("#signalList").addEventListener("click", e => {
       const row = e.target.closest(".signal-item");
-      if (row) selectSymbol(row.dataset.symbol);
+      if (row?.dataset.signalId) selectSignal(row.dataset.signalId);
+      else if (row) selectSymbol(row.dataset.symbol);
     });
     $("#tfTabs").addEventListener("click", e => {
       const btn = e.target.closest(".tf");
       if (!btn) return;
       $$("#tfTabs .tf").forEach(b => b.classList.toggle("active", b === btn));
       S.tf = btn.dataset.tf;
+      S.anchorSignalId = null;
       S.chartLoaded = false;
       S.bars = [];
       renderChartHeader(S.snap || {});
+      renderSignals(S.snap || {});
+      loadBars();
+    });
+    $("#liveChartBtn").addEventListener("click", () => {
+      S.anchorSignalId = null;
+      S.chartLoaded = false;
+      S.bars = [];
+      renderChartHeader(S.snap || {});
+      renderSignals(S.snap || {});
       loadBars();
     });
     $("#refreshBtn").addEventListener("click", () => {
@@ -990,7 +1096,19 @@
       if (S.symbol) loadBars();
       showToast("Refreshed", "Snapshot and chart reloaded.");
     });
-    $("#fitBtn").addEventListener("click", () => { S.mouse = null; drawChart(); });
+    $("#fitBtn").addEventListener("click", () => {
+      S.mouse = null;
+      if (S.anchorSignalId) {
+        S.anchorSignalId = null;
+        S.chartLoaded = false;
+        S.bars = [];
+        renderChartHeader(S.snap || {});
+        renderSignals(S.snap || {});
+        loadBars();
+      } else {
+        drawChart();
+      }
+    });
     $("#indicatorBtn").addEventListener("click", e => {
       S.ema = !S.ema;
       e.currentTarget.classList.toggle("active", S.ema);

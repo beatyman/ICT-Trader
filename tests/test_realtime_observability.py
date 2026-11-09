@@ -39,9 +39,13 @@ def test_observability_errors_and_engine_run_go_to_analytics():
     asyncio.run(obs.error("ai", "timeout", "ai", "late", exc=TimeoutError("x")))
     run = EngineRun(engine="ict", signals=[], latency_ms=12.5)
     asyncio.run(obs.engine_run(run, ctx(), bar_count=1800))
-    assert [x[0] for x in analytics.items] == ["error_events", "engine_performance"]
+    asyncio.run(obs.engine_timing("ict", "1.0.0", "BTCUSDT", "15m",
+                                  ctx().as_of_ms, 9.5, bar_count=1800))
+    assert [x[0] for x in analytics.items] == [
+        "error_events", "engine_performance", "engine_performance",
+    ]
     assert obs.errors == 1
-    assert obs.engine_samples == 1
+    assert obs.engine_samples == 2
     assert "TimeoutError" in analytics.items[0][2][0][6]
 
 

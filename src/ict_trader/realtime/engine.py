@@ -455,6 +455,14 @@ class RealtimeEngine:
         for symbol in closes:
             await self.broker.close_time_stop(symbol, bar.close)
         await self.runner.on_closed(bar)
+        if self.runner.last_eval_ms.get(bar.symbol) == bar.open_time:
+            elapsed = self.runner.last_eval_duration_ms.get(bar.symbol)
+            if elapsed is not None:
+                await self.observability.engine_timing(
+                    "ict", "ict_trader-0.1.0", bar.symbol, bar.interval,
+                    bar.open_time, elapsed,
+                    bar_count=self.runner.eval_window,
+                )
 
     async def _on_signal(self, signal: TradeSignal) -> None:
         result = await self.broker.execute(signal, signal.entry, bar_time=signal.bar_time)
@@ -589,11 +597,12 @@ class RealtimeEngine:
             self.metrics.event("WARN", "risk", f"manual flatten closed {closed} paper position(s)")
         return closed
 
-    async def klines(self, symbol: str, interval: str, limit: int = 240) -> list[dict[str, Any]]:
+    async def klines(self, symbol: str, interval: str, limit: int = 240,
+                     end_time: int | None = None) -> list[dict[str, Any]]:
         limit = max(20, min(int(limit), 2000))
         symbol = symbol.upper()
         if interval == self.settings.strategy_interval:
-            rows = self.runner.public_klines(symbol, limit)
+            rows = self.runner.public_klines(symbol, limit, end_time)
             if rows:
                 return rows
         try:

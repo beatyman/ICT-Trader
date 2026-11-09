@@ -113,6 +113,27 @@ class Observability:
             log.error("failed to enqueue error_event: %s", write_exc)
         return event
 
+    async def engine_timing(self, engine: str, engine_version: str, symbol: str,
+                            interval: str, source_kline_open_time: int,
+                            latency_ms: float, *, bar_count: int = 0,
+                            status: str = "ok", error: str = "") -> None:
+        occurred = utc_ms()
+        raw = f"{engine}|{symbol}|{interval}|{source_kline_open_time}|{occurred}"
+        sample_id = "PERF-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+        self.engine_samples += 1
+        self.metrics.observe("engine_latency_ms", latency_ms)
+        row = (
+            sample_id, engine, engine_version, symbol, interval,
+            ms_to_datetime(source_kline_open_time), float(latency_ms),
+            0.0, 0, int(bar_count), status, error[:400],
+            ms_to_datetime(occurred), datetime.now(timezone.utc),
+        )
+        try:
+            await self.analytics.enqueue("engine_performance", PERF_COLUMNS, [row])
+        except Exception as exc:
+            self.last_error = str(exc)
+            log.error("failed to enqueue engine_performance: %s", exc)
+
     async def engine_run(self, run: EngineRun, context: AnalysisContext,
                          *, bar_count: int = 0, cpu_ms: float = 0.0,
                          memory_bytes: int = 0) -> None:

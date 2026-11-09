@@ -311,6 +311,7 @@ b, strong { font-weight: 650; }
 .instrument-sub { display: flex; align-items: center; gap: 7px; margin-top: 3px; font-family: var(--mono); font-size: 9px; }
 .instrument-sub #chartPrice { font-size: 12px; color: #e6edf7; }
 .chart-source { color: var(--muted-2); letter-spacing: .04em; font-size: 7px; }
+.chart-anchor { font-family: var(--mono); font-size: 7px; color: var(--amber); border: 1px solid rgba(242,184,75,.2); background: var(--amber-soft); border-radius: 3px; padding: 2px 4px; }
 .chart-tools { display: flex; align-items: center; gap: 7px; }
 .tf-tabs { display: flex; gap: 1px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: rgba(0,0,0,.12); }
 .tf { border: 0; background: transparent; color: var(--muted); padding: 4px 8px; font-family: var(--mono); font-size: 8px; border-radius: 4px; }
@@ -423,6 +424,7 @@ b, strong { font-weight: 650; }
   padding: 8px 7px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; transition: .15s ease;
 }
 .signal-item:hover { background: rgba(255,255,255,.025); border-color: rgba(255,255,255,.04); }
+.signal-item.active { background: rgba(242,184,75,.06); border-color: rgba(242,184,75,.18); }
 .signal-arrow { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 5px; font-size: 9px; }
 .signal-arrow.long { color: var(--green); background: var(--green-soft); }
 .signal-arrow.short { color: var(--red); background: var(--red-soft); }

@@ -50,3 +50,10 @@ def test_runner_maps_engine_signal_to_trade_signal(tmp_path, monkeypatch):
     assert signal.grade == 4
     assert signal.checks["sweep"] is True
     assert signal.bar_time == last.open_time
+    assert signal.to_public()["source_kline_open_time"] == last.open_time
+
+    from collections import deque
+    runner.histories["BTCUSDT"] = deque(bars(), maxlen=runner.eval_window)
+    window = runner.frame("BTCUSDT", 240, end_time=last.open_time + 70 * 900_000)
+    assert any(int(b.open_time) == signal.bar_time for b in window)
+    assert window[-1].open_time == last.open_time
