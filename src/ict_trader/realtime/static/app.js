@@ -745,21 +745,147 @@
     $("#chartOhlc").innerHTML = `<span>${prefix}O <b>${fmtPrice(b.open)}</b></span> <span>H <b>${fmtPrice(b.high)}</b></span> <span>L <b>${fmtPrice(b.low)}</b></span> <span>C <b class="${up ? "up" : "down"}">${fmtPrice(b.close)}</b></span>`;
   }
 
-  // ------------------------------------------------------------- canvas chart
-  function setupCanvas() {
-    const wrap = $("#chartWrap");
-    const canvas = $("#chart");
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const w = Math.max(100, wrap.clientWidth);
-    const h = Math.max(100, wrap.clientHeight);
-    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
-      canvas.width = Math.round(w * dpr);
-      canvas.height = Math.round(h * dpr);
+  // ------------------------------------------------------- lightweight charts
+  const lwc = {
+    chart: null, candles: null, volume: null, ema20: null, ema50: null,
+    priceLines: [], seriesKey: "", lastLen: 0, width: 0, height: 0,
+  };
+
+  function chartTime(ms) {
+    return Math.floor(num(ms) / 1000);
+  }
+
+  function chartPrecision() {
+    const last = S.bars[S.bars.length - 1];
+    const p = Math.abs(num(last?.close));
+    if (p >= 1000) return 2;
+    if (p >= 1) return 4;
+    if (p >= 0.01) return 6;
+    return 8;
+  }
+
+  function applyChartTheme() {
+    if (!lwc.chart) return;
+    lwc.chart.applyOptions({
+      layout: { background: { type: "solid", color: "transparent" }, textColor: CHART.axis },
+      grid: { vertLines: { color: CHART.grid }, horzLines: { color: CHART.grid } },
+      rightPriceScale: { borderColor: CHART.grid, textColor: CHART.axis },
+      timeScale: { borderColor: CHART.grid, textColor: CHART.axis },
+      crosshair: {
+        mode: window.LightweightCharts.CrosshairMode.Normal,
+        vertLine: { color: CHART.cross, width: 1, style: 3, labelBackgroundColor: CHART.crossBg },
+        horzLine: { color: CHART.cross, width: 1, style: 3, labelBackgroundColor: CHART.crossBg },
+      },
+    });
+    lwc.candles.applyOptions({
+      upColor: CHART.up, downColor: CHART.down,
+      borderUpColor: CHART.up, borderDownColor: CHART.down,
+      wickUpColor: CHART.up, wickDownColor: CHART.down,
+    });
+    lwc.volume.applyOptions({
+      priceFormat: { type: "volume" },
+    });
+    lwc.ema20.applyOptions({ color: CHART.ema20 });
+    lwc.ema50.applyOptions({ color: CHART.ema50 });
+    lwc.seriesKey = "";
+    drawChart(true);
+  }
+
+  function ensureChart() {
+    if (lwc.chart) {
+      const el = $("#lwcChart");
+      if (lwc.width !== el.clientWidth || lwc.height !== el.clientHeight) {
+        lwc.width = el.clientWidth;
+        lwc.height = el.clientHeight;
+        lwc.chart.applyOptions({ width: lwc.width, height: lwc.height });
+      }
+      return lwc.chart;
     }
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    return { ctx, w, h };
+    if (!window.LightweightCharts) return null;
+    const el = $("#lwcChart");
+    lwc.width = el.clientWidth;
+    lwc.height = el.clientHeight;
+    const chart = window.LightweightCharts.createChart(el, {
+      width: lwc.width,
+      height: lwc.height,
+      layout: {
+        background: { type: "solid", color: "transparent" },
+        textColor: CHART.axis,
+        fontFamily: "Cascadia Code, Consolas, monospace",
+        fontSize: 9,
+      },
+      grid: { vertLines: { color: CHART.grid }, horzLines: { color: CHART.grid } },
+      rightPriceScale: {
+        borderColor: CHART.grid,
+        textColor: CHART.axis,
+        scaleMargins: { top: 0.06, bottom: 0.22 },
+      },
+      timeScale: {
+        borderColor: CHART.grid,
+        timeVisible: true,
+        secondsVisible: false,
+        rightOffset: 4,
+        barSpacing: 5,
+        fixLeftEdge: true,
+        textColor: CHART.axis,
+      },
+      crosshair: {
+        mode: window.LightweightCharts.CrosshairMode.Normal,
+        vertLine: { color: CHART.cross, width: 1, style: 3, labelBackgroundColor: CHART.crossBg },
+        horzLine: { color: CHART.cross, width: 1, style: 3, labelBackgroundColor: CHART.crossBg },
+      },
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+      handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+    });
+    const candles = chart.addCandlestickSeries({
+      upColor: CHART.up, downColor: CHART.down,
+      borderUpColor: CHART.up, borderDownColor: CHART.down,
+      wickUpColor: CHART.up, wickDownColor: CHART.down,
+      priceLineVisible: false,
+      lastValueVisible: true,
+    });
+    const volume = chart.addHistogramSeries({
+      priceFormat: { type: "volume" },
+      priceScaleId: "",
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    chart.priceScale("").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+    const ema20 = chart.addLineSeries({
+      color: CHART.ema20, lineWidth: 1, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    const ema50 = chart.addLineSeries({
+      color: CHART.ema50, lineWidth: 1, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    lwc.chart = chart;
+    lwc.candles = candles;
+    lwc.volume = volume;
+    lwc.ema20 = ema20;
+    lwc.ema50 = ema50;
+    chart.subscribeCrosshairMove(param => {
+      if (!param.time || !param.point) {
+        $("#crosshairTip").style.display = "none";
+        return;
+      }
+      const data = param.seriesData.get(candles);
+      if (!data) return;
+      const tip = $("#crosshairTip");
+      const chg = data.open ? (data.close / data.open - 1) * 100 : 0;
+      tip.innerHTML = `<b>${shortDate(param.time * 1000)}</b>
+        <div class="tip-row"><span>O</span><span>${fmtPrice(data.open)}</span></div>
+        <div class="tip-row"><span>H</span><span>${fmtPrice(data.high)}</span></div>
+        <div class="tip-row"><span>L</span><span>${fmtPrice(data.low)}</span></div>
+        <div class="tip-row"><span>C</span><span style="color:${chg >= 0 ? "var(--green)" : "var(--red)"}">${fmtPrice(data.close)}</span></div>`;
+      tip.style.display = "block";
+      tip.style.left = Math.min(lwc.width - 150, param.point.x + 16) + "px";
+      tip.style.top = Math.max(8, Math.min(lwc.height - 120, param.point.y - 40)) + "px";
+      $("#chartOhlc").innerHTML = `<span>O <b>${fmtPrice(data.open)}</b></span> <span>H <b>${fmtPrice(data.high)}</b></span> <span>L <b>${fmtPrice(data.low)}</b></span> <span>C <b class="${chg >= 0 ? "up" : "down"}">${fmtPrice(data.close)}</b></span>`;
+    });
+    const ro = new ResizeObserver(() => drawChart());
+    ro.observe(el);
+    return chart;
   }
 
   function ema(values, period) {
@@ -775,27 +901,14 @@
     return out;
   }
 
-  function renderNoData(msg) {
-    const { ctx, w, h } = setupCanvas();
-    ctx.strokeStyle = CHART.grid;
-    ctx.lineWidth = 1;
-    for (let i = 1; i < 6; i++) {
-      ctx.beginPath(); ctx.moveTo(10, i * h / 6); ctx.lineTo(w - 64, i * h / 6); ctx.stroke();
-    }
-    ctx.fillStyle = CHART.noData;
-    ctx.font = "10px Cascadia Code, Consolas, monospace";
-    ctx.textAlign = "center";
-    ctx.fillText(msg || "no closed bars yet", w / 2, h / 2);
-  }
-
   function chartLevels() {
     if (!S.snap) return [];
     const pos = (S.snap.positions || []).find(p => p.symbol === S.symbol);
     if (pos) {
       return [
-        { price: pos.entry, color: CHART.entry, label: "ENTRY", dash: [4, 4] },
-        { price: pos.stop, color: CHART.stop, label: "STOP", dash: [4, 4] },
-        { price: pos.target, color: CHART.target, label: "TARGET", dash: [4, 4] },
+        { price: pos.entry, color: CHART.entry, label: "ENTRY", dash: true },
+        { price: pos.stop, color: CHART.stop, label: "STOP", dash: true },
+        { price: pos.target, color: CHART.target, label: "TARGET", dash: true },
       ];
     }
     const anchored = S.anchorSignalId
@@ -806,223 +919,120 @@
     );
     if (sig) {
       return [
-        { price: sig.entry, color: CHART.entry, label: "SIGNAL", dash: [3, 5] },
-        { price: sig.stop, color: CHART.stop, label: "SL", dash: [3, 5] },
-        { price: sig.target, color: CHART.target, label: "TP", dash: [3, 5] },
+        { price: sig.entry, color: CHART.entry, label: "SIGNAL", dash: true },
+        { price: sig.stop, color: CHART.stop, label: "SL", dash: true },
+        { price: sig.target, color: CHART.target, label: "TP", dash: true },
       ];
     }
     return [];
   }
 
-  function drawChart() {
-    if (!S.chartLoaded || !S.bars.length) {
-      renderNoData(S.phase === "ready" ? "loading closed bars" : "engine booting");
-      return;
+  function applyChartAnnotations(bars) {
+    const lines = chartLevels();
+    for (const line of lwc.priceLines) lwc.candles.removePriceLine(line);
+    lwc.priceLines = [];
+    for (const l of lines) {
+      if (!Number.isFinite(Number(l.price)) || Number(l.price) <= 0) continue;
+      lwc.priceLines.push(lwc.candles.createPriceLine({
+        price: Number(l.price), color: l.color, lineWidth: 1,
+        lineStyle: window.LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true, title: l.label,
+      }));
     }
-    const { ctx, w, h } = setupCanvas();
-    $("#chartLoading").classList.add("hidden");
-    const bars = S.bars.slice(-190);
-    const m = { l: 12, r: 66, t: 16, b: 25 };
-    const volH = 43;
-    const priceH = h - m.t - m.b - volH - 9;
-    const plotW = w - m.l - m.r;
-    const step = plotW / bars.length;
-    const bodyW = Math.max(1.6, Math.min(8, step * 0.62));
-
-    const levels = chartLevels();
-    let lo = Math.min(...bars.map(b => num(b.low)));
-    let hi = Math.max(...bars.map(b => num(b.high)));
-    levels.forEach(l => {
-      if (l.price > 0) { lo = Math.min(lo, l.price); hi = Math.max(hi, l.price); }
-    });
-    const pad = (hi - lo) * 0.09 || hi * 0.01 || 1;
-    lo -= pad;
-    hi += pad;
-    const yFor = p => m.t + (hi - p) / (hi - lo) * priceH;
-    const xFor = i => m.l + (i + 0.5) * step;
-    const maxVol = Math.max(...bars.map(b => num(b.volume)));
-
-    // Grid + price axis.
-    ctx.font = "9px Cascadia Code, Consolas, monospace";
-    ctx.textBaseline = "middle";
-    for (let i = 0; i <= 5; i++) {
-      const y = m.t + (priceH / 5) * i;
-      ctx.strokeStyle = i === 5 ? CHART.gridStrong : CHART.grid;
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(m.l, Math.round(y) + .5); ctx.lineTo(m.l + plotW, Math.round(y) + .5); ctx.stroke();
-      const price = hi - (hi - lo) * (i / 5);
-      ctx.fillStyle = CHART.axis;
-      ctx.textAlign = "left";
-      ctx.fillText(fmtPrice(price), m.l + plotW + 7, y);
-    }
-
-    // Vertical time grid.
-    const gridEvery = Math.max(24, Math.floor(bars.length / 6));
-    for (let i = gridEvery; i < bars.length; i += gridEvery) {
-      const x = xFor(i);
-      ctx.strokeStyle = CHART.grid;
-      ctx.beginPath(); ctx.moveTo(x, m.t); ctx.lineTo(x, m.t + priceH); ctx.stroke();
-    }
-
-    // Volume.
-    const volTop = m.t + priceH + 10;
-    bars.forEach((b, i) => {
-      const up = b.close >= b.open;
-      const vh = Math.max(1, (num(b.volume) / (maxVol || 1)) * volH);
-      ctx.fillStyle = up ? CHART.volUp : CHART.volDown;
-      ctx.fillRect(xFor(i) - bodyW / 2, volTop + volH - vh, bodyW, vh);
-    });
-    ctx.strokeStyle = CHART.grid;
-    ctx.beginPath(); ctx.moveTo(m.l, volTop - 5); ctx.lineTo(m.l + plotW, volTop - 5); ctx.stroke();
-
-    // Candles.
-    bars.forEach((b, i) => {
-      const up = b.close >= b.open;
-      const color = up ? CHART.up : CHART.down;
-      const x = xFor(i);
-      ctx.strokeStyle = color;
-      ctx.fillStyle = up ? CHART.upFill : CHART.downFill;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(Math.round(x) + .5, yFor(num(b.high)));
-      ctx.lineTo(Math.round(x) + .5, yFor(num(b.low)));
-      ctx.stroke();
-      const yo = yFor(num(b.open)), yc = yFor(num(b.close));
-      const top = Math.min(yo, yc);
-      const bh = Math.max(1.2, Math.abs(yc - yo));
-      ctx.fillRect(x - bodyW / 2, top, bodyW, bh);
-    });
-
-    // EMAs.
-    if (S.ema) {
-      const closes = bars.map(b => num(b.close));
-      [[20, CHART.ema20], [50, CHART.ema50]].forEach(([period, color]) => {
-        const vals = ema(closes, period);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.1;
-        ctx.beginPath();
-        vals.forEach((v, i) => {
-          const x = xFor(i), y = yFor(v);
-          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        });
-        ctx.stroke();
-      });
-    }
-
-    // Position / setup levels.
-    levels.forEach(level => {
-      if (!(level.price > 0)) return;
-      const y = yFor(level.price);
-      if (y < m.t || y > m.t + priceH) return;
-      ctx.save();
-      ctx.setLineDash(level.dash);
-      ctx.strokeStyle = level.color;
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(m.l, y); ctx.lineTo(m.l + plotW, y); ctx.stroke();
-      ctx.restore();
-      ctx.fillStyle = level.color;
-      ctx.textAlign = "right";
-      ctx.font = "7px Cascadia Code, Consolas, monospace";
-      ctx.fillText(level.label, m.l + plotW - 4, y - 7);
-    });
-
-    // Selected signal must point to the exact source K-line open_time.
     const anchor = S.anchorSignalId
       ? (S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
       : null;
-    if (anchor) {
-      const idx = bars.findIndex(b => num(b.open_time) === num(anchor.bar_time));
-      if (idx >= 0) {
-        const x = xFor(idx);
-        ctx.save();
-        ctx.setLineDash([2, 4]);
-        ctx.strokeStyle = CHART.entry;
-        ctx.beginPath(); ctx.moveTo(x, m.t); ctx.lineTo(x, m.t + priceH + volH + 7); ctx.stroke();
-        ctx.restore();
-        const y = yFor(num(anchor.entry));
-        ctx.fillStyle = CHART.sig;
-        ctx.beginPath();
-        ctx.moveTo(x, y - 9);
-        ctx.lineTo(x - 4, y - 16);
-        ctx.lineTo(x + 4, y - 16);
-        ctx.closePath(); ctx.fill();
-        ctx.font = "bold 7px Cascadia Code, Consolas, monospace";
-        ctx.textAlign = "left";
-        ctx.fillText("SIG", x + 5, m.t + 8);
-      }
-    }
-
-    // Last price tag.
-    const last = bars[bars.length - 1];
-    const lastY = yFor(num(last.close));
-    const upLast = last.close >= last.open;
-    ctx.save();
-    ctx.setLineDash([2, 4]);
-    ctx.strokeStyle = upLast ? CHART.upFill : CHART.downFill;
-    ctx.beginPath(); ctx.moveTo(m.l, lastY); ctx.lineTo(m.l + plotW, lastY); ctx.stroke();
-    ctx.restore();
-    const tagW = 58, tagH = 16;
-    ctx.fillStyle = upLast ? CHART.up : CHART.down;
-    ctx.fillRect(m.l + plotW + 4, lastY - tagH / 2, tagW, tagH);
-    ctx.fillStyle = CHART.tagText;
-    ctx.font = "bold 9px Cascadia Code, Consolas, monospace";
-    ctx.textAlign = "center";
-    ctx.fillText(fmtPrice(last.close), m.l + plotW + 4 + tagW / 2, lastY);
-
-    // Time labels.
-    ctx.fillStyle = CHART.axisFaint;
-    ctx.font = "8px Cascadia Code, Consolas, monospace";
-    ctx.textAlign = "center";
-    for (let i = 0; i < bars.length; i += gridEvery) {
-      if (i === 0) continue;
-      const t = new Date(num(bars[i].open_time));
-      const label = S.tf === "1d"
-        ? t.toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "Asia/Shanghai" })
-        : t.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Shanghai" });
-      ctx.fillText(label, xFor(i), h - 9);
-    }
-
-    // Crosshair.
-    if (S.mouse && S.mouse.index >= 0 && S.mouse.index < bars.length) {
-      const i = S.mouse.index;
-      const b = bars[i];
-      const x = xFor(i);
-      const y = Math.max(m.t, Math.min(m.t + priceH, S.mouse.y));
-      ctx.save();
-      ctx.setLineDash([3, 4]);
-      ctx.strokeStyle = CHART.cross;
-      ctx.beginPath(); ctx.moveTo(x, m.t); ctx.lineTo(x, m.t + priceH + volH + 7); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(m.l, y); ctx.lineTo(m.l + plotW, y); ctx.stroke();
-      ctx.restore();
-      const price = hi - (y - m.t) / priceH * (hi - lo);
-      ctx.fillStyle = CHART.crossBg;
-      ctx.fillRect(m.l + plotW + 3, y - 8, 60, 16);
-      ctx.fillStyle = CHART.crossText;
-      ctx.font = "8px Cascadia Code, Consolas, monospace";
-      ctx.textAlign = "center";
-      ctx.fillText(fmtPrice(price), m.l + plotW + 33, y);
-
-      const tip = $("#crosshairTip");
-      const chg = (b.close / b.open - 1) * 100;
-      tip.innerHTML = `<b>${shortDate(b.open_time)}</b>
-        <div class="tip-row"><span>O</span><span>${fmtPrice(b.open)}</span></div>
-        <div class="tip-row"><span>H</span><span>${fmtPrice(b.high)}</span></div>
-        <div class="tip-row"><span>L</span><span>${fmtPrice(b.low)}</span></div>
-        <div class="tip-row"><span>C</span><span style="color:${chg >= 0 ? "var(--green)" : "var(--red)"}">${fmtPrice(b.close)}</span></div>
-        <div class="tip-row"><span>VOL</span><span>${fmtMoney(b.volume, 0)}</span></div>`;
-      tip.style.display = "block";
-      const left = Math.min(w - 150, x + 16);
-      const top = Math.max(8, Math.min(h - 128, S.mouse.y - 40));
-      tip.style.left = left + "px";
-      tip.style.top = top + "px";
-      $("#chartOhlc").innerHTML = `<span>O <b>${fmtPrice(b.open)}</b></span> <span>H <b>${fmtPrice(b.high)}</b></span> <span>L <b>${fmtPrice(b.low)}</b></span> <span>C <b class="${chg >= 0 ? "up" : "down"}">${fmtPrice(b.close)}</b></span>`;
+    const markerBar = anchor ? bars.find(b => chartTime(b.open_time) === chartTime(anchor.bar_time)) : null;
+    if (anchor && markerBar) {
+      lwc.candles.setMarkers([{
+        time: chartTime(markerBar.open_time),
+        position: anchor.direction === "long" ? "belowBar" : "aboveBar",
+        color: CHART.sig,
+        shape: anchor.direction === "long" ? "arrowUp" : "arrowDown",
+        text: "SIG",
+      }]);
     } else {
-      $("#crosshairTip").style.display = "none";
+      lwc.candles.setMarkers([]);
+    }
+  }
+
+  function setChartData(bars, fit) {
+    const precision = chartPrecision();
+    const minMove = Math.pow(10, -precision);
+    lwc.candles.applyOptions({
+      priceFormat: { type: "price", precision, minMove },
+    });
+    lwc.candles.setData(bars.map(b => ({
+      time: chartTime(b.open_time),
+      open: num(b.open), high: num(b.high), low: num(b.low), close: num(b.close),
+    })));
+    lwc.volume.setData(bars.map(b => ({
+      time: chartTime(b.open_time), value: num(b.volume),
+      color: num(b.close) >= num(b.open) ? CHART.volUp : CHART.volDown,
+    })));
+    const closes = bars.map(b => num(b.close));
+    const e20 = ema(closes, 20);
+    const e50 = ema(closes, 50);
+    lwc.ema20.setData(S.ema ? bars.map((b, i) => ({ time: chartTime(b.open_time), value: e20[i] })).filter(x => x.value !== null && Number.isFinite(x.value)) : []);
+    lwc.ema50.setData(S.ema ? bars.map((b, i) => ({ time: chartTime(b.open_time), value: e50[i] })).filter(x => x.value !== null && Number.isFinite(x.value)) : []);
+    applyChartAnnotations(bars);
+    lwc.lastLen = bars.length;
+    if (fit) lwc.chart.timeScale().fitContent();
+  }
+
+  function drawChart(force = false) {
+    if (!S.chartLoaded || !S.bars.length) {
+      renderNoData(S.phase === "ready" ? "waiting for closed bars" : "engine booting");
+      return;
+    }
+    if (!ensureChart()) return;
+    const bars = S.bars;
+    const last = bars[bars.length - 1];
+    const key = [S.symbol, S.tf, S.anchorSignalId || "", S.ema].join("|");
+    const rebuild = force || lwc.seriesKey !== key || bars.length < lwc.lastLen || bars.length > lwc.lastLen + 1;
+    if (rebuild) {
+      setChartData(bars, lwc.seriesKey !== key);
+      lwc.seriesKey = key;
+    } else {
+      const t = chartTime(last.open_time);
+      lwc.candles.update({
+        time: t, open: num(last.open), high: num(last.high),
+        low: num(last.low), close: num(last.close),
+      });
+      lwc.volume.update({
+        time: t, value: num(last.volume),
+        color: num(last.close) >= num(last.open) ? CHART.volUp : CHART.volDown,
+      });
+      const closes = bars.map(b => num(b.close));
+      const e20 = ema(closes, 20);
+      const e50 = ema(closes, 50);
+      if (S.ema && Number.isFinite(e20[e20.length - 1])) lwc.ema20.update({ time: t, value: e20[e20.length - 1] });
+      if (S.ema && Number.isFinite(e50[e50.length - 1])) lwc.ema50.update({ time: t, value: e50[e50.length - 1] });
+      lwc.lastLen = bars.length;
+      applyChartAnnotations(bars);
+    }
+    $("#chartLoading").classList.add("hidden");
+    $("#chartEmpty")?.classList.add("hidden");
+  }
+
+  function renderNoData(msg) {
+    $("#crosshairTip").style.display = "none";
+    const overlay = $("#chartLoading");
+    if (overlay) {
+      overlay.classList.remove("hidden");
+      overlay.innerHTML = `<span></span>${escapeHtml(msg || "no data")}`;
+    }
+    if (ensureChart()) {
+      lwc.candles.setData([]);
+      lwc.volume.setData([]);
+      lwc.ema20.setData([]);
+      lwc.ema50.setData([]);
+      lwc.candles.setMarkers([]);
+      lwc.lastLen = 0;
     }
   }
 
   function maybeRedraw(snap) {
-    // Redraw only when a visual input changes, not on every 1s heartbeat.
     const pos = (snap.positions || []).find(p => p.symbol === S.symbol);
     const sig = (snap.signals || []).find(s => s.symbol === S.symbol && s.status === "ARMED");
     const lastBar = S.bars[S.bars.length - 1];
@@ -1033,23 +1043,8 @@
     }
   }
 
-  function chartMouse(evt) {
-    if (!S.chartLoaded) return;
-    const wrap = $("#chartWrap");
-    const rect = wrap.getBoundingClientRect();
-    const x = evt.clientX - rect.left;
-    const y = evt.clientY - rect.top;
-    const m = { l: 12, r: 66, t: 16, b: 25 };
-    const plotW = rect.width - m.l - m.r;
-    const bars = S.bars.slice(-190);
-    const step = plotW / bars.length;
-    const idx = Math.floor((x - m.l) / step);
-    if (idx < 0 || idx >= bars.length || x > m.l + plotW) {
-      S.mouse = null;
-    } else {
-      S.mouse = { index: idx, x, y };
-    }
-    drawChart();
+  function chartMouse() {
+    // Crosshair/tooltip is owned by Lightweight Charts.
   }
 
   // ------------------------------------------------------------- AI review
@@ -1214,6 +1209,7 @@
         loadBars();
       } else {
         drawChart();
+        if (lwc.chart) lwc.chart.timeScale().fitContent();
       }
     });
     $("#indicatorBtn").addEventListener("click", e => {
@@ -1307,6 +1303,7 @@
       try { localStorage.setItem("ict-theme", next); } catch (_) { /* private mode */ }
     }
     CHART = themeColors();
+    applyChartTheme();
     const btn = $("#themeBtn");
     if (btn) {
       btn.innerHTML = next === "light"

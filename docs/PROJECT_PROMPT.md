@@ -64,7 +64,7 @@ ICT/SMC、Ichimoku、Wyckoff、缠论，以及 LLM API 的可靠性边界。
 - SQLite WAL：ClickHouse 批量写失败落盘重试，带死信；
 - ICT 冻结 setup 的实时适配：只对已收盘 bar 计算，规则信号来自真实 K 线；
 - Paper broker：固定分数风险、手续费、滑点、stop/target/time stop、手动 flatten；
-- FastAPI + WebSocket + 原生 Canvas 暗色仪表盘；
+- FastAPI + WebSocket + 双主题 Lightweight Charts 仪表盘；
 - DeepSeek API **只读风险审查**：`deepseek-flash`（展示名
   `DeepSeek-V4.1-Flash`），按需触发，不参与下单；
 - Docker Compose、内存限制、健康检查、优雅关闭；

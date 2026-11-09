@@ -323,7 +323,7 @@ b, strong { font-weight: 650; }
 .tool-btn.active { color: var(--cyan); border-color: rgba(84,200,248,.18); background: rgba(84,200,248,.055); }
 .tool-btn.icon-only { padding: 0 7px; }
 .chart-wrap { position: relative; height: 302px; background: linear-gradient(180deg, rgba(5,9,14,.24), rgba(5,9,14,.04)); }
-#chart { width: 100%; height: 100%; display: block; }
+#lwcChart { width: 100%; height: 100%; display: block; }
 .chart-ohlc { position: absolute; left: 14px; top: 9px; font-family: var(--mono); font-size: 7.5px; color: var(--muted-2); letter-spacing: .04em; pointer-events: none; }
 .chart-ohlc b { font-weight: 500; margin-left: 4px; }
 .chart-ohlc .up { color: var(--green); } .chart-ohlc .down { color: var(--red); }

@@ -1,4 +1,4 @@
-# UI 与双主题设计（原生 Canvas，无 Node 构建）
+# UI 与双主题设计（Lightweight Charts，无 Node 构建）
 
 > 现状：单页暗色终端，`static/index.html` 14.5 KB、`styles.css` 41.2 KB、`app.js` 46.1 KB，
 > 无构建步骤、无第三方图表库。**双主题尚未实现**（无 `data-theme`、无 `localStorage`），
@@ -9,9 +9,8 @@
 
 ## 1. 技术选型（已定，不再摇摆）
 
-- 保留现有 Canvas 2D 渲染器；**不引入** ECharts / TradingView / Node 构建；
-- 后端只下发聚合后的 candles + overlays；前端不重算指标（当前 `app.js` 里的 EMA20/50
-  是浏览器内计算，属于已知偏差，目标期改为后端 overlay 数组）；
+- 使用 **Lightweight Charts**（本地 vendored）；不引入 ECharts / Node 构建；
+- 后端下发 candles + levels/signals；EMA overlay 仍由浏览器计算，目标期改为后端 overlay；
 - 双主题 = CSS 设计 token + `localStorage` 持久化 + `data-theme` 属性切换，切换不重载；
 - 首屏仍是纯静态文件，FastAPI 直接 `FileResponse`，无 SSR。
 

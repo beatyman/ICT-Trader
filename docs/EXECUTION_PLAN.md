@@ -29,7 +29,7 @@
 | 策略 | 单一 ICT frozen setup，只对 closed 15m 计算 |
 | AI | DeepSeek-V4.1-Flash 按需 review，不是 decision pipeline |
 | 执行 | paper broker，无真实下单 |
-| UI | 暗色 Canvas 单页，WebSocket 1Hz |
+| UI | 暗/浅双主题，Lightweight Charts 单页，WebSocket 1Hz |
 | 观测 | 进程内 metrics + event log，无 error_events 表 |
 | 测试 | 244+，以实际运行结果为准 |
 | 压测 | 6 symbols × 4 intervals Demo；未做 50×3 正式压测 |
@@ -86,8 +86,8 @@ docker stats --no-stream
 
 **技术选型已定，评审不得反复摇摆：**
 
-- 图表继续使用**现有原生 Canvas 2D 渲染器**，不引入 ECharts/TradingView/Node 构建；
-  后端只下发聚合后的 candles + overlays，前端不重算指标；
+- 图表使用 **TradingView Lightweight Charts**（本地 vendored，无 Node 构建）；
+  后端下发 candles/levels/signals，前端保留指标 overlay 计算；
 - 双主题通过 CSS 设计 token 与 `localStorage` 持久化，切换不重载；
 - AI provider 采用 OpenAI-compatible 适配层，DeepSeek V4.1 Flash 为主，
   第二 provider 通过环境变量接入；当前只有 DeepSeek key 时，

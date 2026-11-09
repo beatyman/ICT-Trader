@@ -175,7 +175,7 @@ src/ict_trader/realtime/
   broker.py              fixed-fractional paper broker, stops/targets/time stop
   metrics.py             counters, P50/P99 latency rings, bounded event log
   api.py                 FastAPI JSON + WebSocket dashboard, paper flatten
-  static/                dependency-free HTML/CSS/Canvas trading terminal
+  static/                HTML/CSS + vendored Lightweight Charts terminal
 ```
 
 ## 3. Data contracts
@@ -264,7 +264,7 @@ build_setup(df_15m, result, SetupConfig(market="crypto", stack=...))
 
 ## 6. Dashboard
 
-`http://127.0.0.1:8080` (FastAPI + vanilla Canvas, no Node build):
+`http://127.0.0.1:8080` (FastAPI + vendored Lightweight Charts, no Node build):
 
 * 24h watchlist with sparklines and 15m / 1H / 4H / 1D chart tabs;
 * candlesticks, EMA20/50, volume, active entry/stop/target levels, crosshair;
@@ -284,8 +284,10 @@ available with `?theme=light` or `?theme=dark`.
 ![Light theme](assets/realtime-light-theme.png)
 
 The chart renderer reads the active palette (grid, candles, EMA, volume,
-crosshair, signal levels) from the same theme state, so canvas and CSS stay in
-sync. The chart does not require a page reload or a second chart instance.
+crosshair, signal levels) from the same theme state, so the chart and CSS stay
+in sync. Lightweight Charts is vendored at `static/vendor/`; it supports native
+pan/zoom/crosshair, while the backend remains the source of candles, levels and
+signals. The chart does not require a page reload or a second chart instance.
 
 ### Live price parity check
 
