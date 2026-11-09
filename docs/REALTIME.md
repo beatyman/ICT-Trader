@@ -17,7 +17,7 @@ per-stream queue → gap state machine → REST backfill / replay
 It is **paper-only by design**. There is no exchange order API key, no order
 routing, and no claim that the frozen setup is profitable. The engine refuses
 to start if `PAPER_TRADE=false`. An optional server-side DeepSeek V4.1 Flash
-key is used only for on-demand risk review.
+key is used for on-demand review and for async auto-review of new high-confidence setups.
 
 ![Realtime paper terminal](assets/realtime-dashboard.png)
 
@@ -125,9 +125,8 @@ production database was rebuilt from live REST/WS data; no demo rows remain.
 
 The engine is realtime for market data and risk exits, but the strategy is
 deliberately closed-bar. Calling the strategy on every tick would create
-repainting/look-ahead signals. If automatic AI decisions are enabled later, the
-trigger must be one high-confidence `actionable` signal, not every closed bar,
-with a per-symbol cooldown and concurrency limit.
+repainting/look-ahead signals. Automatic AI review is limited to one new
+high-confidence setup per symbol per cooldown; it is async and cannot execute.
 
 ## 1.3 Multi-engine registry and future-only setups
 
@@ -350,8 +349,9 @@ Copy-Item .env.example .env
 # DEEPSEEK_MODEL=deepseek-flash   # API id for DeepSeek-V4.1-Flash
 ```
 
-The model is called only when the operator presses `AI`/`REVIEW`; it receives a
-compact snapshot (last 50 closed bars, selected-symbol signals, positions,
+The model is called manually via `AI`/`REVIEW` and automatically for a
+high-confidence new setup; it receives a compact snapshot (last 50 closed bars,
+selected-symbol signals/setup, positions,
 account, gap/latency health) and returns structured JSON.
 
 * model: API id `deepseek-flash` (DeepSeek-V4.1-Flash), `reasoning_effort=low`,
