@@ -364,6 +364,7 @@ class ClickHouseStore:
             "trade_id", "signal_id", "symbol", "interval", "direction", "entry_time",
             "exit_time", "entry", "exit", "stop", "target", "quantity", "notional",
             "pnl", "fees", "r_multiple", "exit_reason", "created_at",
+            "mfe_r", "mae_r",
         ]
         values = [(
             trade["trade_id"], trade["signal_id"], trade["symbol"], trade["interval"],
