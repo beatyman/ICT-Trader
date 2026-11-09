@@ -164,31 +164,37 @@
       detached() {},
       paneViews() { return views; },
       priceAxisViews() {
-        return (state.data.axisLines || []).map(l => ({
-          coordinate: () => state.series
-            ? state.series.priceToCoordinate(Number(l.price)) : null,
-          text: () => l.axisLabelText || `${l.label} ${Number(l.price).toFixed(2)}`,
-          textColor: () => l.color || "#c9d2dc",
-          backColor: () => "rgba(7,12,18,.92)",
-          visible: () => true,
-          renderer: () => ({
-            draw: target => target.useBitmapCoordinateSpace(scope => {
-              const ctx = scope.context;
-              const y = (state.series?.priceToCoordinate(Number(l.price)) ?? -1)
-                * scope.verticalPixelRatio;
-              if (y < 0 || y > scope.bitmapSize.height) return;
-              const text = l.axisLabelText || `${l.label} ${Number(l.price).toFixed(2)}`;
-              ctx.font = `${7 * scope.horizontalPixelRatio}px Cascadia Code, Consolas, monospace`;
-              const w = ctx.measureText(text).width + 6 * scope.horizontalPixelRatio;
-              ctx.fillStyle = "rgba(7,12,18,.92)";
-              ctx.fillRect(0, y - 8 * scope.verticalPixelRatio, w, 13 * scope.verticalPixelRatio);
-              ctx.fillStyle = l.color || "#c9d2dc";
-              ctx.textAlign = "left";
-              ctx.textBaseline = "middle";
-              ctx.fillText(text, 3 * scope.horizontalPixelRatio, y);
-            }),
-          }),
-        }));
+        return (state.data.axisLines || []).map(l => {
+          const view = {
+            coordinate: () => state.series
+              ? state.series.priceToCoordinate(Number(l.price)) : null,
+            text: () => l.axisLabelText || `${l.label} ${Number(l.price).toFixed(2)}`,
+            textColor: () => l.color || "#c9d2dc",
+            backColor: () => "rgba(7,12,18,.92)",
+            visible: () => true,
+          };
+          view.renderer = () => {
+            const y = view.coordinate();
+            return {
+              draw: target => target.useBitmapCoordinateSpace(scope => {
+                if (y == null) return;
+                const ctx = scope.context;
+                const py = y * scope.verticalPixelRatio;
+                if (py < 0 || py > scope.bitmapSize.height) return;
+                const text = view.text();
+                ctx.font = `${7 * scope.horizontalPixelRatio}px Cascadia Code, Consolas, monospace`;
+                const w = ctx.measureText(text).width + 6 * scope.horizontalPixelRatio;
+                ctx.fillStyle = view.backColor();
+                ctx.fillRect(0, py - 8 * scope.verticalPixelRatio, w, 13 * scope.verticalPixelRatio);
+                ctx.fillStyle = view.textColor();
+                ctx.textAlign = "left";
+                ctx.textBaseline = "middle";
+                ctx.fillText(text, 3 * scope.horizontalPixelRatio, py);
+              }),
+            };
+          };
+          return view;
+        });
       },
       updateAllViews() {},
       setData(data) {
