@@ -65,6 +65,7 @@ class Setup:
     resonance_breakdown: dict[str, Any] = field(default_factory=dict)
     structural_invalidation_price: float | None = None
     structural_invalidation_status: str = ""
+    structure_bias: str = "neutral"
 
     @property
     def entry(self) -> float:
@@ -120,6 +121,7 @@ class Setup:
             "resonance_breakdown": self.resonance_breakdown,
             "structural_invalidation_price": self.structural_invalidation_price,
             "structural_invalidation_status": self.structural_invalidation_status,
+            "structure_bias": self.structure_bias,
         }
 
     def setup_row(self, ingested_at: datetime) -> tuple:
@@ -172,10 +174,15 @@ class SetupManager:
 
     async def on_signal(self, signal: EngineSignal, *, now: int | None = None,
                         resonance: Any | None = None,
-                        min_rr: float = 0.0) -> Setup | None:
+                        min_rr: float = 0.0,
+                        structure_bias: str | None = None) -> Setup | None:
         if signal.engine == "ict":
             return None
         now = now or signal.created_at
+        if structure_bias and structure_bias != "neutral":
+            want = "bullish" if signal.direction.value == "long" else "bearish"
+            if structure_bias != want:
+                return None
         setup = self._setups.get("SET-" + signal.signal_id[4:])
         if setup is not None:
             return setup
@@ -197,9 +204,13 @@ class SetupManager:
             signal_ids=[signal.signal_id],
             engine_signals=[signal.to_public()],
             resonance_score=int(getattr(resonance, "resonance_score", 0)),
-            resonance_breakdown=dict(getattr(resonance, "breakdown", {}) or {}),
+            resonance_breakdown={
+                **dict(getattr(resonance, "breakdown", {}) or {}),
+                "ltf_structure": structure_bias or "neutral",
+            },
             structural_invalidation_price=signal.evidence_plain().get(
                 "structural_invalidation_price"),
+            structure_bias=structure_bias or "neutral",
         )
         if setup.target <= 0 or setup.rr < min_rr:
             return None

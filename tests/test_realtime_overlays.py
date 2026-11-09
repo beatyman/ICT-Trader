@@ -64,3 +64,21 @@ def test_ict_arrays_lifecycle_and_rows():
         assert a.array_id.startswith("ARR-")
         assert len(a.row()) == 15
         assert a.price_upper >= a.price_lower
+
+
+def test_sweep_events_have_type_and_expiry():
+    from ict_trader.realtime.analysis.sweeps import build_sweep_events
+
+    df = frame(80)
+    for i in range(8, 13):
+        df.loc[i, ["open", "high", "low", "close"]] = [99.0, 99.0, 98.0, 98.5]
+    df.loc[10, "high"] = 100.0
+    df.loc[15, ["open", "high", "low", "close"]] = [99.0, 101.0, 98.5, 99.2]
+    events = build_sweep_events(df, ttl_bars=5)
+    bsl = [e for e in events if e.sweep_type == "BSL"]
+    assert bsl
+    assert bsl[-1].direction == "bearish"
+    assert bsl[-1].expires_at > bsl[-1].time
+    assert bsl[-1].reclaim_strength > 0
+    # The event is older than its TTL by the end of this frame.
+    assert bsl[-1].active is False

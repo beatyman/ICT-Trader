@@ -129,3 +129,23 @@ def test_short_waits_for_upper_edge_and_uses_actual_fill():
         assert setup.rr > 2.0
 
     asyncio.run(run())
+
+
+def test_setup_requires_current_ltf_structure_alignment():
+    rows = []
+
+    async def persist_setup(row):
+        rows.append(row)
+
+    async def persist_event(row):
+        rows.append(row)
+
+    async def run():
+        manager = SetupManager(persist_setup, persist_event)
+        blocked = await manager.on_signal(signal(), structure_bias="bearish")
+        assert blocked is None
+        allowed = await manager.on_signal(signal(), structure_bias="bullish")
+        assert allowed is not None
+        assert allowed.structure_bias == "bullish"
+
+    asyncio.run(run())

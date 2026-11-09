@@ -43,7 +43,9 @@ def build_ict_overlays(frame: pd.DataFrame, *, max_fvg: int = 8,
     rects: list[dict[str, Any]] = []
 
     def add(kind: str, direction: str, start_ms: int, low: float, high: float,
-            label: str, end_ms: int = end_time) -> None:
+            label: str, end_ms: int | None = None) -> None:
+        if end_ms is None:
+            end_ms = min(end_time, start_ms + 12 * step)
         rects.append({
             "kind": kind, "direction": direction,
             "start_time": start_ms, "end_time": end_ms,
@@ -78,9 +80,11 @@ def build_ict_overlays(frame: pd.DataFrame, *, max_fvg: int = 8,
             min(float(prev["open"]), float(prev["close"]), float(prev["low"])),
             max(float(prev["open"]), float(prev["close"]), float(prev["high"])), "OB")
 
+    from .analysis.sweeps import build_sweep_events
     fvg = [r for r in rects if r["kind"] in {"FVG", "IFVG"}][-max_fvg:]
     ob = [r for r in rects if r["kind"] == "OB"][-max_ob:]
-    return {"rectangles": fvg + ob}
+    sweeps = [e.to_public() for e in build_sweep_events(df)][-12:]
+    return {"rectangles": fvg + ob, "sweeps": sweeps}
 
 
 def overlays_public(overlays: dict[str, Any]) -> dict[str, Any]:
@@ -92,4 +96,11 @@ def overlays_public(overlays: dict[str, Any]) -> dict[str, Any]:
             "start_time": int(r["start_time"] / 1000),
             "end_time": int(r["end_time"] / 1000),
         })
-    return {"rectangles": out, "source": "backend"}
+    sweeps = []
+    for e in overlays.get("sweeps", []):
+        sweeps.append({
+            **e,
+            "time": int(e["time"] / 1000),
+            "expires_at": int(e["expires_at"] / 1000),
+        })
+    return {"rectangles": out, "sweeps": sweeps, "source": "backend"}

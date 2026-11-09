@@ -138,7 +138,8 @@
     const addRect = (kind, direction, startTime, low, high, label, endTime = end) => {
       const colors = palette(direction);
       rectangles.push({
-        kind, direction, startTime, endTime, low, high,
+        kind, direction, startTime,
+        endTime: Math.min(endTime, startTime + 12 * step), low, high,
         fill: colors.fill, border: colors.border, label, labelColor: colors.labelColor,
       });
     };
@@ -394,6 +395,15 @@
       const candidateH = hMap.get(i);
       const candidateL = lMap.get(i);
       const b = bars[i], c = num(b.close), h = num(b.high), l = num(b.low);
+      const recent = bars.slice(Math.max(startIdx, i - 20), i);
+      const fallbackH = recent.length >= 5 ? Math.max(...recent.map(x => num(x.high))) : null;
+      const fallbackL = recent.length >= 5 ? Math.min(...recent.map(x => num(x.low))) : null;
+      if (!swingH && fallbackH != null && h > fallbackH && c < fallbackH) {
+        markers.push({ time: timeOf(b.open_time), position: "aboveBar", shape: "circle", color: "#ef5350", text: "BSL Sweep", kind: "BSL_SWEEP", direction: "bearish" });
+      }
+      if (!swingL && fallbackL != null && l < fallbackL && c > fallbackL) {
+        markers.push({ time: timeOf(b.open_time), position: "belowBar", shape: "circle", color: "#26a69a", text: "SSL Sweep", kind: "SSL_SWEEP", direction: "bullish" });
+      }
       if (swingH && i > swingH.i) {
         if (h > swingH.price && c < swingH.price) {
           markers.push({ time: timeOf(b.open_time), position: "aboveBar", shape: "circle", color: "#ef5350", text: "BSL Sweep", kind: "BSL_SWEEP", direction: "bearish" });
@@ -401,7 +411,7 @@
         } else if (c > swingH.price) {
           const kind = trend < 0 ? "MSS" : "BOS";
           markers.push({ time: timeOf(b.open_time), position: "belowBar", shape: kind === "BOS" ? "square" : "arrowUp", color: "#26a69a", text: kind, kind, direction: "bullish" });
-          trend = 1; swingH = null;
+          trend = 1;
         }
       }
       if (swingL && i > swingL.i) {
@@ -411,7 +421,7 @@
         } else if (c < swingL.price) {
           const kind = trend > 0 ? "MSS" : "BOS";
           markers.push({ time: timeOf(b.open_time), position: "aboveBar", shape: kind === "BOS" ? "square" : "arrowDown", color: "#ef5350", text: kind, kind, direction: "bearish" });
-          trend = -1; swingL = null;
+          trend = -1;
         }
       }
       if (candidateH) swingH = candidateH;

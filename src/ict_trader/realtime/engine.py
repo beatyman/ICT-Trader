@@ -602,6 +602,8 @@ class RealtimeEngine:
             engine_ids=["ichimoku", "wyckoff", "chan"],
         )
         from .analysis.auxiliary import build_auxiliary_context
+        from .analysis.structure import structure_bias
+        structure = structure_bias(frame)
         biases = {"chan": "neutral", "ichimoku": "neutral", "wyckoff": "neutral"}
         for run in runs:
             if run.signals:
@@ -643,6 +645,7 @@ class RealtimeEngine:
                     self.auxiliary[signal.symbol] = aux.to_public()
                     await self.setups.on_signal(
                         signal, resonance=aux, min_rr=self.settings.rr,
+                        structure_bias=structure["bias"],
                     )
                 self.registry_signals.extend(fresh)
                 self.metrics.inc("engine_signal", len(fresh))
