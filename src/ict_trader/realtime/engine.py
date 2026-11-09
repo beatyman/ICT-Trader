@@ -646,8 +646,9 @@ class RealtimeEngine:
                 datetime.fromtimestamp(now / 1000.0, tz=timezone.utc),
                 datetime.now(timezone.utc),
             ))
-            execution = {"accepted": False, "reason": "no plan"}
-            if str(review.get("verdict")) == "support" and plan.get("open"):
+            execution = {"accepted": False, "reason": "AI execution disabled"}
+            if (self.settings.ai_execution_enabled
+                    and str(review.get("verdict")) == "support" and plan.get("open")):
                 execution = await self._execute_ai_plan(setup, review)
                 review["execution"] = execution
             self.ai_decisions.append({
@@ -775,7 +776,9 @@ class RealtimeEngine:
             setup.ai_confidence = float(review.get("confidence", 0) or 0) / 100.0
             setup.ai_decision = str(review.get("verdict", "reject"))
             await self.setups.persist_setup(setup.setup_row(datetime.now(timezone.utc)))
-            execution = await self._execute_ai_plan(setup, review)
+            execution = {"accepted": False, "reason": "AI execution disabled"}
+            if self.settings.ai_execution_enabled:
+                execution = await self._execute_ai_plan(setup, review)
             review["execution"] = execution
             self.ai_decisions.append({
                 "decision_id": decision_id, "setup_id": setup.setup_id,
@@ -1042,7 +1045,9 @@ class RealtimeEngine:
             "equity_curve": broker["equity_curve"],
             "stats": broker["stats"],
             "metrics": metrics,
-            "ai": {**self.ai.status(), "auto": self.settings.ai_auto},
+            "ai": {**self.ai.status(), "auto": self.settings.ai_auto,
+                   "execution_enabled": self.settings.ai_execution_enabled,
+                   "market_scan": self.settings.ai_market_scan},
             "ai_decisions": list(self.ai_decisions)[-20:],
             "universe": list(self.universe),
             "selected": self.settings.symbols[0] if self.settings.symbols else "",

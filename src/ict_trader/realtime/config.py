@@ -178,6 +178,7 @@ class Settings:
     ai_auto_cooldown_seconds: float = 300.0
     ai_scan_seconds: float = 300.0
     ai_market_scan: bool = False
+    ai_execution_enabled: bool = False
     ai_market_scan_seconds: float = 300.0
     ai_market_scan_max_symbols: int = 10
 
@@ -265,6 +266,7 @@ class Settings:
             "risk_pct": self.risk_pct,
             "setup_min_confidence": self.setup_min_confidence,
             "ai_market_scan": self.ai_market_scan,
+            "ai_execution_enabled": self.ai_execution_enabled,
             "ai_market_scan_seconds": self.ai_market_scan_seconds,
             "max_position_pct": self.max_position_pct,
             "max_open_positions": self.max_open_positions,
@@ -361,6 +363,7 @@ class Settings:
             ai_auto_cooldown_seconds=_env_float("AI_AUTO_COOLDOWN_SECONDS", 300.0),
             ai_scan_seconds=_env_float("AI_SCAN_SECONDS", 300.0),
             ai_market_scan=_env_bool("AI_MARKET_SCAN", False),
+            ai_execution_enabled=_env_bool("AI_EXECUTION_ENABLED", False),
             ai_market_scan_seconds=_env_float("AI_MARKET_SCAN_SECONDS", 300.0),
             ai_market_scan_max_symbols=_env_int("AI_MARKET_SCAN_MAX_SYMBOLS", 10),
         )
