@@ -1451,8 +1451,9 @@
       if (Number.isFinite(nearest)) {
         markers.push({
           time: nearest, position: planSetup.direction === "long" ? "belowBar" : "aboveBar",
-          color: CHART.entry, shape: planSetup.direction === "long" ? "arrowUp" : "arrowDown",
-          text: "SIGNAL", kind: "SIG", direction: planSetup.direction,
+          color: CHART.sig, shape: planSetup.direction === "long" ? "arrowUp" : "arrowDown",
+          text: e?.evidence?.bsp_type ? `SIGNAL ${e.evidence.bsp_type}` : "SIGNAL",
+          kind: "SIG", direction: planSetup.direction,
         });
       }
     }
