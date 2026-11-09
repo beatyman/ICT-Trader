@@ -144,3 +144,32 @@ test("Chan structure is converted to BI/SEG lines, ZS rectangles and BSP markers
     x1: ICT.timeOf(BASE), x2: ICT.timeOf(BASE + 5 * STEP), y1: 90, y2: 100,
   });
 });
+
+
+test("price labels avoid collisions while staying inside the pane", () => {
+  const rows = ICT.layoutPriceLabels([
+    { title: "A", y: 100 }, { title: "B", y: 102 },
+    { title: "C", y: 104 }, { title: "D", y: 350 },
+  ], 360, 14, 8);
+  assert.equal(rows.length, 4);
+  for (let i = 1; i < rows.length; i++) {
+    assert.ok(rows[i].labelY - rows[i - 1].labelY >= 14);
+  }
+  assert.ok(rows[0].labelY >= 8);
+  assert.ok(rows[rows.length - 1].labelY <= 352);
+});
+
+
+test("Chan BI and SEG can be hidden independently", () => {
+  const bars = flat();
+  const chan = {
+    bis: [{ start_time: BASE, end_time: BASE + 5 * STEP, start_price: 90, end_price: 100, direction: "up" }],
+    segs: [{ start_time: BASE, end_time: BASE + 10 * STEP, start_price: 88, end_price: 105, direction: "up" }],
+    zss: [], bsps: [], divergences: [],
+  };
+  const hiddenAll = ICT.buildICTData(bars, { tf: "15m", chan, chanVisibility: { bi: false, seg: false } });
+  assert.equal(hiddenAll.segments.length, 0);
+  const noBi = ICT.buildICTData(bars, { tf: "15m", chan, chanVisibility: { bi: false, seg: true } });
+  assert.equal(noBi.segments.some(s => s.label === "BI"), false);
+  assert.equal(noBi.segments.some(s => s.label === "SEG"), true);
+});

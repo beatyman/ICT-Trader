@@ -117,6 +117,8 @@
     const smt = options.smt || null;
     const daily = options.dailyBars || [];
     const chan = options.chan || null;
+    const backendOverlays = options.backendOverlays || null;
+    const chanVisibility = options.chanVisibility || {};
     const step = TF_MS[tf] || 900000;
     const last = bars[bars.length - 1];
     const end = timeOf(last.open_time) + step / 1000;
@@ -141,7 +143,20 @@
       });
     };
 
-    // FVG / IFVG.
+    // FVG / IFVG. Backend rectangles are canonical when available.
+    if (backendOverlays?.rectangles?.length) {
+      for (const r of backendOverlays.rectangles) {
+        if (!["FVG", "IFVG", "OB"].includes(r.kind)) continue;
+        const colors = palette(r.direction);
+        rectangles.push({
+          kind: r.kind, direction: r.direction,
+          startTime: Number(r.start_time), endTime: Number(r.end_time),
+          low: Number(r.low), high: Number(r.high),
+          fill: colors.fill, border: colors.border, label: r.label || r.kind,
+          labelColor: colors.labelColor,
+        });
+      }
+    } else {
     for (let i = startIdx; i < bars.length - 1; i++) {
       const a = bars[i - 2], c = bars[i];
       if (!a || !c) continue;
@@ -164,6 +179,7 @@
       }
     }
 
+    }
     // CISD.
     let runDir = 0, runCount = 0, runOpen = 0;
     for (let i = startIdx; i < bars.length; i++) {
@@ -192,6 +208,7 @@
     }
 
     // OB.
+    if (!backendOverlays?.rectangles?.length) {
     for (let i = startIdx + 1; i < bars.length; i++) {
       const prev = bars[i - 1], cur = bars[i];
       const body = Math.abs(num(cur.close) - num(cur.open));
@@ -207,6 +224,7 @@
       );
     }
 
+    }
     // Asian session.
     const lastDate = new Date(num(last.open_time)).toISOString().slice(0, 10);
     let asianBars = bars.filter(b => {
@@ -285,7 +303,7 @@
     }
 
     if (chan) {
-      for (const b of (chan.bis || []).slice(-120)) {
+      if (chanVisibility.bi !== false) for (const b of (chan.bis || []).slice(-120)) {
         segments.push({
           startTime: Math.floor(b.start_time / 1000),
           endTime: Math.floor(b.end_time / 1000),
@@ -293,7 +311,7 @@
           color: "rgba(120,123,134,.70)", width: 1, label: "BI",
         });
       }
-      for (const s of (chan.segs || []).slice(-60)) {
+      if (chanVisibility.seg !== false) for (const s of (chan.segs || []).slice(-60)) {
         segments.push({
           startTime: Math.floor(s.start_time / 1000),
           endTime: Math.floor(s.end_time / 1000),
@@ -395,6 +413,29 @@
     };
   }
 
+  function layoutPriceLabels(items, height, minGap = 14, padding = 6) {
+    const rows = items
+      .filter(i => Number.isFinite(i.y))
+      .slice()
+      .sort((a, b) => a.y - b.y);
+    for (let i = 0; i < rows.length; i++) {
+      rows[i] = { ...rows[i], labelY: Math.max(padding, Math.min(height - padding, rows[i].y)) };
+      if (i > 0 && rows[i].labelY - rows[i - 1].labelY < minGap) {
+        rows[i].labelY = rows[i - 1].labelY + minGap;
+      }
+    }
+    if (rows.length && rows[rows.length - 1].labelY > height - padding) {
+      const overflow = rows[rows.length - 1].labelY - (height - padding);
+      for (const row of rows) row.labelY = Math.max(padding, row.labelY - overflow);
+      for (let i = 1; i < rows.length; i++) {
+        if (rows[i].labelY - rows[i - 1].labelY < minGap) {
+          rows[i].labelY = rows[i - 1].labelY + minGap;
+        }
+      }
+    }
+    return rows;
+  }
+
   function projectSegment(segment, timeToX, priceToY) {
     const x1 = timeToX(segment.startTime);
     const x2 = timeToX(segment.endTime);
@@ -421,6 +462,6 @@
 
   return {
     TF_MS, timeOf, pivots, computeSMT, dailyLevels, buildICTData,
-    projectRectangle, projectSegment, palette,
+    projectRectangle, projectSegment, layoutPriceLabels, palette,
   };
 });

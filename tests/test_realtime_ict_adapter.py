@@ -72,6 +72,7 @@ def test_ict_engine_signal_entry_matches_source_bar_close(monkeypatch):
     sig = engine.analyze(df, ctx)[0]
     assert sig.source_kline_open_time == int(df["date"].iloc[1499].timestamp() * 1000)
     assert sig.evidence_plain()["entry"] == float(df["close"].iloc[1499])
+    assert "ict_overlays" in sig.evidence_plain()
 
 
 def test_ict_engine_ignores_stale_setup_for_actionable(monkeypatch):

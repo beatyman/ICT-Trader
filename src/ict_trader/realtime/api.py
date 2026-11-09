@@ -145,6 +145,16 @@ def create_app(engine: RealtimeEngine) -> FastAPI:
             return JSONResponse(persisted)
         return JSONResponse(list(engine.ai_decisions)[-50:])
 
+    @app.get("/api/chart/overlays")
+    async def chart_overlays(
+        symbol: str,
+        interval: str | None = Query(None),
+        limit: int = Query(700, ge=40, le=2000),
+    ) -> JSONResponse:
+        iv = interval or engine.settings.strategy_interval
+        data = await engine.chart_overlays(symbol, iv, limit)
+        return JSONResponse({"symbol": symbol.upper(), "interval": iv, **data})
+
     @app.get("/api/chan/structure")
     async def chan_structure(
         symbol: str,

@@ -2,7 +2,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test ict-overlays.test.mjs playwright-overlay.test.mjs"
+    "test": "node --test ict-overlays.test.mjs playwright-overlay.test.mjs playwright-dashboard.test.mjs"
   },
   "devDependencies": {
     "pixelmatch": "^6.0.0",

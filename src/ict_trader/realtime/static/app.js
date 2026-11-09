@@ -28,8 +28,12 @@
     smt: null,
     smtKey: "",
     smtBars: [],
+    showBi: true,
+    showSeg: true,
     chanStructure: null,
     chanKey: "",
+    ictOverlays: null,
+    overlaysKey: "",
     aiHashOpened: false,
     anchorSignalId: null,
     signalLinkOpened: false,
@@ -703,6 +707,18 @@
         } catch (_) { /* SMT is optional */ }
       }
     }
+    const overlaysKey = `${symbol}|${S.tf}`;
+    if (S.overlaysKey !== overlaysKey) {
+      S.overlaysKey = overlaysKey;
+      S.ictOverlays = null;
+      try {
+        const r = await fetch(`/api/chart/overlays?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(S.tf)}&limit=1800`, { cache: "no-store" });
+        if (r.ok) {
+          const d = await r.json();
+          if (S.overlaysKey === overlaysKey) S.ictOverlays = d;
+        }
+      } catch (_) { /* backend overlay is optional; local fallback remains */ }
+    }
     const chanKey = `${symbol}|${S.tf}`;
     if (S.chanKey !== chanKey) {
       S.chanKey = chanKey;
@@ -1058,6 +1074,8 @@
         dailyBars: S.dailyBars,
         smt: S.smt,
         chan: S.chanStructure,
+        chanVisibility: { bi: S.showBi, seg: S.showSeg },
+        backendOverlays: S.ictOverlays,
       });
     }
     return { rectangles: [], priceLines: [], markers: [] };
@@ -1189,6 +1207,9 @@
       tip.style.top = Math.max(8, Math.min(lwc.height - 120, param.point.y - 40)) + "px";
       $("#chartOhlc").innerHTML = `<span>O <b>${fmtPrice(data.open)}</b></span> <span>H <b>${fmtPrice(data.high)}</b></span> <span>L <b>${fmtPrice(data.low)}</b></span> <span>C <b class="${chg >= 0 ? "up" : "down"}">${fmtPrice(data.close)}</b></span>`;
     });
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+      if (lwc.lastLines) applyPriceLabels(lwc.lastLines);
+    });
     const ro = new ResizeObserver(() => drawChart());
     ro.observe(el);
     return chart;
@@ -1243,6 +1264,28 @@
     return [];
   }
 
+  function applyPriceLabels(lines) {
+    const layer = $("#priceLabelLayer");
+    if (!layer || !lwc.chart || !lwc.candles) return;
+    const scaleWidth = (() => {
+      try { return lwc.chart.priceScale("right").width(); }
+      catch (_) { return 64; }
+    })();
+    const rows = (lines || []).filter(l => l.axisLabel !== false).map((l, i) => ({
+      id: `${l.title || l.label || "level"}-${i}`,
+      y: lwc.candles.priceToCoordinate(Number(l.price)),
+      title: l.title || l.label || "LEVEL",
+      price: l.price, color: l.color,
+    }));
+    const placed = window.ICTMath
+      ? window.ICTMath.layoutPriceLabels(rows, lwc.height || 360, 14, 8)
+      : rows;
+    layer.innerHTML = placed.map(row => `
+      <span class="price-label" style="top:${row.labelY}px;right:${scaleWidth + 8}px;color:${row.color}">
+        <b>${escapeHtml(row.title)}</b><span>${fmtPrice(row.price)}</span>
+      </span>`).join("");
+  }
+
   function applyChartAnnotations(bars) {
     const ict = buildICTData(bars);
     const lines = [...chartLevels(), ...(ict.priceLines || [])];
@@ -1253,7 +1296,7 @@
       lwc.priceLines.push(lwc.candles.createPriceLine({
         price: Number(l.price), color: l.color, lineWidth: l.lineWidth || 1,
         lineStyle: l.lineStyle ?? (l.dash ? 2 : 0),
-        axisLabelVisible: l.axisLabel !== false, title: l.title || l.label || "",
+        axisLabelVisible: false, title: l.title || l.label || "",
       }));
     }
     const markers = [...(ict.markers || [])];
@@ -1290,6 +1333,8 @@
     }
     renderICTSignals(lwc.chart, lwc.candles, { markers: markers.slice(-20) });
     lwc.overlay?.setData({ rectangles: ict.rectangles || [], segments: ict.segments || [], lines: [] });
+    lwc.lastLines = lines;
+    applyPriceLabels(lines);
   }
 
   function vwapData(bars) {
@@ -1336,7 +1381,7 @@
     if (!ensureChart()) return;
     const bars = S.bars;
     const last = bars[bars.length - 1];
-    const key = [S.symbol, S.tf, S.anchorSignalId || "", S.ema].join("|");
+    const key = [S.symbol, S.tf, S.anchorSignalId || "", S.ema, S.showBi, S.showSeg].join("|");
     const rebuild = force || lwc.seriesKey !== key || bars.length < lwc.lastLen || bars.length > lwc.lastLen + 1;
     if (rebuild) {
       setChartData(bars, lwc.seriesKey !== key);
@@ -1570,6 +1615,30 @@
       e.currentTarget.style.color = S.ema ? "var(--cyan)" : "";
       drawChart();
     });
+    const updateChanButtons = () => {
+      $("#chanBtn")?.classList.toggle("active", S.showBi || S.showSeg);
+      $$(".legend-toggle[data-chan]").forEach(b => {
+        b.classList.toggle("active", b.dataset.chan === "bi" ? S.showBi : S.showSeg);
+      });
+    };
+    $("#chanBtn").addEventListener("click", e => {
+      const next = !(S.showBi || S.showSeg);
+      S.showBi = next;
+      S.showSeg = next;
+      updateChanButtons();
+      drawChart(true);
+      e.currentTarget.blur();
+    });
+    $$(".legend-toggle[data-chan]").forEach(btn => {
+      btn.addEventListener("click", e => {
+        const key = e.currentTarget.dataset.chan;
+        if (key === "bi") S.showBi = !S.showBi;
+        else S.showSeg = !S.showSeg;
+        updateChanButtons();
+        drawChart(true);
+      });
+    });
+    updateChanButtons();
     $("#soundBtn").addEventListener("click", e => {
       S.notify = !S.notify;
       e.currentTarget.style.color = S.notify ? "var(--green)" : "var(--muted)";

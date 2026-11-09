@@ -797,6 +797,19 @@ class RealtimeEngine:
             self.metrics.event("WARN", "risk", f"manual flatten closed {closed} paper position(s)")
         return closed
 
+    async def chart_overlays(self, symbol: str, interval: str,
+                             limit: int = 700) -> dict[str, Any]:
+        rows = await self.klines(symbol, interval, max(40, min(limit, 2000)))
+        if not rows:
+            return {"rectangles": [], "source": "backend"}
+        frame = pd.DataFrame([{
+            "date": datetime.fromtimestamp(int(r["open_time"]) / 1000.0, tz=timezone.utc),
+            "open": float(r["open"]), "high": float(r["high"]),
+            "low": float(r["low"]), "close": float(r["close"]),
+        } for r in rows])
+        from .overlays import build_ict_overlays, overlays_public
+        return overlays_public(build_ict_overlays(frame))
+
     async def chan_structure(self, symbol: str, interval: str,
                              limit: int = 700) -> dict[str, Any]:
         """Return real chan.py structure for the chart overlay."""

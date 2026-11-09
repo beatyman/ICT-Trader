@@ -15,6 +15,7 @@ import pandas as pd
 
 from ....concepts import ICTConfig, analyze
 from ....setup import SetupConfig, build_setup
+from ...overlays import build_ict_overlays
 from ...models import dt_to_ms
 from ..contracts import AnalysisContext, EngineSignal, PriceZone
 
@@ -95,6 +96,7 @@ class ICTEngine:
             if rr < 1.0:
                 continue
             zone_low, zone_high = sorted((entry, float(c.level)))
+            overlay_evidence = build_ict_overlays(frame)
             evidence = {
                 "entry": entry,
                 "stop": stop,
@@ -106,6 +108,7 @@ class ICTEngine:
                 "quality_parts": _plain(dict(c.quality_parts or {})),
                 "setup_level": float(c.level),
                 "thesis": self._thesis(c),
+                "ict_overlays": overlay_evidence,
             }
             symbol = (context.symbol if context else frame.attrs.get("symbol", ""))
             interval = (context.interval if context else frame.attrs.get("interval", "15m"))

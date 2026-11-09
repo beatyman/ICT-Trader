@@ -330,6 +330,14 @@ resize. FVG/OB are visual context derived from closed bars; they are not
 additional executable signals. The signal/setup lifecycle remains owned by
 the backend.
 
+### Backend overlay source
+
+`GET /api/chart/overlays?symbol=&interval=&limit=1800` returns canonical
+FVG/IFVG/OB rectangles from `realtime/overlays.py`. The ICT adapter calls the
+same module and attaches the result to `EngineSignal.evidence.ict_overlays`, so
+the chart and the engine use one calculation path. The browser falls back to
+local math only if the API is unavailable.
+
 ### Overlay verification
 
 Calculation and drawing are tested separately:
@@ -349,7 +357,14 @@ mapping has an exact pixel contract before it is rendered by Lightweight Charts.
 The Playwright test uses a fixed `1200x700` viewport and fixture candles, then
 asserts the real Lightweight Charts `timeToCoordinate` / `priceToCoordinate`
 values for an FVG rectangle and an SMT marker. It writes
-`tests/js/artifacts/overlay-fixed-viewport.png` for visual inspection.
+`tests/js/artifacts/overlay-fixed-viewport.png` for visual inspection and
+compares it with `tests/js/baselines/overlay-fixed-viewport.png` (1.5% pixel
+tolerance).
+
+A second Playwright test boots the complete dashboard with mocked
+`/api/snapshot`, `/api/klines`, `/api/chart/overlays` and `/api/chan/structure`
+responses, a fixed setup signal, and verifies the chart, setup panel, signal
+stream, collision-managed price labels and Chan BI/SEG visibility toggle.
 
 Chan structure is returned by `/api/chan/structure` directly from chan.py:
 `bis` (笔), `segs` (线段), `zss` (中枢), `bsps` (买卖点) and `divergences` (1类
