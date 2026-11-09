@@ -328,6 +328,21 @@ resize. FVG/OB are visual context derived from closed bars; they are not
 additional executable signals. The signal/setup lifecycle remains owned by
 the backend.
 
+### Overlay verification
+
+Calculation and drawing are tested separately:
+
+```powershell
+node --test tests/js/ict-overlays.test.mjs
+node --check src/ict_trader/realtime/static/app.js
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+The Node suite asserts exact FVG/IFVG bounds, CISD, bull/bear OB, PO3/AMD,
+PDH/PDL/PWH/PWL/PMH/PML and ETH SMT fixtures. `projectRectangle` is tested with
+deterministic `timeToX`/`priceToY` functions, so the primitive’s time/price
+mapping has an exact pixel contract before it is rendered by Lightweight Charts.
+
 ### Dark / light theme
 
 The top-right theme button toggles the whole terminal without a reload; the

@@ -905,17 +905,15 @@
           };
           const width = scope.bitmapSize.width;
           for (const z of state.data.rectangles) {
-            const y1 = toY(z.high);
-            const y2 = toY(z.low);
-            if (y1 == null || y2 == null) continue;
-            let x1 = toX(z.startTime);
-            let x2 = toX(z.endTime);
-            if (x1 == null) x1 = 0;
-            if (x2 == null) x2 = width;
+            const projected = window.ICTMath
+              ? window.ICTMath.projectRectangle(z, toX, toY)
+              : null;
+            if (!projected) continue;
+            let { x1, x2, top, height } = projected;
+            if (!Number.isFinite(x2)) x2 = width;
             if (x2 < x1) [x1, x2] = [x2, x1];
             if (x2 - x1 < 2 * hr) x2 = x1 + 3 * hr;
-            const top = Math.min(y1, y2);
-            const height = Math.max(1 * vr, Math.abs(y2 - y1));
+            height = Math.max(1 * vr, height);
             ctx.fillStyle = z.fill;
             ctx.fillRect(x1, top, x2 - x1, height);
             ctx.strokeStyle = z.border;
@@ -988,28 +986,7 @@
   }
 
   function computeSMT(bars, ethBars) {
-    if (!bars.length || !ethBars.length) return null;
-    const ethByTime = new Map(ethBars.map(b => [chartTime(b.open_time), b]));
-    const aligned = bars.map(b => ({ s: b, e: ethByTime.get(chartTime(b.open_time)) })).filter(x => x.e);
-    if (aligned.length < 20) return null;
-    const sBars = aligned.map(x => x.s), eBars = aligned.map(x => x.e);
-    const sHighs = pivots(sBars, "high"), eHighs = pivots(eBars, "high");
-    const sLows = pivots(sBars, "low"), eLows = pivots(eBars, "low");
-    if (sHighs.length >= 2 && eHighs.length >= 2) {
-      const sLast = sHighs.at(-1), sPrev = sHighs.at(-2);
-      const eLast = eHighs.at(-1), ePrev = eHighs.at(-2);
-      if (sLast.price > sPrev.price && eLast.price <= ePrev.price) {
-        return { direction: "bearish", time: sLast.time, price: sLast.price, label: "SMT HIGH" };
-      }
-    }
-    if (sLows.length >= 2 && eLows.length >= 2) {
-      const sLast = sLows.at(-1), sPrev = sLows.at(-2);
-      const eLast = eLows.at(-1), ePrev = eLows.at(-2);
-      if (sLast.price < sPrev.price && eLast.price >= ePrev.price) {
-        return { direction: "bullish", time: sLast.time, price: sLast.price, label: "SMT LOW" };
-      }
-    }
-    return null;
+    return window.ICTMath ? window.ICTMath.computeSMT(bars, ethBars) : null;
   }
 
   function dailyLevels(priceLines) {
@@ -1048,258 +1025,15 @@
   }
 
   function buildICTData(bars) {
-    if (!bars.length) return { rectangles: [], priceLines: [], markers: [] };
-    const step = TF_MS[S.tf] || 900000;
-    const last = bars[bars.length - 1];
-    const end = chartTime(last.open_time) + step / 1000;
-    const atr = (() => {
-      const n = Math.min(14, bars.length - 1);
-      if (n < 1) return 0;
-      let total = 0;
-      for (let i = bars.length - n; i < bars.length; i++) total += Math.max(0, num(bars[i].high) - num(bars[i].low));
-      return total / n;
-    })();
-    const rectangles = [];
-    const priceLines = [];
-    const markers = [];
-    const startIdx = Math.max(2, bars.length - 140);
-    const minGap = Math.max(atr * 0.035, Math.abs(num(last.close)) * 0.00005);
-    const addRect = (kind, direction, startTime, low, high, label, endTime = end) => {
-      const colors = ictPalette(direction);
-      rectangles.push({
-        kind, direction, startTime, endTime, low, high,
-        fill: colors.fill, border: colors.border, label, labelColor: colors.labelColor,
-      });
-    };
-
-    // ICT FVG: 3-candle imbalance. A later close through the far edge
-    // converts the failed gap into an Inverse FVG (IFVG).
-    for (let i = startIdx; i < bars.length - 1; i++) {
-      const a = bars[i - 2], c = bars[i];
-      if (!a || !c) continue;
-      const bullGap = num(c.low) - num(a.high);
-      const bearGap = num(a.low) - num(c.high);
-      if (bullGap > minGap) {
-        let failed = false;
-        for (let j = i + 1; j < bars.length; j++) {
-          if (num(bars[j].close) < num(a.high)) { failed = true; break; }
-        }
-        if (failed) {
-          addRect("IFVG", "bearish", chartTime(a.open_time), num(a.high), num(c.low), "IFVG");
-        } else {
-          addRect("FVG", "bullish", chartTime(a.open_time), num(a.high), num(c.low), "FVG");
-        }
-      } else if (bearGap > minGap) {
-        let failed = false;
-        for (let j = i + 1; j < bars.length; j++) {
-          if (num(bars[j].close) > num(a.low)) { failed = true; break; }
-        }
-        if (failed) {
-          addRect("IFVG", "bullish", chartTime(a.open_time), num(c.high), num(a.low), "IFVG");
-        } else {
-          addRect("FVG", "bearish", chartTime(a.open_time), num(c.high), num(a.low), "FVG");
-        }
-      }
-    }
-
-    // CISD: a bullish close through the open of a 2+ bearish run (and mirror).
-    let runDir = 0, runCount = 0, runOpen = 0;
-    for (let i = startIdx; i < bars.length; i++) {
-      const b = bars[i], o = num(b.open), c = num(b.close);
-      const bull = c > o;
-      const dir = bull ? 1 : c < o ? -1 : 0;
-      if (dir === 0) continue;
-      if (dir !== runDir) {
-        runDir = dir; runCount = 1; runOpen = o;
-      } else {
-        runCount += 1;
-      }
-      if (dir === 1 && runCount === 1 && runOpen) {
-        // runOpen belongs to the prior bearish run only if we just flipped.
-      }
-      if (dir === 1 && i > startIdx) {
-        const prev = bars[i - 1];
-        if (num(prev.close) < num(prev.open) && c > runOpen && i >= 2) {
-          // runOpen may be current bar's open after the flip; use the first
-          // bearish candle's open from the two-bar lookback instead.
-          const firstBear = bars[i - 2];
-          if (num(firstBear.close) < num(firstBear.open) && c > num(firstBear.open)) {
-            markers.push({ time: chartTime(b.open_time), position: "belowBar", shape: "square", color: "#26a69a", text: "CISD", kind: "CISD", direction: "bullish" });
-          }
-        }
-      } else if (dir === -1 && i > startIdx) {
-        const prev = bars[i - 1];
-        if (num(prev.close) > num(prev.open) && i >= 2) {
-          const firstBull = bars[i - 2];
-          if (num(firstBull.close) > num(firstBull.open) && c < num(firstBull.open)) {
-            markers.push({ time: chartTime(b.open_time), position: "aboveBar", shape: "square", color: "#ef5350", text: "CISD", kind: "CISD", direction: "bearish" });
-          }
-        }
-      }
-    }
-
-    // ICT Order Block: last opposite candle before displacement.
-    for (let i = startIdx + 1; i < bars.length; i++) {
-      const prev = bars[i - 1], cur = bars[i];
-      const body = Math.abs(num(cur.close) - num(cur.open));
-      if (body < atr * 0.95) continue;
-      const bullish = num(cur.close) > num(cur.open);
-      const prevBear = num(prev.close) < num(prev.open);
-      if (bullish !== prevBear) continue;
-      addRect(
-        "OB", bullish ? "bullish" : "bearish",
-        chartTime(prev.open_time),
-        Math.min(num(prev.open), num(prev.close), num(prev.low)),
-        Math.max(num(prev.open), num(prev.close), num(prev.high)),
-        "OB",
-      );
-    }
-
-    // Asian session range and midnight open (UTC 00:00-08:00).
-    const lastDate = new Date(num(last.open_time)).toISOString().slice(0, 10);
-    let asianBars = bars.filter(b => {
-      const d = new Date(num(b.open_time));
-      return d.toISOString().slice(0, 10) === lastDate && d.getUTCHours() < 8;
-    });
-    if (asianBars.length < 4) asianBars = bars.slice(-Math.min(32, bars.length));
-    if (asianBars.length) {
-      const aHi = Math.max(...asianBars.map(b => num(b.high)));
-      const aLo = Math.min(...asianBars.map(b => num(b.low)));
-      const aStart = chartTime(asianBars[0].open_time);
-      const aEnd = chartTime(asianBars[asianBars.length - 1].open_time) + step / 1000;
-      addRect("AsianRange", "neutral", aStart, aLo, aHi, "ASIAN RANGE", aEnd);
-      priceLines.push({ price: aHi, title: "Asian High", color: "#787b86", lineStyle: 2, lineWidth: 1, startTime: aStart, endTime: aEnd });
-      priceLines.push({ price: aLo, title: "Asian Low", color: "#787b86", lineStyle: 2, lineWidth: 1, startTime: aStart, endTime: aEnd });
-    }
-    const mdo = [...bars].reverse().find(b => new Date(num(b.open_time)).getUTCHours() === 0);
-    if (mdo) {
-      priceLines.push({ price: num(mdo.open), title: "MDO", color: "#2962ff", lineStyle: 2, lineWidth: 1, startTime: chartTime(mdo.open_time), endTime: end });
-    }
-
-    // BSL/SSL and equilibrium from the recent swing range.
-    const lookback = bars.slice(-Math.min(96, bars.length));
-    if (lookback.length) {
-      const hi = Math.max(...lookback.map(b => num(b.high)));
-      const lo = Math.min(...lookback.map(b => num(b.low)));
-      const first = chartTime(lookback[0].open_time);
-      priceLines.push({ price: hi, title: "BSL", color: "#ef5350", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
-      priceLines.push({ price: lo, title: "SSL", color: "#26a69a", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
-      priceLines.push({ price: (hi + lo) / 2, title: "EQ (50%)", color: "#787b86", lineStyle: 0, lineWidth: 1, startTime: first, endTime: end });
-    }
-
-    // PO3 / AMD: Asian accumulation -> Judas manipulation -> distribution.
-    if (asianBars.length >= 4) {
-      const aHi = Math.max(...asianBars.map(b => num(b.high)));
-      const aLo = Math.min(...asianBars.map(b => num(b.low)));
-      const asianEndTime = chartTime(asianBars[asianBars.length - 1].open_time) + step / 1000;
-      const after = bars.filter(b => chartTime(b.open_time) >= asianEndTime && new Date(num(b.open_time)).toISOString().slice(0, 10) === lastDate);
-      const sweep = after.find(b => (num(b.high) > aHi && num(b.close) < aHi) || (num(b.low) < aLo && num(b.close) > aLo));
-      if (sweep) {
-        const bearSweep = num(sweep.high) > aHi && num(sweep.close) < aHi;
-        markers.push({
-          time: chartTime(sweep.open_time), position: bearSweep ? "aboveBar" : "belowBar",
-          shape: "circle", color: bearSweep ? "#ef5350" : "#26a69a",
-          text: "AMD", kind: "AMD", direction: bearSweep ? "bearish" : "bullish",
-        });
-        const sweepIdx = bars.indexOf(sweep);
-        const displacement = bars.slice(sweepIdx + 1).find(b => {
-          const body = Math.abs(num(b.close) - num(b.open));
-          const sameDir = bearSweep ? num(b.close) < num(b.open) : num(b.close) > num(b.open);
-          return sameDir && body > atr * 1.1;
-        });
-        if (displacement) {
-          markers.push({
-            time: chartTime(displacement.open_time), position: bearSweep ? "aboveBar" : "belowBar",
-            shape: "arrowDown", color: bearSweep ? "#ef5350" : "#26a69a",
-            text: "PO3", kind: "PO3", direction: bearSweep ? "bearish" : "bullish",
-          });
-        }
-      }
-    }
-
-    dailyLevels(priceLines);
-
-    if (S.smt && !S.anchorSignalId) {
-      priceLines.push({
-        price: S.smt.price, title: S.smt.label, color: S.smt.direction === "bearish" ? "#ef5350" : "#26a69a",
-        lineStyle: 2, lineWidth: 1,
-      });
-      markers.push({
-        time: S.smt.time, position: S.smt.direction === "bearish" ? "aboveBar" : "belowBar",
-        shape: "circle", color: S.smt.direction === "bearish" ? "#ef5350" : "#26a69a",
-        text: S.smt.label, kind: "Sweep", direction: S.smt.direction,
+    if (window.ICTMath) {
+      return window.ICTMath.buildICTData(bars, {
+        tf: S.tf,
+        snap: S.snap,
+        dailyBars: S.dailyBars,
+        smt: S.smt,
       });
     }
-
-    // Chan central zone from the newest real engine signal.
-    let chanZone = null;
-    const candidates = [];
-    for (const st of (S.snap?.setups || [])) if (st.engine === "chan" && st.engine_signals?.length) candidates.push(st.engine_signals[0]);
-    for (const es of (S.snap?.engine_signals || [])) if (es.engine === "chan") candidates.push(es);
-    for (const es of candidates) {
-      const ev = es.evidence || {};
-      const zd = Number(ev.last_zs_zd), zg = Number(ev.last_zs_zg);
-      if (Number.isFinite(zd) && Number.isFinite(zg) && zd < zg) {
-        chanZone = { zd, zg, time: chartTime(es.source_kline_open_time), label: ev.bsp_type || "CHAN" };
-        break;
-      }
-    }
-    if (chanZone) {
-      rectangles.push({
-        kind: "ChanZS", direction: "neutral", startTime: chanZone.time, endTime: end,
-        low: chanZone.zd, high: chanZone.zg,
-        fill: CHART.zoneChan, border: CHART.zoneChanBorder,
-        label: `CHAN ZS · ${chanZone.label}`, labelColor: CHART.zoneChanBorder,
-      });
-    }
-
-    // ICT structure markers: MSS / BOS / Sweep from confirmed pivots.
-    const pivotsH = [], pivotsL = [];
-    for (let i = startIdx + 2; i < bars.length - 2; i++) {
-      const b = bars[i];
-      const h = num(b.high), l = num(b.low);
-      if (h >= num(bars[i - 1].high) && h >= num(bars[i - 2].high) && h >= num(bars[i + 1].high) && h >= num(bars[i + 2].high)) pivotsH.push({ i, price: h });
-      if (l <= num(bars[i - 1].low) && l <= num(bars[i - 2].low) && l <= num(bars[i + 1].low) && l <= num(bars[i + 2].low)) pivotsL.push({ i, price: l });
-    }
-    const pivotHMap = new Map(pivotsH.map(p => [p.i, p]));
-    const pivotLMap = new Map(pivotsL.map(p => [p.i, p]));
-    let swingH = null, swingL = null, trend = 0;
-    for (let i = startIdx + 2; i < bars.length; i++) {
-      if (pivotHMap.has(i)) swingH = pivotHMap.get(i);
-      if (pivotLMap.has(i)) swingL = pivotLMap.get(i);
-      const b = bars[i], c = num(b.close), h = num(b.high), l = num(b.low);
-      if (swingH && i > swingH.i) {
-        if (h > swingH.price && c < swingH.price) {
-          markers.push({ time: chartTime(b.open_time), position: "aboveBar", shape: "circle", color: "#ef5350", text: "Sweep", kind: "Sweep", direction: "bearish" });
-          swingH = null;
-        } else if (c > swingH.price) {
-          const kind = trend < 0 ? "MSS" : "BOS";
-          markers.push({ time: chartTime(b.open_time), position: "belowBar", shape: kind === "BOS" ? "square" : "arrowUp", color: "#26a69a", text: kind, kind, direction: "bullish" });
-          trend = 1; swingH = null;
-        }
-      }
-      if (swingL && i > swingL.i) {
-        if (l < swingL.price && c > swingL.price) {
-          markers.push({ time: chartTime(b.open_time), position: "belowBar", shape: "circle", color: "#26a69a", text: "Sweep", kind: "Sweep", direction: "bullish" });
-          swingL = null;
-        } else if (c < swingL.price) {
-          const kind = trend > 0 ? "MSS" : "BOS";
-          markers.push({ time: chartTime(b.open_time), position: "aboveBar", shape: kind === "BOS" ? "square" : "arrowDown", color: "#ef5350", text: kind, kind, direction: "bearish" });
-          trend = -1; swingL = null;
-        }
-      }
-    }
-
-    const fvg = rectangles.filter(r => r.kind === "FVG").slice(-8);
-    const ifvg = rectangles.filter(r => r.kind === "IFVG").slice(-4);
-    const ob = rectangles.filter(r => r.kind === "OB").slice(-4);
-    const session = rectangles.filter(r => r.kind === "AsianRange");
-    const chan = rectangles.filter(r => r.kind === "ChanZS");
-    return {
-      rectangles: [...fvg, ...ifvg, ...ob, ...session, ...chan].slice(-16),
-      priceLines: priceLines.slice(-12),
-      markers: markers.slice(-12),
-    };
+    return { rectangles: [], priceLines: [], markers: [] };
   }
 
   function renderICTSignals(chart, candleSeries, ictData) {

@@ -59,6 +59,9 @@ dashboard or open `/?signal=<signal_id>` to load the K-line context, entry/SL/TP
 and the exact signal marker. `/api/signals/{id}/context` returns
 `aligned=true/false` plus the source bar.
 
+Overlay calculation and coordinate mapping are covered by Node tests:
+`node --test tests/js/ict-overlays.test.mjs`.
+
 The terminal has persisted dark/light themes (`?theme=light` for a preview).
 The chart's last candle, watchlist and header price all use the same live bar:
 it is merged from the 1 Hz WebSocket snapshot and can also be fetched with
