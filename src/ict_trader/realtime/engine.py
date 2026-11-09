@@ -284,6 +284,7 @@ class RealtimeEngine:
         self._health_task: asyncio.Task | None = None
         self._loop_lag_task: asyncio.Task | None = None
         self._ai_scan_task: asyncio.Task | None = None
+        self._analysis_scan_task: asyncio.Task | None = None
         self._health: dict[str, Any] = {
             "redis": {"ok": False, "latency_ms": 0.0},
             "clickhouse": {"ok": False, "latency_ms": 0.0},
@@ -326,6 +327,8 @@ class RealtimeEngine:
             await self.feed.start(self.dispatch)
             self._health_task = asyncio.create_task(self._health_loop(), name="health-loop")
             self._loop_lag_task = asyncio.create_task(self._loop_lag_loop(), name="loop-lag")
+            self._analysis_scan_task = asyncio.create_task(
+                self._analysis_scan_loop(), name="analysis-scan")
             if self.settings.ai_auto and self.ai.available:
                 self._ai_scan_task = asyncio.create_task(self._ai_scan_loop(), name="ai-scan")
             self.phase = "ready"
@@ -373,6 +376,9 @@ class RealtimeEngine:
         if self._ai_scan_task is not None:
             self._ai_scan_task.cancel()
             self._ai_scan_task = None
+        if self._analysis_scan_task is not None:
+            self._analysis_scan_task.cancel()
+            self._analysis_scan_task = None
         await self.ai.close()
         await self.ch.stop()
         await self.rest.close()
@@ -528,6 +534,34 @@ class RealtimeEngine:
 
         task = asyncio.create_task(runner(), name=f"registry-{bar.symbol}-{bar.open_time}")
         self._registry_tasks.add(task)
+
+    async def _analysis_scan_loop(self) -> None:
+        """Recompute engines every N seconds on the latest CLOSED bars."""
+        while True:
+            try:
+                await asyncio.sleep(max(60.0, self.settings.analysis_scan_seconds))
+                for symbol in list(self.settings.symbols):
+                    history = self.runner.frame(symbol, 1)
+                    if not history:
+                        continue
+                    bar = history[-1]
+                    if not bar.is_closed:
+                        continue
+                    async with self._registry_sem:
+                        await self._run_registry(bar)
+                    self.metrics.event(
+                        "INFO", "analysis_scan",
+                        f"{symbol} {bar.interval} recomputed on closed bar",
+                        symbol=symbol,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("analysis scan loop failed: %s", exc)
+                await self.observability.error(
+                    "engine", "analysis_scan", "engine",
+                    "analysis scan loop failed", exc=exc,
+                )
 
     async def _ai_scan_loop(self) -> None:
         while True:

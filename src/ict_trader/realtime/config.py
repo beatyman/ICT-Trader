@@ -177,6 +177,7 @@ class Settings:
     ai_auto_min_confidence: float = 0.65
     ai_auto_cooldown_seconds: float = 300.0
     ai_scan_seconds: float = 300.0
+    analysis_scan_seconds: float = 300.0
     ai_market_scan: bool = False
     ai_execution_enabled: bool = False
     ai_market_scan_seconds: float = 300.0
@@ -265,6 +266,7 @@ class Settings:
             "bootstrap_bars": self.bootstrap_bars,
             "risk_pct": self.risk_pct,
             "setup_min_confidence": self.setup_min_confidence,
+            "analysis_scan_seconds": self.analysis_scan_seconds,
             "ai_market_scan": self.ai_market_scan,
             "ai_execution_enabled": self.ai_execution_enabled,
             "ai_market_scan_seconds": self.ai_market_scan_seconds,
@@ -362,6 +364,7 @@ class Settings:
             ai_auto_min_confidence=_env_float("AI_AUTO_MIN_CONFIDENCE", 0.65),
             ai_auto_cooldown_seconds=_env_float("AI_AUTO_COOLDOWN_SECONDS", 300.0),
             ai_scan_seconds=_env_float("AI_SCAN_SECONDS", 300.0),
+            analysis_scan_seconds=_env_float("ANALYSIS_SCAN_SECONDS", 300.0),
             ai_market_scan=_env_bool("AI_MARKET_SCAN", False),
             ai_execution_enabled=_env_bool("AI_EXECUTION_ENABLED", False),
             ai_market_scan_seconds=_env_float("AI_MARKET_SCAN_SECONDS", 300.0),
