@@ -5,6 +5,8 @@
     "test": "node --test ict-overlays.test.mjs playwright-overlay.test.mjs"
   },
   "devDependencies": {
-    "playwright-core": "^1.65.0"
+    "pixelmatch": "^6.0.0",
+    "playwright-core": "^1.65.0",
+    "pngjs": "^7.0.0"
   }
 }

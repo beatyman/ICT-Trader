@@ -1253,7 +1253,7 @@
       lwc.priceLines.push(lwc.candles.createPriceLine({
         price: Number(l.price), color: l.color, lineWidth: l.lineWidth || 1,
         lineStyle: l.lineStyle ?? (l.dash ? 2 : 0),
-        axisLabelVisible: true, title: l.title || l.label || "",
+        axisLabelVisible: l.axisLabel !== false, title: l.title || l.label || "",
       }));
     }
     const markers = [...(ict.markers || [])];

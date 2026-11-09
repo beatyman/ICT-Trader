@@ -3,11 +3,14 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import fs from "node:fs";
 import { chromium } from "playwright-core";
+import { PNG } from "pngjs";
+import pixelmatch from "pixelmatch";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const VENDOR = path.join(ROOT, "src/ict_trader/realtime/static/vendor/lightweight-charts.standalone.production.js");
 const MATH = path.join(ROOT, "src/ict_trader/realtime/static/ict-math.js");
 const ARTIFACTS = path.join(ROOT, "tests/js/artifacts");
+const BASELINE = path.join(ROOT, "tests/js/baselines/overlay-fixed-viewport.png");
 const CHROME = process.env.CHROME_PATH
   || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 
@@ -116,7 +119,23 @@ test("fixed viewport: FVG rectangle and SMT marker map to chart pixels", async (
   assert.ok(result.smtX >= 0 && result.smtX <= result.chartWidth);
   assert.ok(result.smtY >= 0 && result.smtY <= result.chartHeight);
 
-  await page.screenshot({ path: path.join(ARTIFACTS, "overlay-fixed-viewport.png"), fullPage: false });
+  const artifact = path.join(ARTIFACTS, "overlay-fixed-viewport.png");
+  const shot = await page.screenshot({ path: artifact, fullPage: false, animations: "disabled" });
+  fs.mkdirSync(path.dirname(BASELINE), { recursive: true });
+  if (!fs.existsSync(BASELINE)) {
+    fs.writeFileSync(BASELINE, shot);
+  } else {
+    const before = PNG.sync.read(fs.readFileSync(BASELINE));
+    const after = PNG.sync.read(shot);
+    assert.equal(before.width, after.width);
+    assert.equal(before.height, after.height);
+    const diff = new PNG({ width: before.width, height: before.height });
+    const changed = pixelmatch(before.data, after.data, diff.data, before.width, before.height, {
+      threshold: 0.12, includeAA: false,
+    });
+    const ratio = changed / (before.width * before.height);
+    assert.ok(ratio < 0.015, `pixel diff ${(ratio * 100).toFixed(3)}%`);
+  }
   } finally {
     await browser.close();
   }

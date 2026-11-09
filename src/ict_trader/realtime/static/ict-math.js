@@ -220,11 +220,11 @@
       const aStart = timeOf(asianBars[0].open_time);
       const aEnd = timeOf(asianBars[asianBars.length - 1].open_time) + step / 1000;
       addRect("AsianRange", "neutral", aStart, aLo, aHi, "ASIAN RANGE", aEnd);
-      priceLines.push({ price: aHi, title: "Asian High", color: "#787b86", lineStyle: 2, lineWidth: 1, startTime: aStart, endTime: aEnd });
-      priceLines.push({ price: aLo, title: "Asian Low", color: "#787b86", lineStyle: 2, lineWidth: 1, startTime: aStart, endTime: aEnd });
+      priceLines.push({ price: aHi, title: "Asian High", color: "#787b86", lineStyle: 2, lineWidth: 1, startTime: aStart, endTime: aEnd, axisLabel: false });
+      priceLines.push({ price: aLo, title: "Asian Low", color: "#787b86", lineStyle: 2, lineWidth: 1, startTime: aStart, endTime: aEnd, axisLabel: false });
     }
     const mdo = [...bars].reverse().find(b => new Date(num(b.open_time)).getUTCHours() === 0);
-    if (mdo) priceLines.push({ price: num(mdo.open), title: "MDO", color: "#2962ff", lineStyle: 2, lineWidth: 1 });
+    if (mdo) priceLines.push({ price: num(mdo.open), title: "MDO", color: "#2962ff", lineStyle: 2, lineWidth: 1, axisLabel: false });
 
     // BSL / SSL / EQ.
     const lookback = bars.slice(-Math.min(96, bars.length));
@@ -234,7 +234,7 @@
       const first = timeOf(lookback[0].open_time);
       priceLines.push({ price: hi, title: "BSL", color: "#ef5350", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
       priceLines.push({ price: lo, title: "SSL", color: "#26a69a", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
-      priceLines.push({ price: (hi + lo) / 2, title: "EQ (50%)", color: "#787b86", lineStyle: 0, lineWidth: 1, startTime: first, endTime: end });
+      priceLines.push({ price: (hi + lo) / 2, title: "EQ (50%)", color: "#787b86", lineStyle: 0, lineWidth: 1, startTime: first, endTime: end, axisLabel: false });
     }
 
     // PO3 / AMD.
