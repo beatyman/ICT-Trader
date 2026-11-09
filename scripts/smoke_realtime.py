@@ -44,7 +44,7 @@ def main() -> int:
     ok &= check(bool((snap.get("metrics") or {}).get("latency")), "metrics present")
     ai = snap.get("ai") or {}
     if ai.get("configured"):
-        ok &= check(ai.get("model") == "deepseek-flash", "DeepSeek Flash review model")
+        ok &= check(ai.get("model") == "deepseek-flash", "DeepSeek V4.1 Flash review model")
     else:
         print("[INFO] DeepSeek review disabled (DEEPSEEK_API_KEY not set)")
 
