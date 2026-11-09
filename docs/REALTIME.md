@@ -226,6 +226,22 @@ The chart renderer reads the active palette (grid, candles, EMA, volume,
 crosshair, signal levels) from the same theme state, so canvas and CSS stay in
 sync. The chart does not require a page reload or a second chart instance.
 
+### Live price parity check
+
+An isolated live Binance run was compared with the same 15m exchange kline:
+
+```text
+same open_time:     1794224700000
+dashboard close:    74,441.99
+exchange close:     74,440.81
+absolute diff:      1.18 USDT (0.0016%)
+live bar age:       596 ms at query time
+```
+
+The residual difference is normal tick movement between the WS snapshot and the
+independent REST query. The dashboard header, watchlist, chart last candle and
+`/api/klines?include_live=true` all use the same live bar.
+
 ### Signal ↔ K-line alignment
 
 Every paper signal carries `source_kline_open_time` (also exposed as
