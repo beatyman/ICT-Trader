@@ -43,6 +43,8 @@
       crossText: "#26384e", tagText: "#ffffff",
       sig: "#98610b", entry: "rgba(152,97,11,.8)",
       stop: "rgba(196,59,76,.75)", target: "rgba(7,132,94,.75)",
+      vwap: "#9a6512", zoneIct: "rgba(8,114,143,.12)", zoneIctBorder: "rgba(8,114,143,.38)",
+      zoneChan: "rgba(94,73,180,.12)", zoneChanBorder: "rgba(94,73,180,.42)",
       noData: "rgba(75,94,118,.7)",
     } : {
       grid: "rgba(157,184,214,.055)", gridStrong: "rgba(157,184,214,.11)",
@@ -55,6 +57,8 @@
       crossText: "#cfd9e6", tagText: "#07110e",
       sig: "#f2b84b", entry: "rgba(242,184,75,.75)",
       stop: "rgba(255,98,115,.7)", target: "rgba(44,229,163,.7)",
+      vwap: "#f2c14e", zoneIct: "rgba(84,200,248,.13)", zoneIctBorder: "rgba(84,200,248,.48)",
+      zoneChan: "rgba(184,157,255,.15)", zoneChanBorder: "rgba(184,157,255,.55)",
       noData: "rgba(123,138,158,.65)",
     };
   }
@@ -202,7 +206,9 @@
     }
 
     if (snap.ai?.last_review && !S.aiReview) S.aiReview = snap.ai.last_review;
-    if (S.anchorSignalId && !(snap.signals || []).some(s => s.id === S.anchorSignalId)) {
+    if (S.anchorSignalId
+        && !(snap.signals || []).some(s => s.id === S.anchorSignalId)
+        && !(snap.setups || []).some(s => s.setup_id === S.anchorSignalId)) {
       S.anchorSignalId = null;
     }
 
@@ -223,8 +229,9 @@
     const linkedSignal = new URLSearchParams(location.search).get("signal");
     if (linkedSignal && !S.signalLinkOpened) {
       S.signalLinkOpened = true;
-      const sig = (snap.signals || []).find(s => s.id === linkedSignal);
-      if (sig) selectSignal(sig.id);
+      const sig = (snap.signals || []).find(s => s.id === linkedSignal)
+        || (snap.setups || []).find(s => s.setup_id === linkedSignal);
+      if (sig) selectSignal(sig.id || sig.setup_id);
     }
     if (S.phase === "ready" && wasFirst) {
       showToast("Engine ready", `${snap.config.symbols.length} symbols · paper execution only`, "success");
@@ -601,13 +608,17 @@
     const anchorSignal = S.anchorSignalId
       ? (snap.signals || []).find(s => s.id === S.anchorSignalId)
       : null;
-    $("#chartPrice").textContent = anchorSignal
-      ? fmtPrice(anchorSignal.entry)
+    const anchorSetup = S.anchorSignalId
+      ? (snap.setups || []).find(s => s.setup_id === S.anchorSignalId)
+      : null;
+    const anchor = anchorSignal || anchorSetup;
+    $("#chartPrice").textContent = anchor
+      ? fmtPrice(anchor.entry)
       : (row ? fmtPrice(row.price) : "—");
     const ch = num(row?.change_pct);
     const chEl = $("#chartChange");
-    if (anchorSignal) {
-      chEl.textContent = "SIGNAL BAR";
+    if (anchor) {
+      chEl.textContent = anchorSetup ? "SETUP BAR" : "SIGNAL BAR";
       chEl.className = "delta";
       chEl.style.color = "var(--amber)";
     } else {
@@ -617,13 +628,13 @@
     }
     const lastBar = S.bars[S.bars.length - 1];
     const liveEdge = lastBar && !lastBar.is_closed;
-    $("#chartSource").textContent = anchorSignal
+    $("#chartSource").textContent = anchor
       ? `${S.tf.toUpperCase()} · SIGNAL CONTEXT`
       : `${S.tf.toUpperCase()} · ${liveEdge ? "LIVE BAR + CLOSED" : "CLOSED BARS"}`;
     const badge = $("#chartAnchor");
-    badge.hidden = !anchorSignal;
-    if (anchorSignal) badge.textContent = `SIG ${shortDate(anchorSignal.bar_time)}`;
-    $("#liveChartBtn").hidden = !anchorSignal;
+    badge.hidden = !anchor;
+    if (anchor) badge.textContent = `SIG ${shortDate(anchor.bar_time || anchor.created_at)}`;
+    $("#liveChartBtn").hidden = !anchor;
     const freshness = liveEdge && lastBar?.ingest_time
       ? Math.max(0, num(snap.server_time) - num(lastBar.ingest_time))
       : null;
@@ -649,11 +660,15 @@
     const firstLoad = !S.bars.length;
     S.chartLoading = true;
     if (firstLoad) $("#chartLoading").classList.remove("hidden");
+    const setupAnchor = S.anchorSignalId
+      ? (S.snap?.setups || []).find(s => s.setup_id === S.anchorSignalId)
+      : null;
     const anchor = S.anchorSignalId
       ? (S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
       : null;
-    const endTime = anchor
-      ? num(anchor.bar_time) + 70 * (TF_MS[S.tf] || 900000)
+    const anchorTime = anchor?.bar_time || setupAnchor?.engine_signals?.[0]?.source_kline_open_time;
+    const endTime = anchorTime
+      ? num(anchorTime) + 70 * (TF_MS[S.tf] || 900000)
       : null;
     const url = `/api/klines?symbol=${encodeURIComponent(S.symbol)}&interval=${encodeURIComponent(S.tf)}&limit=220`
       + (endTime ? `&end_time=${endTime}` : "&include_live=true");
@@ -698,7 +713,22 @@
 
   function selectSignal(signalId) {
     const signal = (S.snap?.signals || []).find(s => s.id === signalId);
-    if (!signal) return;
+    if (!signal) {
+      const setup = (S.snap?.setups || []).find(s => s.setup_id === signalId);
+      if (setup) {
+        S.anchorSignalId = setup.setup_id;
+        S.symbol = setup.symbol;
+        S.tf = setup.interval;
+        S.chartLoaded = false;
+        S.bars = [];
+        $$("#tfTabs .tf").forEach(b => b.classList.toggle("active", b.dataset.tf === S.tf));
+        renderWatchlist(S.snap || {});
+        renderChartHeader(S.snap || {});
+        renderSignals(S.snap || {});
+        loadBars();
+      }
+      return;
+    }
     S.anchorSignalId = signal.id;
     S.symbol = signal.symbol;
     if (S.tf !== signal.interval) {
@@ -736,8 +766,12 @@
     const anchor = S.anchorSignalId
       ? (S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
       : null;
-    const b = anchor
-      ? S.bars.find(x => num(x.open_time) === num(anchor.bar_time))
+    const setup = S.anchorSignalId
+      ? (S.snap?.setups || []).find(s => s.setup_id === S.anchorSignalId)
+      : null;
+    const anchorTime = anchor?.bar_time || setup?.engine_signals?.[0]?.source_kline_open_time;
+    const b = anchorTime
+      ? S.bars.find(x => num(x.open_time) === num(anchorTime))
       : S.bars[S.bars.length - 1];
     if (!b) return;
     const up = b.close >= b.open;
@@ -748,7 +782,8 @@
   // ------------------------------------------------------- lightweight charts
   const lwc = {
     chart: null, candles: null, volume: null, ema20: null, ema50: null,
-    priceLines: [], seriesKey: "", lastLen: 0, width: 0, height: 0,
+    vwap: null, overlay: null, priceLines: [], seriesKey: "", lastLen: 0,
+    width: 0, height: 0,
   };
 
   function chartTime(ms) {
@@ -787,8 +822,191 @@
     });
     lwc.ema20.applyOptions({ color: CHART.ema20 });
     lwc.ema50.applyOptions({ color: CHART.ema50 });
+    lwc.vwap.applyOptions({ color: CHART.vwap });
     lwc.seriesKey = "";
     drawChart(true);
+  }
+
+  function createOverlayPrimitive() {
+    const state = {
+      chart: null, series: null, requestUpdate: null,
+      data: { zones: [], lines: [] },
+    };
+    const renderer = {
+      draw(target) {
+        target.useBitmapCoordinateSpace(scope => {
+          const ctx = scope.context;
+          const hr = scope.horizontalPixelRatio;
+          const vr = scope.verticalPixelRatio;
+          const ts = state.chart?.timeScale();
+          if (!ts || !state.series) return;
+          const toX = t => {
+            const x = ts.timeToCoordinate(t);
+            return x == null ? null : x * hr;
+          };
+          const toY = p => {
+            const y = state.series.priceToCoordinate(Number(p));
+            return y == null ? null : y * vr;
+          };
+          const width = scope.bitmapSize.width;
+          for (const z of state.data.zones) {
+            const y1 = toY(z.high);
+            const y2 = toY(z.low);
+            if (y1 == null || y2 == null) continue;
+            let x1 = toX(z.start_time);
+            let x2 = toX(z.end_time);
+            if (x1 == null) x1 = 0;
+            if (x2 == null) x2 = width;
+            if (x2 < x1) [x1, x2] = [x2, x1];
+            if (x2 - x1 < 2 * hr) x2 = x1 + 3 * hr;
+            const top = Math.min(y1, y2);
+            const height = Math.max(1 * vr, Math.abs(y2 - y1));
+            ctx.fillStyle = z.fill;
+            ctx.fillRect(x1, top, x2 - x1, height);
+            ctx.strokeStyle = z.border;
+            ctx.lineWidth = Math.max(1, hr);
+            ctx.setLineDash([3 * hr, 3 * hr]);
+            ctx.strokeRect(x1, top, x2 - x1, height);
+            ctx.setLineDash([]);
+            ctx.font = `${9 * hr}px Cascadia Code, Consolas, monospace`;
+            ctx.fillStyle = z.label_color;
+            ctx.textAlign = "right";
+            ctx.textBaseline = "bottom";
+            ctx.fillText(z.label, x2 - 3 * hr, top - 2 * vr);
+          }
+          for (const l of state.data.lines) {
+            const y = toY(l.price);
+            if (y == null) continue;
+            let x1 = toX(l.start_time);
+            let x2 = toX(l.end_time);
+            if (x1 == null) x1 = 0;
+            if (x2 == null) x2 = width;
+            ctx.strokeStyle = l.color;
+            ctx.lineWidth = Math.max(1, hr);
+            ctx.setLineDash([5 * hr, 4 * hr]);
+            ctx.beginPath();
+            ctx.moveTo(x1, y);
+            ctx.lineTo(x2, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.font = `${9 * hr}px Cascadia Code, Consolas, monospace`;
+            ctx.fillStyle = l.color;
+            ctx.textAlign = "left";
+            ctx.textBaseline = "bottom";
+            ctx.fillText(l.label, x1 + 3 * hr, y - 2 * vr);
+          }
+        });
+      },
+    };
+    const view = { renderer: () => renderer };
+    return {
+      attached(param) {
+        state.chart = param.chart;
+        state.series = param.series;
+        state.requestUpdate = param.requestUpdate;
+      },
+      detached() {},
+      paneViews() { return [view]; },
+      updateAllViews() {},
+      setData(data) {
+        state.data = data || { zones: [], lines: [] };
+        state.requestUpdate?.();
+      },
+    };
+  }
+
+  function buildOverlays(bars) {
+    if (!bars.length) return { zones: [], lines: [] };
+    const step = TF_MS[S.tf] || 900000;
+    const last = bars[bars.length - 1];
+    const end = chartTime(last.open_time) + step / 1000;
+    const atr = (() => {
+      const n = Math.min(14, bars.length - 1);
+      if (n < 1) return 0;
+      let total = 0;
+      for (let i = bars.length - n; i < bars.length; i++) {
+        total += Math.max(0, num(bars[i].high) - num(bars[i].low));
+      }
+      return total / n;
+    })();
+    const zones = [];
+    const lines = [];
+    const startIdx = Math.max(2, bars.length - 140);
+    const minGap = Math.max(atr * 0.035, Math.abs(num(last.close)) * 0.00005);
+
+    // ICT fair value gaps: 3-candle imbalance.
+    for (let i = startIdx; i < bars.length - 1; i++) {
+      const a = bars[i - 2], c = bars[i];
+      const bull = num(c.low) - num(a.high);
+      const bear = num(a.low) - num(c.high);
+      if (bull > minGap) {
+        zones.push({
+          kind: "fvg", label: "FVG", low: num(a.high), high: num(c.low),
+          start_time: chartTime(a.open_time), end_time: chartTime(c.open_time) + step / 1000,
+          fill: CHART.zoneIct, border: CHART.zoneIctBorder, label_color: CHART.zoneIctBorder,
+        });
+      } else if (bear > minGap) {
+        zones.push({
+          kind: "fvg", label: "FVG", low: num(c.high), high: num(a.low),
+          start_time: chartTime(a.open_time), end_time: chartTime(c.open_time) + step / 1000,
+          fill: CHART.zoneIct, border: CHART.zoneIctBorder, label_color: CHART.zoneIctBorder,
+        });
+      }
+    }
+
+    // ICT order blocks: last opposite candle before a displacement candle.
+    for (let i = startIdx + 1; i < bars.length; i++) {
+      const prev = bars[i - 1], cur = bars[i];
+      const body = Math.abs(num(cur.close) - num(cur.open));
+      if (body < atr * 0.95) continue;
+      const bull = num(cur.close) > num(cur.open);
+      const prevBear = num(prev.close) < num(prev.open);
+      if (bull === prevBear) continue;
+      zones.push({
+        kind: "orderblock", label: "OB",
+        low: Math.min(num(prev.open), num(prev.close)),
+        high: Math.max(num(prev.open), num(prev.close)),
+        start_time: chartTime(prev.open_time), end_time: chartTime(cur.open_time) + 3 * step / 1000,
+        fill: "rgba(242,184,75,.13)", border: "rgba(242,184,75,.50)", label_color: "rgba(242,184,75,.7)",
+      });
+    }
+
+    // Chan central zone from the newest real Chan engine signal/setup.
+    let chanZone = null;
+    const candidates = [];
+    for (const st of (S.snap?.setups || [])) {
+      if (st.engine === "chan" && st.engine_signals?.length) candidates.push(st.engine_signals[0]);
+    }
+    for (const es of (S.snap?.engine_signals || [])) {
+      if (es.engine === "chan") candidates.push(es);
+    }
+    for (const es of candidates) {
+      const ev = es.evidence || {};
+      const zd = Number(ev.last_zs_zd);
+      const zg = Number(ev.last_zs_zg);
+      if (Number.isFinite(zd) && Number.isFinite(zg) && zd < zg) {
+        chanZone = { zd, zg, time: chartTime(es.source_kline_open_time), label: ev.bsp_type || "CHAN" };
+        break;
+      }
+    }
+    if (chanZone) {
+      zones.push({
+        kind: "chan_zs", label: `CHAN ZS · ${chanZone.label}`, low: chanZone.zd, high: chanZone.zg,
+        start_time: chanZone.time, end_time: end,
+        fill: CHART.zoneChan, border: CHART.zoneChanBorder, label_color: CHART.zoneChanBorder,
+      });
+    }
+
+    // Liquidity / 24h high-low reference lines.
+    const lookback = bars.slice(-Math.min(96, bars.length));
+    if (lookback.length) {
+      const hi = Math.max(...lookback.map(b => num(b.high)));
+      const lo = Math.min(...lookback.map(b => num(b.low)));
+      const first = chartTime(lookback[0].open_time);
+      lines.push({ price: hi, start_time: first, end_time: end, label: "LIQ HI", color: "rgba(255,98,115,.45)" });
+      lines.push({ price: lo, start_time: first, end_time: end, label: "LIQ LO", color: "rgba(44,229,163,.42)" });
+    }
+    return { zones: zones.slice(-18), lines };
   }
 
   function ensureChart() {
@@ -828,6 +1046,16 @@
         barSpacing: 5,
         fixLeftEdge: true,
         textColor: CHART.axis,
+        tickMarkFormatter: (time) => {
+          const d = new Date(time * 1000);
+          return S.tf === "1d"
+            ? d.toLocaleDateString("en-GB", { timeZone: "Asia/Shanghai", day: "2-digit", month: "short" })
+            : d.toLocaleTimeString("en-GB", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit" });
+        },
+      },
+      localization: {
+        locale: "en-GB",
+        timeFormatter: (time) => shortDate(time * 1000),
       },
       crosshair: {
         mode: window.LightweightCharts.CrosshairMode.Normal,
@@ -859,11 +1087,20 @@
       color: CHART.ema50, lineWidth: 1, priceLineVisible: false,
       lastValueVisible: false, crosshairMarkerVisible: false,
     });
+    const vwap = chart.addLineSeries({
+      color: CHART.vwap, lineWidth: 1, lineStyle: 2,
+      priceLineVisible: false, lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const overlay = createOverlayPrimitive();
+    candles.attachPrimitive(overlay);
     lwc.chart = chart;
     lwc.candles = candles;
     lwc.volume = volume;
     lwc.ema20 = ema20;
     lwc.ema50 = ema50;
+    lwc.vwap = vwap;
+    lwc.overlay = overlay;
     chart.subscribeCrosshairMove(param => {
       if (!param.time || !param.point) {
         $("#crosshairTip").style.display = "none";
@@ -903,6 +1140,16 @@
 
   function chartLevels() {
     if (!S.snap) return [];
+    const setup = (S.snap.setups || []).find(
+      s => s.setup_id === S.anchorSignalId && s.symbol === S.symbol,
+    );
+    if (setup) {
+      return [
+        { price: setup.entry, color: CHART.entry, label: "SETUP", dash: true },
+        { price: setup.stop, color: CHART.stop, label: "SL", dash: true },
+        { price: setup.target, color: CHART.target, label: "TP", dash: true },
+      ];
+    }
     const pos = (S.snap.positions || []).find(p => p.symbol === S.symbol);
     if (pos) {
       return [
@@ -939,21 +1186,41 @@
         axisLabelVisible: true, title: l.label,
       }));
     }
-    const anchor = S.anchorSignalId
+    const markers = [];
+    const seen = new Set();
+    const addMarker = (time, direction, text) => {
+      const t = chartTime(time);
+      if (!Number.isFinite(t) || seen.has(t)) return;
+      if (!bars.some(b => chartTime(b.open_time) === t)) return;
+      seen.add(t);
+      markers.push({
+        time: t,
+        position: direction === "long" ? "belowBar" : "aboveBar",
+        color: CHART.sig,
+        shape: direction === "long" ? "arrowUp" : "arrowDown",
+        text: text || "SIG",
+      });
+    };
+    let anchor = S.anchorSignalId
       ? (S.snap?.signals || []).find(s => s.id === S.anchorSignalId)
       : null;
-    const markerBar = anchor ? bars.find(b => chartTime(b.open_time) === chartTime(anchor.bar_time)) : null;
-    if (anchor && markerBar) {
-      lwc.candles.setMarkers([{
-        time: chartTime(markerBar.open_time),
-        position: anchor.direction === "long" ? "belowBar" : "aboveBar",
-        color: CHART.sig,
-        shape: anchor.direction === "long" ? "arrowUp" : "arrowDown",
-        text: "SIG",
-      }]);
-    } else {
-      lwc.candles.setMarkers([]);
+    const anchorSetup = S.anchorSignalId
+      ? (S.snap?.setups || []).find(s => s.setup_id === S.anchorSignalId)
+      : null;
+    if (!anchor && anchorSetup?.engine_signals?.length) {
+      const e = anchorSetup.engine_signals[0];
+      anchor = { bar_time: e.source_kline_open_time, direction: e.direction, engine: e.engine, evidence: e.evidence };
     }
+    if (anchor?.bar_time) {
+      const bsp = anchor.evidence?.bsp_type || "";
+      addMarker(anchor.bar_time, anchor.direction, bsp || "SIG");
+    }
+    for (const e of (S.snap?.engine_signals || [])) {
+      if (e.engine !== "chan") continue;
+      const bsp = e.evidence?.bsp_type || "CHAN";
+      addMarker(e.source_kline_open_time, e.direction, bsp);
+    }
+    lwc.candles.setMarkers(markers.slice(-12));
   }
 
   function setChartData(bars, fit) {
@@ -975,7 +1242,9 @@
     const e50 = ema(closes, 50);
     lwc.ema20.setData(S.ema ? bars.map((b, i) => ({ time: chartTime(b.open_time), value: e20[i] })).filter(x => x.value !== null && Number.isFinite(x.value)) : []);
     lwc.ema50.setData(S.ema ? bars.map((b, i) => ({ time: chartTime(b.open_time), value: e50[i] })).filter(x => x.value !== null && Number.isFinite(x.value)) : []);
+    lwc.vwap.setData(vwapData(bars));
     applyChartAnnotations(bars);
+    lwc.overlay?.setData(buildOverlays(bars));
     lwc.lastLen = bars.length;
     if (fit) lwc.chart.timeScale().fitContent();
   }
@@ -1008,8 +1277,11 @@
       const e50 = ema(closes, 50);
       if (S.ema && Number.isFinite(e20[e20.length - 1])) lwc.ema20.update({ time: t, value: e20[e20.length - 1] });
       if (S.ema && Number.isFinite(e50[e50.length - 1])) lwc.ema50.update({ time: t, value: e50[e50.length - 1] });
+      const vw = vwapData(bars);
+      if (vw.length) lwc.vwap.update(vw[vw.length - 1]);
       lwc.lastLen = bars.length;
       applyChartAnnotations(bars);
+      lwc.overlay?.setData(buildOverlays(bars));
     }
     $("#chartLoading").classList.add("hidden");
     $("#chartEmpty")?.classList.add("hidden");
@@ -1027,6 +1299,8 @@
       lwc.volume.setData([]);
       lwc.ema20.setData([]);
       lwc.ema50.setData([]);
+      lwc.vwap?.setData([]);
+      lwc.overlay?.setData({ zones: [], lines: [] });
       lwc.candles.setMarkers([]);
       lwc.lastLen = 0;
     }

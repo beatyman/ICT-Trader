@@ -183,11 +183,14 @@ class SetupManager:
         return setup
 
     async def on_price(self, symbol: str, price: float, *,
+                       interval: str | None = None,
                        high: float | None = None, low: float | None = None,
                        now: int | None = None) -> None:
         now = now or int(_now_dt().timestamp() * 1000)
         for setup in list(self._setups.values()):
             if setup.symbol != symbol or not setup.is_active:
+                continue
+            if interval is not None and setup.interval != interval:
                 continue
             setup.last_price = float(price)
             if setup.status == "DETECTED":
@@ -225,11 +228,14 @@ class SetupManager:
                     setup.updated_at = now
                     await self._transition(setup, "SL", setup.stop, now, "stop hit")
 
-    async def on_bar(self, symbol: str, *, high: float, low: float,
+    async def on_bar(self, symbol: str, *, interval: str, high: float, low: float,
                      close: float, now: int) -> None:
-        await self.on_price(symbol, close, high=high, low=low, now=now)
+        await self.on_price(symbol, close, interval=interval,
+                            high=high, low=low, now=now)
         for setup in list(self._setups.values()):
             if setup.symbol != symbol or not setup.is_active:
+                continue
+            if setup.interval != interval:
                 continue
             setup.bars_alive += 1
             if setup.bars_alive > self.max_bars:

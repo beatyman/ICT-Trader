@@ -32,10 +32,10 @@ def test_setup_lifecycle_persists_transitions():
         setup = await manager.on_signal(signal(), now=1_700_000_100_000)
         assert setup is not None
         assert setup.status == "DETECTED"
-        await manager.on_price("BTCUSDT", 100.0, high=100.5, low=99.5,
+        await manager.on_price("BTCUSDT", 100.0, interval="15m", high=100.5, low=99.5,
                                now=1_700_000_200_000)
         assert setup.status == "OPEN"
-        await manager.on_price("BTCUSDT", 110.0, high=110.5, low=109.5,
+        await manager.on_price("BTCUSDT", 110.0, interval="15m", high=110.5, low=109.5,
                                now=1_700_000_300_000)
         assert setup.status == "CLOSED"
         assert setup.exit_price == 110.0
@@ -60,7 +60,7 @@ def test_setup_expires_without_trigger():
         manager = SetupManager(persist_setup, persist_event, max_bars=4)
         setup = await manager.on_signal(signal(), now=1_700_000_100_000)
         for i in range(5):
-            await manager.on_bar("BTCUSDT", high=102.0, low=101.5, close=101.8,
+            await manager.on_bar("BTCUSDT", interval="15m", high=102.0, low=101.5, close=101.8,
                                  now=1_700_000_200_000 + i * 900_000)
         assert setup.status == "EXPIRED"
         assert setup.bars_alive == 5

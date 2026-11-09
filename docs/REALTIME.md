@@ -275,6 +275,26 @@ build_setup(df_15m, result, SetupConfig(market="crypto", stack=...))
 * WebSocket snapshot at 1 Hz, `/api/snapshot`, `/api/klines`,
   `/api/health`, `/api/docs`.
 
+### Chart overlays (Lightweight Charts primitives)
+
+The chart is rendered by Lightweight Charts; ICT/Chan/auxiliary overlays are
+drawn by a series primitive, not a separate canvas:
+
+- **ICT FVG**: 3-candle imbalance, exact `open_time` start/end.
+- **ICT order block**: last opposite candle before a displacement candle.
+- **Liquidity**: recent 24h high/low reference lines.
+- **Chan ZS**: latest Chan engine signal's `last_zs_zd/zg`, drawn from its
+  source bar to the right edge.
+- **VWAP**: cumulative typical-price VWAP line.
+- **EMA20/50**, volume, Entry/Stop/Target price lines and `SIG` markers.
+
+Zones/lines are converted with the chart's own
+`timeScale().timeToCoordinate()` and `series.priceToCoordinate()` inside
+`ISeriesPrimitivePaneRenderer`, so they stay aligned during pan, zoom and
+resize. FVG/OB are visual context derived from closed bars; they are not
+additional executable signals. The signal/setup lifecycle remains owned by
+the backend.
+
 ### Dark / light theme
 
 The top-right theme button toggles the whole terminal without a reload; the

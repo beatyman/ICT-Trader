@@ -98,7 +98,8 @@ class StreamSession:
         self.last_update_time = utc_ms()
         self.engine.latest_bars[(bar.symbol, bar.interval)] = bar
         await self.engine.setups.on_price(
-            bar.symbol, bar.close, high=bar.high, low=bar.low, now=utc_ms(),
+            bar.symbol, bar.close, interval=bar.interval,
+            high=bar.high, low=bar.low, now=utc_ms(),
         )
         start = time.perf_counter()
         try:
@@ -637,7 +638,8 @@ class RealtimeEngine:
         for symbol in closes:
             await self.broker.close_time_stop(symbol, bar.close)
         await self.runner.on_closed(bar)
-        await self.setups.on_bar(bar.symbol, high=bar.high, low=bar.low,
+        await self.setups.on_bar(bar.symbol, interval=bar.interval,
+                                 high=bar.high, low=bar.low,
                                  close=bar.close, now=utc_ms())
         if not recovered:
             self._schedule_registry(bar)

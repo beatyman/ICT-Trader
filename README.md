@@ -33,7 +33,7 @@ This branch adds a local, Docker-backed realtime paper-trading stack around the
 same frozen setup: live Binance combined-stream WS ingestion, Redis hot cache,
 ClickHouse closed-bar storage, gap detection + REST backfill, a SQLite WAL retry
 queue, a closed-bar strategy adapter, a deterministic paper broker and a
-self-contained Lightweight Charts dashboard.
+self-contained Lightweight Charts dashboard with ICT/Chan overlays.
 
 ```powershell
 # Redis + ClickHouse (memory-capped, local-only ports)

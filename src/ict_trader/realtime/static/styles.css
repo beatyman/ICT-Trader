@@ -733,3 +733,7 @@ html[data-theme="light"] .statusbar b { color: #3f5268; }
 .ai-history-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-2); }
 .ai-history-row small { color: var(--muted-2); white-space: nowrap; }
 html[data-theme="light"] .ai-history-row { border-bottom-color: rgba(23,44,74,.07); }
+
+.legend-line.vwap { background: var(--amber); }
+.legend-box.ict { background: rgba(84,200,248,.25); border-color: rgba(84,200,248,.5); }
+.legend-box.chan { background: rgba(184,157,255,.25); border-color: rgba(184,157,255,.5); }
