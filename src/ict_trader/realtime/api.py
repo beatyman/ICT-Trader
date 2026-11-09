@@ -140,6 +140,9 @@ def create_app(engine: RealtimeEngine) -> FastAPI:
 
     @app.get("/api/ai/decisions")
     async def ai_decisions() -> JSONResponse:
+        persisted = await engine.ch.load_ai_decisions(50)
+        if persisted:
+            return JSONResponse(persisted)
         return JSONResponse(list(engine.ai_decisions)[-50:])
 
     @app.get("/api/engines")

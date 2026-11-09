@@ -18,7 +18,7 @@ import orjson
 from clickhouse_connect.driver.exceptions import ClickHouseError
 
 from ..metrics import Metrics
-from ..models import Kline
+from ..models import Kline, dt_to_ms
 from .analytics_schema import TABLES as ANALYTICS_TABLES, ensure_analytics_schema
 from .batch_writer import AnalyticsBatchWriter
 from .row_mappers import ENGINE_SIGNAL_COLUMNS, engine_signal_row
@@ -386,6 +386,42 @@ class ClickHouseStore:
             "slippage_bps", "reason", "event_time", "created_at", "ingested_at",
         ]
         await self.analytics.enqueue("tp_sl_events", columns, [row])
+
+    async def load_ai_decisions(self, limit: int = 50) -> list[dict[str, Any]]:
+        query = f"""
+            SELECT decision_id, setup_id, symbol, interval, provider, model,
+                   parsed_decision, raw_output, decision_status, latency_ms,
+                   total_tokens, created_at
+            FROM {self.database}.ai_decisions FINAL
+            ORDER BY created_at DESC
+            LIMIT {{limit:UInt32}}
+        """
+        rows = await asyncio.to_thread(
+            self._query_sync, query, parameters={"limit": int(limit)},
+        )
+        out: list[dict[str, Any]] = []
+        for r in rows.result_rows:
+            try:
+                parsed = orjson.loads(r[6] or "{}")
+            except Exception:
+                parsed = {}
+            status_raw = r[8]
+            status = {
+                "success": 1, "schema_invalid": 2, "api_timeout": 3,
+                "api_error": 4, "degraded_to_rules": 5,
+            }.get(str(status_raw), int(status_raw) if str(status_raw).isdigit() else 0)
+            out.append({
+                "decision_id": r[0], "setup_id": r[1], "symbol": r[2],
+                "interval": r[3], "provider": r[4], "model": r[5],
+                "parsed": parsed,
+                "verdict": parsed.get("verdict"),
+                "confidence": parsed.get("confidence"),
+                "headline": parsed.get("headline"),
+                "raw_output": r[7], "status": status,
+                "latency_ms": int(r[9]), "total_tokens": int(r[10]),
+                "created_at": dt_to_ms(r[11]),
+            })
+        return out
 
     async def insert_ai_decision(self, row: tuple) -> None:
         columns = [
