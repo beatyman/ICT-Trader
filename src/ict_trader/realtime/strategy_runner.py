@@ -232,6 +232,8 @@ class ICTStrategyRunner:
         self.last_eval_ms[symbol] = bar.open_time
         self.last_eval_duration_ms[symbol] = elapsed
         self.metrics.observe("strategy_eval_ms", elapsed)
+        close_to_signal = max(0, utc_ms() - bar.close_time)
+        self.metrics.observe("signal_latency_ms", close_to_signal)
         self.metrics.inc("strategy_eval")
         for signal in signals:
             if signal.id in self._seen:

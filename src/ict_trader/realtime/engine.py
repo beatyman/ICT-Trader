@@ -81,6 +81,7 @@ class StreamSession:
     async def _handle_live(self, bar: Kline) -> None:
         self.live_count += 1
         self.last_update_time = utc_ms()
+        self.engine.latest_bars[(bar.symbol, bar.interval)] = bar
         start = time.perf_counter()
         try:
             latency = await self.engine.redis.update_latest(bar)
@@ -233,6 +234,7 @@ class RealtimeEngine:
         self.runner.on_signal = self._on_signal
         self.broker.on_trade = self._on_trade
         self.sessions: dict[tuple[str, str], StreamSession] = {}
+        self.latest_bars: dict[tuple[str, str], Kline] = {}
         self.feed: BinanceKlineFeed | DemoFeed | None = None
         self.phase = "idle"
         self.boot_error = ""
@@ -408,6 +410,7 @@ class RealtimeEngine:
         self.sessions[(symbol, interval)] = session
         if bars:
             session.detector.last_closed_open_time = bars[-1].open_time
+            self.latest_bars[(symbol, interval)] = bars[-1]
             for bar in bars:
                 await self.ch.enqueue(bar)
             await self.redis.seed_closed(bars[-max(200, min(800, limit)):])
@@ -432,6 +435,7 @@ class RealtimeEngine:
     # ------------------------------------------------------------------
     async def _process_closed(self, bar: Kline, *, recovered: bool) -> None:
         start = time.perf_counter()
+        self.latest_bars[(bar.symbol, bar.interval)] = bar
         redis_ms = await self.redis.store_closed(bar, recovered=recovered)
         await self.ch.enqueue(bar)
         now = utc_ms()
@@ -577,6 +581,7 @@ class RealtimeEngine:
             "strategy": self.runner.snapshot(),
             "signals": [s.to_public() for s in signals[:30]],
             "watchlist": self.runner.watchlist(),
+            "live_bars": [bar.to_public() for bar in self.latest_bars.values()],
             "account": broker["account"],
             "positions": broker["positions"],
             "trades": broker["trades"],

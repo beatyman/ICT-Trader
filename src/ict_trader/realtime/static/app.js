@@ -30,6 +30,36 @@
 
   const TF_MS = { "1m": 60000, "5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000, "1d": 86400000 };
 
+  function themeColors() {
+    const light = document.documentElement.dataset.theme === "light";
+    return light ? {
+      grid: "rgba(23,44,74,.07)", gridStrong: "rgba(23,44,74,.13)",
+      axis: "rgba(75,94,118,.72)", axisFaint: "rgba(75,94,118,.58)",
+      volUp: "rgba(7,132,94,.16)", volDown: "rgba(196,59,76,.16)",
+      up: "#07845e", down: "#c43b4c",
+      upFill: "rgba(7,132,94,.72)", downFill: "rgba(196,59,76,.72)",
+      ema20: "rgba(8,114,143,.85)", ema50: "rgba(94,73,180,.78)",
+      cross: "rgba(40,60,85,.3)", crossBg: "rgba(255,255,255,.97)",
+      crossText: "#26384e", tagText: "#ffffff",
+      sig: "#98610b", entry: "rgba(152,97,11,.8)",
+      stop: "rgba(196,59,76,.75)", target: "rgba(7,132,94,.75)",
+      noData: "rgba(75,94,118,.7)",
+    } : {
+      grid: "rgba(157,184,214,.055)", gridStrong: "rgba(157,184,214,.11)",
+      axis: "rgba(123,138,158,.58)", axisFaint: "rgba(123,138,158,.5)",
+      volUp: "rgba(44,229,163,.18)", volDown: "rgba(255,98,115,.18)",
+      up: "#2ce5a3", down: "#ff6273",
+      upFill: "rgba(44,229,163,.78)", downFill: "rgba(255,98,115,.78)",
+      ema20: "rgba(84,200,248,.8)", ema50: "rgba(184,157,255,.72)",
+      cross: "rgba(207,222,240,.25)", crossBg: "rgba(18,28,42,.96)",
+      crossText: "#cfd9e6", tagText: "#07110e",
+      sig: "#f2b84b", entry: "rgba(242,184,75,.75)",
+      stop: "rgba(255,98,115,.7)", target: "rgba(44,229,163,.7)",
+      noData: "rgba(123,138,158,.65)",
+    };
+  }
+  let CHART = themeColors();
+
   const COINS = {
     BTCUSDT: ["₿", "coin-btc"],
     ETHUSDT: ["Ξ", "coin-eth"],
@@ -176,6 +206,11 @@
     }
 
     renderAll(snap);
+    if (applyLiveBar(snap)) {
+      renderChartHeader(snap);
+      drawChart();
+      if (!S.mouse) showLatestOhlc();
+    }
 
     if (S.phase === "ready" && !S.chartLoaded && !S.chartLoading) {
       loadBars();
@@ -551,9 +586,11 @@
       chEl.className = "delta" + (ch < 0 ? " down" : "");
       chEl.style.color = "";
     }
+    const lastBar = S.bars[S.bars.length - 1];
+    const liveEdge = lastBar && !lastBar.is_closed;
     $("#chartSource").textContent = anchorSignal
       ? `${S.tf.toUpperCase()} · SIGNAL CONTEXT`
-      : `${S.tf.toUpperCase()} · CLOSED BARS`;
+      : `${S.tf.toUpperCase()} · ${liveEdge ? "LIVE BAR + CLOSED" : "CLOSED BARS"}`;
     const badge = $("#chartAnchor");
     badge.hidden = !anchorSignal;
     if (anchorSignal) badge.textContent = `SIG ${shortDate(anchorSignal.bar_time)}`;
@@ -592,6 +629,8 @@
       S.bars = data.bars || [];
       S.chartLoaded = S.bars.length > 0;
       S.mouse = null;
+      applyLiveBar(S.snap || {});
+      renderChartHeader(S.snap || {});
       drawChart();
       if (S.bars.length) showLatestOhlc();
     } catch (err) {
@@ -636,6 +675,25 @@
     renderChartHeader(S.snap || {});
     renderSignals(S.snap || {});
     loadBars();
+  }
+
+  function applyLiveBar(snap) {
+    if (S.anchorSignalId || !S.chartLoaded || !S.bars.length) return false;
+    const live = (snap.live_bars || []).find(
+      b => b.symbol === S.symbol && b.interval === S.tf,
+    );
+    if (!live) return false;
+    const last = S.bars[S.bars.length - 1];
+    if (num(live.open_time) === num(last.open_time)) {
+      S.bars[S.bars.length - 1] = live;
+      return true;
+    }
+    if (num(live.open_time) > num(last.open_time)) {
+      S.bars.push(live);
+      if (S.bars.length > 260) S.bars.shift();
+      return true;
+    }
+    return false;
   }
 
   function showLatestOhlc() {
@@ -683,12 +741,12 @@
 
   function renderNoData(msg) {
     const { ctx, w, h } = setupCanvas();
-    ctx.strokeStyle = "rgba(157,184,214,.08)";
+    ctx.strokeStyle = CHART.grid;
     ctx.lineWidth = 1;
     for (let i = 1; i < 6; i++) {
       ctx.beginPath(); ctx.moveTo(10, i * h / 6); ctx.lineTo(w - 64, i * h / 6); ctx.stroke();
     }
-    ctx.fillStyle = "rgba(123,138,158,.65)";
+    ctx.fillStyle = CHART.noData;
     ctx.font = "10px Cascadia Code, Consolas, monospace";
     ctx.textAlign = "center";
     ctx.fillText(msg || "no closed bars yet", w / 2, h / 2);
@@ -699,9 +757,9 @@
     const pos = (S.snap.positions || []).find(p => p.symbol === S.symbol);
     if (pos) {
       return [
-        { price: pos.entry, color: "rgba(242,184,75,.85)", label: "ENTRY", dash: [4, 4] },
-        { price: pos.stop, color: "rgba(255,98,115,.8)", label: "STOP", dash: [4, 4] },
-        { price: pos.target, color: "rgba(44,229,163,.8)", label: "TARGET", dash: [4, 4] },
+        { price: pos.entry, color: CHART.entry, label: "ENTRY", dash: [4, 4] },
+        { price: pos.stop, color: CHART.stop, label: "STOP", dash: [4, 4] },
+        { price: pos.target, color: CHART.target, label: "TARGET", dash: [4, 4] },
       ];
     }
     const anchored = S.anchorSignalId
@@ -712,9 +770,9 @@
     );
     if (sig) {
       return [
-        { price: sig.entry, color: "rgba(242,184,75,.75)", label: "SIGNAL", dash: [3, 5] },
-        { price: sig.stop, color: "rgba(255,98,115,.7)", label: "SL", dash: [3, 5] },
-        { price: sig.target, color: "rgba(44,229,163,.7)", label: "TP", dash: [3, 5] },
+        { price: sig.entry, color: CHART.entry, label: "SIGNAL", dash: [3, 5] },
+        { price: sig.stop, color: CHART.stop, label: "SL", dash: [3, 5] },
+        { price: sig.target, color: CHART.target, label: "TP", dash: [3, 5] },
       ];
     }
     return [];
@@ -753,11 +811,11 @@
     ctx.textBaseline = "middle";
     for (let i = 0; i <= 5; i++) {
       const y = m.t + (priceH / 5) * i;
-      ctx.strokeStyle = i === 5 ? "rgba(157,184,214,.11)" : "rgba(157,184,214,.055)";
+      ctx.strokeStyle = i === 5 ? CHART.gridStrong : CHART.grid;
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(m.l, Math.round(y) + .5); ctx.lineTo(m.l + plotW, Math.round(y) + .5); ctx.stroke();
       const price = hi - (hi - lo) * (i / 5);
-      ctx.fillStyle = "rgba(123,138,158,.58)";
+      ctx.fillStyle = CHART.axis;
       ctx.textAlign = "left";
       ctx.fillText(fmtPrice(price), m.l + plotW + 7, y);
     }
@@ -766,7 +824,7 @@
     const gridEvery = Math.max(24, Math.floor(bars.length / 6));
     for (let i = gridEvery; i < bars.length; i += gridEvery) {
       const x = xFor(i);
-      ctx.strokeStyle = "rgba(157,184,214,.04)";
+      ctx.strokeStyle = CHART.grid;
       ctx.beginPath(); ctx.moveTo(x, m.t); ctx.lineTo(x, m.t + priceH); ctx.stroke();
     }
 
@@ -775,19 +833,19 @@
     bars.forEach((b, i) => {
       const up = b.close >= b.open;
       const vh = Math.max(1, (num(b.volume) / (maxVol || 1)) * volH);
-      ctx.fillStyle = up ? "rgba(44,229,163,.18)" : "rgba(255,98,115,.18)";
+      ctx.fillStyle = up ? CHART.volUp : CHART.volDown;
       ctx.fillRect(xFor(i) - bodyW / 2, volTop + volH - vh, bodyW, vh);
     });
-    ctx.strokeStyle = "rgba(157,184,214,.05)";
+    ctx.strokeStyle = CHART.grid;
     ctx.beginPath(); ctx.moveTo(m.l, volTop - 5); ctx.lineTo(m.l + plotW, volTop - 5); ctx.stroke();
 
     // Candles.
     bars.forEach((b, i) => {
       const up = b.close >= b.open;
-      const color = up ? "#2ce5a3" : "#ff6273";
+      const color = up ? CHART.up : CHART.down;
       const x = xFor(i);
       ctx.strokeStyle = color;
-      ctx.fillStyle = up ? "rgba(44,229,163,.78)" : "rgba(255,98,115,.78)";
+      ctx.fillStyle = up ? CHART.upFill : CHART.downFill;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(Math.round(x) + .5, yFor(num(b.high)));
@@ -802,7 +860,7 @@
     // EMAs.
     if (S.ema) {
       const closes = bars.map(b => num(b.close));
-      [[20, "rgba(84,200,248,.8)"], [50, "rgba(184,157,255,.72)"]].forEach(([period, color]) => {
+      [[20, CHART.ema20], [50, CHART.ema50]].forEach(([period, color]) => {
         const vals = ema(closes, period);
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.1;
@@ -842,11 +900,11 @@
         const x = xFor(idx);
         ctx.save();
         ctx.setLineDash([2, 4]);
-        ctx.strokeStyle = "rgba(242,184,75,.7)";
+        ctx.strokeStyle = CHART.entry;
         ctx.beginPath(); ctx.moveTo(x, m.t); ctx.lineTo(x, m.t + priceH + volH + 7); ctx.stroke();
         ctx.restore();
         const y = yFor(num(anchor.entry));
-        ctx.fillStyle = "#f2b84b";
+        ctx.fillStyle = CHART.sig;
         ctx.beginPath();
         ctx.moveTo(x, y - 9);
         ctx.lineTo(x - 4, y - 16);
@@ -864,19 +922,19 @@
     const upLast = last.close >= last.open;
     ctx.save();
     ctx.setLineDash([2, 4]);
-    ctx.strokeStyle = upLast ? "rgba(44,229,163,.35)" : "rgba(255,98,115,.35)";
+    ctx.strokeStyle = upLast ? CHART.upFill : CHART.downFill;
     ctx.beginPath(); ctx.moveTo(m.l, lastY); ctx.lineTo(m.l + plotW, lastY); ctx.stroke();
     ctx.restore();
     const tagW = 58, tagH = 16;
-    ctx.fillStyle = upLast ? "#2ce5a3" : "#ff6273";
+    ctx.fillStyle = upLast ? CHART.up : CHART.down;
     ctx.fillRect(m.l + plotW + 4, lastY - tagH / 2, tagW, tagH);
-    ctx.fillStyle = "#07110e";
+    ctx.fillStyle = CHART.tagText;
     ctx.font = "bold 9px Cascadia Code, Consolas, monospace";
     ctx.textAlign = "center";
     ctx.fillText(fmtPrice(last.close), m.l + plotW + 4 + tagW / 2, lastY);
 
     // Time labels.
-    ctx.fillStyle = "rgba(123,138,158,.5)";
+    ctx.fillStyle = CHART.axisFaint;
     ctx.font = "8px Cascadia Code, Consolas, monospace";
     ctx.textAlign = "center";
     for (let i = 0; i < bars.length; i += gridEvery) {
@@ -896,14 +954,14 @@
       const y = Math.max(m.t, Math.min(m.t + priceH, S.mouse.y));
       ctx.save();
       ctx.setLineDash([3, 4]);
-      ctx.strokeStyle = "rgba(207,222,240,.25)";
+      ctx.strokeStyle = CHART.cross;
       ctx.beginPath(); ctx.moveTo(x, m.t); ctx.lineTo(x, m.t + priceH + volH + 7); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(m.l, y); ctx.lineTo(m.l + plotW, y); ctx.stroke();
       ctx.restore();
       const price = hi - (y - m.t) / priceH * (hi - lo);
-      ctx.fillStyle = "rgba(18,28,42,.96)";
+      ctx.fillStyle = CHART.crossBg;
       ctx.fillRect(m.l + plotW + 3, y - 8, 60, 16);
-      ctx.fillStyle = "#cfd9e6";
+      ctx.fillStyle = CHART.crossText;
       ctx.font = "8px Cascadia Code, Consolas, monospace";
       ctx.textAlign = "center";
       ctx.fillText(fmtPrice(price), m.l + plotW + 33, y);
@@ -1120,6 +1178,10 @@
       e.currentTarget.style.color = S.notify ? "var(--green)" : "var(--muted)";
       showToast("Notifications", S.notify ? "Signal alerts enabled." : "Signal alerts muted.");
     });
+    $("#themeBtn").addEventListener("click", () => {
+      const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+      applyTheme(next, true);
+    });
     $("#aiReviewBtn").addEventListener("click", runAiReview);
     $("#aiReviewBtnTop").addEventListener("click", runAiReview);
     $("#aiCloseBtn").addEventListener("click", closeAiModal);
@@ -1171,9 +1233,11 @@
     setInterval(() => {
       if (!S.wsOpen) fetchSnapshot();
     }, 5000);
+    // Historical bars refresh slowly; the latest candle is merged from the
+    // 1 Hz snapshot, so the chart is not dependent on this poll.
     setInterval(() => {
       if (S.phase === "ready") loadBars();
-    }, 15000);
+    }, 60000);
   }
 
   function showToast(title, message, kind = "") {
@@ -1187,6 +1251,23 @@
     setTimeout(() => el.remove(), 4100);
   }
 
+  function applyTheme(theme, persist = true) {
+    const next = theme === "light" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    if (persist) {
+      try { localStorage.setItem("ict-theme", next); } catch (_) { /* private mode */ }
+    }
+    CHART = themeColors();
+    const btn = $("#themeBtn");
+    if (btn) {
+      btn.innerHTML = next === "light"
+        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20.5 14.2A8.2 8.2 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2Z"/></svg>'
+        : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
+      btn.setAttribute("aria-label", next === "light" ? "Switch to dark theme" : "Switch to light theme");
+    }
+    if (S.chartLoaded) drawChart();
+  }
+
   function clock() {
     const el = $("#clock");
     if (!el) return;
@@ -1196,6 +1277,7 @@
   }
 
   function init() {
+    applyTheme(document.documentElement.dataset.theme || "dark", false);
     bindControls();
     clock();
     setInterval(clock, 1000);

@@ -75,6 +75,26 @@ docker compose --profile app up -d --build
 
 Ports 6379/8123/9000 are bound to `127.0.0.1`; do not expose them publicly.
 
+## 1.1 Realtime cadence (current behavior)
+
+| Layer | Cadence | Notes |
+|---|---|---|
+| Binance WS ingestion | per venue message | Combined streams; 15m updates are typically every 1–2s near the live edge |
+| Redis latest hash | every WS update | unclosed bar is mutable |
+| Engine → browser snapshot | 1 Hz (`BROADCAST_SECONDS=1`) | includes `live_bars` for every stream |
+| Chart last candle | 1 Hz via WS snapshot | merged client-side; no chart polling required |
+| Historical chart refresh | 60s / symbol change | closed-bar backfill/repair |
+| Strategy indicators | once per **closed 15m strategy bar**, per symbol | no intrabar signals; `signal_latency_ms` measures close→decision |
+| Paper entry | immediately after a closed-bar signal | next-tick/next-open semantics |
+| Paper TP/SL exits | every WS price tick | stop/target checked on live marks |
+| AI review | **on demand only** | current deepseek review has no automatic per-bar decision; it cannot execute |
+
+The engine is realtime for market data and risk exits, but the strategy is
+deliberately closed-bar. Calling the strategy on every tick would create
+repainting/look-ahead signals. If automatic AI decisions are enabled later, the
+trigger must be one high-confidence `actionable` signal, not every closed bar,
+with a per-symbol cooldown and concurrency limit.
+
 ## 2. Code map
 
 ```
@@ -192,6 +212,18 @@ build_setup(df_15m, result, SetupConfig(market="crypto", stack=...))
 * open positions, paper blotter, event log and infrastructure health;
 * WebSocket snapshot at 1 Hz, `/api/snapshot`, `/api/klines`,
   `/api/health`, `/api/docs`.
+
+### Dark / light theme
+
+The top-right theme button toggles the whole terminal without a reload; the
+choice is persisted in `localStorage["ict-theme"]`. A shareable preview is
+available with `?theme=light` or `?theme=dark`.
+
+![Light theme](assets/realtime-light-theme.png)
+
+The chart renderer reads the active palette (grid, candles, EMA, volume,
+crosshair, signal levels) from the same theme state, so canvas and CSS stay in
+sync. The chart does not require a page reload or a second chart instance.
 
 ### Signal ↔ K-line alignment
 

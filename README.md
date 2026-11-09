@@ -59,6 +59,11 @@ dashboard or open `/?signal=<signal_id>` to load the K-line context, entry/SL/TP
 and the exact signal marker. `/api/signals/{id}/context` returns
 `aligned=true/false` plus the source bar.
 
+The terminal has persisted dark/light themes (`?theme=light` for a preview).
+The chart's last candle is merged from the 1 Hz WebSocket snapshot; historical
+bars are refreshed only every 60 seconds, so live price updates do not depend on
+a polling chart request.
+
 Project-level agent instructions and the phased backlog live in
 [`docs/PROJECT_PROMPT.md`](docs/PROJECT_PROMPT.md) and
 [`docs/EXECUTION_PLAN.md`](docs/EXECUTION_PLAN.md).
