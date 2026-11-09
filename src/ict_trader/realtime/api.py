@@ -219,6 +219,13 @@ def create_app(engine: RealtimeEngine) -> FastAPI:
     async def ai_status() -> JSONResponse:
         return JSONResponse(engine.ai.status())
 
+    @app.get("/api/ai/context")
+    async def ai_context(symbol: str) -> JSONResponse:
+        sym = symbol.upper()
+        if sym not in engine.settings.symbols:
+            return JSONResponse({"ok": False, "error": "unknown symbol"}, status_code=400)
+        return JSONResponse({"ok": True, "context": await engine.ai_context(sym)})
+
     @app.post("/api/ai/review")
     async def ai_review(payload: dict | None = Body(default=None)) -> JSONResponse:
         payload = payload or {}
@@ -231,7 +238,8 @@ def create_app(engine: RealtimeEngine) -> FastAPI:
             return JSONResponse({"ok": False, "error": "engine is not ready"}, status_code=409)
         bars = engine.runner.frame(symbol, 80)
         try:
-            result = await engine.ai.review(engine.snapshot(), bars, symbol)
+            rich = await engine.ai_context(symbol)
+            result = await engine.ai.review(engine.snapshot(), bars, symbol, context=rich)
         except AiReviewError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
         return JSONResponse({"ok": True, "review": result})

@@ -39,7 +39,8 @@ SYSTEM_PROMPT = """你是一名只做风险审查的加密货币量化副驾。
    数据缺口、延迟、以及信号是否已过期。
 4. 用简体中文，语气克制，不做收益承诺。
 5. 只输出一个 JSON 对象，不要 Markdown，不要代码围栏。
-6. 如果 mode=demo，这是加速模拟行情（不是物理实时行情）；不要把模拟
+6. ICT 是主交易策略；chan.py / Ichimoku / Wyckoff 只作为辅助上下文。必须使用 analysis_context 中的 15m/1h/4h/1d K 线、ICT arrays、chan 结构、AuxiliaryContext 和共振评分综合判断；不要只依据 signals_for_selected_symbol 的历史信号。DETECTED 不等于已成交。
+7. 如果 mode=demo，这是加速模拟行情（不是物理实时行情）；不要把模拟
    时间戳与物理时钟强行比较，也不要用"尚未收盘"作为主要风险，
    应聚焦数据本身和 setup 的可执行性。
 
@@ -103,7 +104,7 @@ class DeepSeekReviewer:
 
     # ------------------------------------------------------------------
     def _context(self, snapshot: dict[str, Any], bars: list[Kline],
-                 symbol: str) -> dict[str, Any]:
+                 symbol: str, analysis_context: dict[str, Any] | None = None) -> dict[str, Any]:
         bars = bars[-50:]
         all_signals = snapshot.get("signals") or []
         selected_signals = [s for s in all_signals if s.get("symbol") == symbol][:6]
@@ -196,6 +197,7 @@ class DeepSeekReviewer:
                 "pipeline_p99_ms": ((snapshot.get("metrics") or {}).get("latency") or {})
                 .get("pipeline_ms", {}).get("p99"),
             },
+            "analysis_context": analysis_context or {},
             "constraints": {
                 "paper_only": True,
                 "max_position_pct": snapshot.get("config", {}).get("max_position_pct"),
@@ -207,7 +209,7 @@ class DeepSeekReviewer:
 
     # ------------------------------------------------------------------
     async def review(self, snapshot: dict[str, Any], bars: list[Kline],
-                     symbol: str) -> dict[str, Any]:
+                     symbol: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.available:
             raise AiReviewError("DeepSeek API key is not configured")
         # One in-flight request and a short cooldown protect against accidental
@@ -218,7 +220,7 @@ class DeepSeekReviewer:
                     and self._last_review.get("symbol") == symbol):
                 return self._last_review
             self._last_call = now
-            context = self._context(snapshot, bars, symbol)
+            context = self._context(snapshot, bars, symbol, context)
             user_prompt = (
                 "审查以下模拟盘 JSON。只审查 selected_symbol 对应的信号；"
                 "若没有该标的的可执行 setup，直接说 no active setup，"

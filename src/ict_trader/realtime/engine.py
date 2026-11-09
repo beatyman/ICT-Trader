@@ -26,7 +26,7 @@ from .demo import DemoFeed, generate_history
 from .feed import BinanceKlineFeed
 from .gap_detector import GapDetector
 from .metrics import Metrics
-from .models import Kline, interval_ms, utc_ms, validate_ohlcv
+from .models import Kline, interval_ms, ms_to_datetime, utc_ms, validate_ohlcv
 from .rest_backfill import BackfillError, RestBackfiller
 from .storage import ClickHouseStore, RedisStore, Wal
 from .storage.observability import Observability
@@ -596,7 +596,8 @@ class RealtimeEngine:
             snapshot = self.snapshot()
             started = time.perf_counter()
             try:
-                review = await self.ai.review(snapshot, bars, setup.symbol)
+                rich = await self.ai_context(setup.symbol)
+                review = await self.ai.review(snapshot, bars, setup.symbol, context=rich)
                 status = 1
                 error = ""
             except Exception as exc:
@@ -946,6 +947,98 @@ class RealtimeEngine:
         } for r in rows])
         from .overlays import build_ict_overlays, overlays_public
         return overlays_public(build_ict_overlays(frame))
+
+    async def ai_context(self, symbol: str) -> dict[str, Any]:
+        """Compact multi-timeframe context for the AI reviewer.
+
+        ICT is primary; Ichimoku/Wyckoff/Chan are context, never execution.
+        """
+        from .analysis.arrays import build_ict_arrays
+        from .overlays import build_ict_overlays, overlays_public
+
+        out: dict[str, Any] = {"symbol": symbol.upper(), "frames": {}}
+        limits = {"15m": 80, "1h": 48, "4h": 32, "1d": 24}
+        frames: dict[str, pd.DataFrame] = {}
+        for iv, limit in limits.items():
+            try:
+                rows = await self.klines(symbol, iv, limit, include_live=True)
+            except Exception:
+                rows = []
+            compact = [{
+                "t": ms_to_datetime(int(r["open_time"])).isoformat(),
+                "o": r["open"], "h": r["high"], "l": r["low"],
+                "c": r["close"], "v": r.get("volume", 0),
+            } for r in rows]
+            out["frames"][iv] = {
+                "bar_count": len(compact),
+                "bars": compact[-min(40, len(compact)):],
+                "last": compact[-1] if compact else None,
+            }
+            if rows:
+                frames[iv] = pd.DataFrame([{
+                    "date": datetime.fromtimestamp(int(r["open_time"]) / 1000.0, tz=timezone.utc),
+                    "open": float(r["open"]), "high": float(r["high"]),
+                    "low": float(r["low"]), "close": float(r["close"]),
+                } for r in rows])
+
+        try:
+            arrays = build_ict_arrays(frames["15m"], symbol, "15m") if "15m" in frames else []
+            out["ict"] = {
+                "primary": True,
+                "arrays": [a.to_public() for a in arrays[:20]],
+                "active_count": sum(1 for a in arrays if a.is_active),
+            }
+            if "15m" in frames:
+                out["ict"]["overlays"] = overlays_public(build_ict_overlays(frames["15m"]))["rectangles"][:10]
+        except Exception as exc:
+            out["ict"] = {"primary": True, "error": str(exc)[:200]}
+
+        try:
+            chan = await self.chan_structure(symbol, "15m", 700)
+            out["chan"] = {
+                "bi_count": chan.get("bi_count", 0),
+                "seg_count": chan.get("seg_count", 0),
+                "zs_count": chan.get("zs_count", 0),
+                "bsp_count": chan.get("bsp_count", 0),
+                "bis": chan.get("bis", [])[-12:],
+                "segs": chan.get("segs", [])[-6:],
+                "zss": chan.get("zss", [])[-4:],
+                "bsps": chan.get("bsps", [])[-8:],
+                "reasons": chan.get("reasons", [])[-8:],
+            }
+        except Exception as exc:
+            out["chan"] = {"error": str(exc)[:200]}
+
+        biases = {}
+        for engine in ("chan", "ichimoku", "wyckoff"):
+            latest = [s for s in self.registry_signals
+                      if s.symbol == symbol and s.engine == engine]
+            biases[engine] = latest[-1].direction.value if latest else "neutral"
+        htf_bias = "neutral"
+        if "4h" in frames:
+            f4 = frames["4h"]
+            ema = float(f4["close"].ewm(span=50, adjust=False).mean().iloc[-1])
+            htf_bias = "bullish" if float(f4["close"].iloc[-1]) > ema else "bearish"
+        out["auxiliary"] = {
+            "resonance": self.auxiliary.get(symbol),
+            "biases": {"htf": htf_bias, **biases},
+            "ichimoku": [s.to_public() for s in self.registry_signals
+                         if s.symbol == symbol and s.engine == "ichimoku"][-3:],
+            "wyckoff": [s.to_public() for s in self.registry_signals
+                        if s.symbol == symbol and s.engine == "wyckoff"][-3:],
+            "note": "auxiliary engines are context only; empty list means no current signal, not missing bars",
+        }
+        out["active_setup"] = next(
+            (s.to_public() for s in self.setups.all()
+             if s.symbol == symbol and s.status in {"DETECTED", "OPEN"}), None)
+        out["positions"] = [p for p in self.broker.snapshot().get("positions", [])
+                            if p.get("symbol") == symbol]
+        out["rules"] = {
+            "ict_primary": True,
+            "auxiliary": "context only; do not overturn ICT without explicit conflict",
+            "execution": "paper only; AI cannot place orders",
+        }
+        return out
 
     async def chan_structure(self, symbol: str, interval: str,
                              limit: int = 700) -> dict[str, Any]:
