@@ -277,6 +277,27 @@ build_setup(df_15m, result, SetupConfig(market="crypto", stack=...))
 
 ### Chart overlays (Lightweight Charts primitives)
 
+The overlay payload follows the typed contract in
+[`docs/design/ICT_CHART_TYPES.ts`](design/ICT_CHART_TYPES.ts): markers,
+price lines and rectangles all use Unix seconds and raw exchange prices.
+Bullish elements are green, bearish red, neutral/time levels blue/gray.
+
+Implemented ICT semantics:
+
+- `MSS` / `BOS` / `Sweep` markers from confirmed pivots;
+- `FVG` rectangles: 3-candle imbalance, bullish green/bearish red;
+- `OB` rectangles: last opposite candle before displacement;
+- `Asian Range` background rectangle and High/Low price lines;
+- `MDO` midnight-open line;
+- `BSL` / `SSL` liquidity lines and `EQ (50%)`;
+- VWAP, EMA20/50, volume and Setup Entry/SL/TP lines.
+
+The primitive uses `timeScale().timeToCoordinate()` and
+`series.priceToCoordinate()`; no DOM-pixel approximation, so pan/zoom/resize
+keeps every rectangle and label aligned. The TypeScript contract is the source
+for the JSON handoff if this overlay data is moved to a backend endpoint later.
+
+
 The chart is rendered by Lightweight Charts; ICT/Chan/auxiliary overlays are
 drawn by a series primitive, not a separate canvas:
 

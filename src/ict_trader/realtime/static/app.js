@@ -830,7 +830,7 @@
   function createOverlayPrimitive() {
     const state = {
       chart: null, series: null, requestUpdate: null,
-      data: { zones: [], lines: [] },
+      data: { rectangles: [], lines: [] },
     };
     const renderer = {
       draw(target) {
@@ -849,12 +849,12 @@
             return y == null ? null : y * vr;
           };
           const width = scope.bitmapSize.width;
-          for (const z of state.data.zones) {
+          for (const z of state.data.rectangles) {
             const y1 = toY(z.high);
             const y2 = toY(z.low);
             if (y1 == null || y2 == null) continue;
-            let x1 = toX(z.start_time);
-            let x2 = toX(z.end_time);
+            let x1 = toX(z.startTime);
+            let x2 = toX(z.endTime);
             if (x1 == null) x1 = 0;
             if (x2 == null) x2 = width;
             if (x2 < x1) [x1, x2] = [x2, x1];
@@ -868,8 +868,8 @@
             ctx.setLineDash([3 * hr, 3 * hr]);
             ctx.strokeRect(x1, top, x2 - x1, height);
             ctx.setLineDash([]);
-            ctx.font = `${9 * hr}px Cascadia Code, Consolas, monospace`;
-            ctx.fillStyle = z.label_color;
+            ctx.font = `${10 * hr}px Cascadia Code, Consolas, monospace`;
+            ctx.fillStyle = z.labelColor || z.border;
             ctx.textAlign = "right";
             ctx.textBaseline = "bottom";
             ctx.fillText(z.label, x2 - 3 * hr, top - 2 * vr);
@@ -877,8 +877,8 @@
           for (const l of state.data.lines) {
             const y = toY(l.price);
             if (y == null) continue;
-            let x1 = toX(l.start_time);
-            let x2 = toX(l.end_time);
+            let x1 = toX(l.startTime);
+            let x2 = toX(l.endTime);
             if (x1 == null) x1 = 0;
             if (x2 == null) x2 = width;
             ctx.strokeStyle = l.color;
@@ -889,11 +889,6 @@
             ctx.lineTo(x2, y);
             ctx.stroke();
             ctx.setLineDash([]);
-            ctx.font = `${9 * hr}px Cascadia Code, Consolas, monospace`;
-            ctx.fillStyle = l.color;
-            ctx.textAlign = "left";
-            ctx.textBaseline = "bottom";
-            ctx.fillText(l.label, x1 + 3 * hr, y - 2 * vr);
           }
         });
       },
@@ -909,14 +904,22 @@
       paneViews() { return [view]; },
       updateAllViews() {},
       setData(data) {
-        state.data = data || { zones: [], lines: [] };
+        state.data = data || { rectangles: [], lines: [] };
         state.requestUpdate?.();
       },
     };
   }
 
-  function buildOverlays(bars) {
-    if (!bars.length) return { zones: [], lines: [] };
+  function ictPalette(direction) {
+    return direction === "bullish"
+      ? { fill: "rgba(38,166,154,.17)", border: "#26a69a", labelColor: "#26a69a" }
+      : direction === "bearish"
+        ? { fill: "rgba(239,83,80,.15)", border: "#ef5350", labelColor: "#ef5350" }
+        : { fill: "rgba(120,123,134,.10)", border: "#787b86", labelColor: "#787b86" };
+  }
+
+  function buildICTData(bars) {
+    if (!bars.length) return { rectangles: [], priceLines: [], markers: [] };
     const step = TF_MS[S.tf] || 900000;
     const last = bars[bars.length - 1];
     const end = chartTime(last.open_time) + step / 1000;
@@ -924,89 +927,167 @@
       const n = Math.min(14, bars.length - 1);
       if (n < 1) return 0;
       let total = 0;
-      for (let i = bars.length - n; i < bars.length; i++) {
-        total += Math.max(0, num(bars[i].high) - num(bars[i].low));
-      }
+      for (let i = bars.length - n; i < bars.length; i++) total += Math.max(0, num(bars[i].high) - num(bars[i].low));
       return total / n;
     })();
-    const zones = [];
-    const lines = [];
+    const rectangles = [];
+    const priceLines = [];
+    const markers = [];
     const startIdx = Math.max(2, bars.length - 140);
     const minGap = Math.max(atr * 0.035, Math.abs(num(last.close)) * 0.00005);
+    const addRect = (kind, direction, startTime, low, high, label, endTime = end) => {
+      const colors = ictPalette(direction);
+      rectangles.push({
+        kind, direction, startTime, endTime, low, high,
+        fill: colors.fill, border: colors.border, label, labelColor: colors.labelColor,
+      });
+    };
 
-    // ICT fair value gaps: 3-candle imbalance.
+    // ICT FVG: 3-candle imbalance. Bullish = candle1.high < candle3.low.
     for (let i = startIdx; i < bars.length - 1; i++) {
       const a = bars[i - 2], c = bars[i];
-      const bull = num(c.low) - num(a.high);
-      const bear = num(a.low) - num(c.high);
-      if (bull > minGap) {
-        zones.push({
-          kind: "fvg", label: "FVG", low: num(a.high), high: num(c.low),
-          start_time: chartTime(a.open_time), end_time: chartTime(c.open_time) + step / 1000,
-          fill: CHART.zoneIct, border: CHART.zoneIctBorder, label_color: CHART.zoneIctBorder,
-        });
-      } else if (bear > minGap) {
-        zones.push({
-          kind: "fvg", label: "FVG", low: num(c.high), high: num(a.low),
-          start_time: chartTime(a.open_time), end_time: chartTime(c.open_time) + step / 1000,
-          fill: CHART.zoneIct, border: CHART.zoneIctBorder, label_color: CHART.zoneIctBorder,
-        });
+      if (!a || !c) continue;
+      const bullGap = num(c.low) - num(a.high);
+      const bearGap = num(a.low) - num(c.high);
+      if (bullGap > minGap) {
+        addRect("FVG", "bullish", chartTime(a.open_time), num(a.high), num(c.low), "FVG");
+      } else if (bearGap > minGap) {
+        addRect("FVG", "bearish", chartTime(a.open_time), num(c.high), num(a.low), "FVG");
       }
     }
 
-    // ICT order blocks: last opposite candle before a displacement candle.
+    // ICT Order Block: last opposite candle before displacement.
     for (let i = startIdx + 1; i < bars.length; i++) {
       const prev = bars[i - 1], cur = bars[i];
       const body = Math.abs(num(cur.close) - num(cur.open));
       if (body < atr * 0.95) continue;
-      const bull = num(cur.close) > num(cur.open);
+      const bullish = num(cur.close) > num(cur.open);
       const prevBear = num(prev.close) < num(prev.open);
-      if (bull === prevBear) continue;
-      zones.push({
-        kind: "orderblock", label: "OB",
-        low: Math.min(num(prev.open), num(prev.close)),
-        high: Math.max(num(prev.open), num(prev.close)),
-        start_time: chartTime(prev.open_time), end_time: chartTime(cur.open_time) + 3 * step / 1000,
-        fill: "rgba(242,184,75,.13)", border: "rgba(242,184,75,.50)", label_color: "rgba(242,184,75,.7)",
-      });
+      if (bullish !== prevBear) continue;
+      addRect(
+        "OB", bullish ? "bullish" : "bearish",
+        chartTime(prev.open_time),
+        Math.min(num(prev.open), num(prev.close), num(prev.low)),
+        Math.max(num(prev.open), num(prev.close), num(prev.high)),
+        "OB",
+      );
     }
 
-    // Chan central zone from the newest real Chan engine signal/setup.
+    // Asian session range and midnight open (UTC 00:00-08:00).
+    const lastDate = new Date(num(last.open_time)).toISOString().slice(0, 10);
+    let asianBars = bars.filter(b => {
+      const d = new Date(num(b.open_time));
+      return d.toISOString().slice(0, 10) === lastDate && d.getUTCHours() < 8;
+    });
+    if (asianBars.length < 4) asianBars = bars.slice(-Math.min(32, bars.length));
+    if (asianBars.length) {
+      const aHi = Math.max(...asianBars.map(b => num(b.high)));
+      const aLo = Math.min(...asianBars.map(b => num(b.low)));
+      const aStart = chartTime(asianBars[0].open_time);
+      const aEnd = chartTime(asianBars[asianBars.length - 1].open_time) + step / 1000;
+      addRect("AsianRange", "neutral", aStart, aLo, aHi, "ASIAN RANGE", aEnd);
+      priceLines.push({ price: aHi, title: "Asian High", color: "#787b86", lineStyle: 2, lineWidth: 1, startTime: aStart, endTime: aEnd });
+      priceLines.push({ price: aLo, title: "Asian Low", color: "#787b86", lineStyle: 2, lineWidth: 1, startTime: aStart, endTime: aEnd });
+    }
+    const mdo = [...bars].reverse().find(b => new Date(num(b.open_time)).getUTCHours() === 0);
+    if (mdo) {
+      priceLines.push({ price: num(mdo.open), title: "MDO", color: "#2962ff", lineStyle: 2, lineWidth: 1, startTime: chartTime(mdo.open_time), endTime: end });
+    }
+
+    // BSL/SSL and equilibrium from the recent swing range.
+    const lookback = bars.slice(-Math.min(96, bars.length));
+    if (lookback.length) {
+      const hi = Math.max(...lookback.map(b => num(b.high)));
+      const lo = Math.min(...lookback.map(b => num(b.low)));
+      const first = chartTime(lookback[0].open_time);
+      priceLines.push({ price: hi, title: "BSL", color: "#ef5350", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
+      priceLines.push({ price: lo, title: "SSL", color: "#26a69a", lineStyle: 3, lineWidth: 1, startTime: first, endTime: end });
+      priceLines.push({ price: (hi + lo) / 2, title: "EQ (50%)", color: "#787b86", lineStyle: 0, lineWidth: 1, startTime: first, endTime: end });
+    }
+
+    // Chan central zone from the newest real engine signal.
     let chanZone = null;
     const candidates = [];
-    for (const st of (S.snap?.setups || [])) {
-      if (st.engine === "chan" && st.engine_signals?.length) candidates.push(st.engine_signals[0]);
-    }
-    for (const es of (S.snap?.engine_signals || [])) {
-      if (es.engine === "chan") candidates.push(es);
-    }
+    for (const st of (S.snap?.setups || [])) if (st.engine === "chan" && st.engine_signals?.length) candidates.push(st.engine_signals[0]);
+    for (const es of (S.snap?.engine_signals || [])) if (es.engine === "chan") candidates.push(es);
     for (const es of candidates) {
       const ev = es.evidence || {};
-      const zd = Number(ev.last_zs_zd);
-      const zg = Number(ev.last_zs_zg);
+      const zd = Number(ev.last_zs_zd), zg = Number(ev.last_zs_zg);
       if (Number.isFinite(zd) && Number.isFinite(zg) && zd < zg) {
         chanZone = { zd, zg, time: chartTime(es.source_kline_open_time), label: ev.bsp_type || "CHAN" };
         break;
       }
     }
     if (chanZone) {
-      zones.push({
-        kind: "chan_zs", label: `CHAN ZS · ${chanZone.label}`, low: chanZone.zd, high: chanZone.zg,
-        start_time: chanZone.time, end_time: end,
-        fill: CHART.zoneChan, border: CHART.zoneChanBorder, label_color: CHART.zoneChanBorder,
+      rectangles.push({
+        kind: "ChanZS", direction: "neutral", startTime: chanZone.time, endTime: end,
+        low: chanZone.zd, high: chanZone.zg,
+        fill: CHART.zoneChan, border: CHART.zoneChanBorder,
+        label: `CHAN ZS · ${chanZone.label}`, labelColor: CHART.zoneChanBorder,
       });
     }
 
-    // Liquidity / 24h high-low reference lines.
-    const lookback = bars.slice(-Math.min(96, bars.length));
-    if (lookback.length) {
-      const hi = Math.max(...lookback.map(b => num(b.high)));
-      const lo = Math.min(...lookback.map(b => num(b.low)));
-      const first = chartTime(lookback[0].open_time);
-      lines.push({ price: hi, start_time: first, end_time: end, label: "LIQ HI", color: "rgba(255,98,115,.45)" });
-      lines.push({ price: lo, start_time: first, end_time: end, label: "LIQ LO", color: "rgba(44,229,163,.42)" });
+    // ICT structure markers: MSS / BOS / Sweep from confirmed pivots.
+    const pivotsH = [], pivotsL = [];
+    for (let i = startIdx + 2; i < bars.length - 2; i++) {
+      const b = bars[i];
+      const h = num(b.high), l = num(b.low);
+      if (h >= num(bars[i - 1].high) && h >= num(bars[i - 2].high) && h >= num(bars[i + 1].high) && h >= num(bars[i + 2].high)) pivotsH.push({ i, price: h });
+      if (l <= num(bars[i - 1].low) && l <= num(bars[i - 2].low) && l <= num(bars[i + 1].low) && l <= num(bars[i + 2].low)) pivotsL.push({ i, price: l });
     }
-    return { zones: zones.slice(-18), lines };
+    const pivotHMap = new Map(pivotsH.map(p => [p.i, p]));
+    const pivotLMap = new Map(pivotsL.map(p => [p.i, p]));
+    let swingH = null, swingL = null, trend = 0;
+    for (let i = startIdx + 2; i < bars.length; i++) {
+      if (pivotHMap.has(i)) swingH = pivotHMap.get(i);
+      if (pivotLMap.has(i)) swingL = pivotLMap.get(i);
+      const b = bars[i], c = num(b.close), h = num(b.high), l = num(b.low);
+      if (swingH && i > swingH.i) {
+        if (h > swingH.price && c < swingH.price) {
+          markers.push({ time: chartTime(b.open_time), position: "aboveBar", shape: "circle", color: "#ef5350", text: "Sweep", kind: "Sweep", direction: "bearish" });
+          swingH = null;
+        } else if (c > swingH.price) {
+          const kind = trend < 0 ? "MSS" : "BOS";
+          markers.push({ time: chartTime(b.open_time), position: "belowBar", shape: kind === "BOS" ? "square" : "arrowUp", color: "#26a69a", text: kind, kind, direction: "bullish" });
+          trend = 1; swingH = null;
+        }
+      }
+      if (swingL && i > swingL.i) {
+        if (l < swingL.price && c > swingL.price) {
+          markers.push({ time: chartTime(b.open_time), position: "belowBar", shape: "circle", color: "#26a69a", text: "Sweep", kind: "Sweep", direction: "bullish" });
+          swingL = null;
+        } else if (c < swingL.price) {
+          const kind = trend > 0 ? "MSS" : "BOS";
+          markers.push({ time: chartTime(b.open_time), position: "aboveBar", shape: kind === "BOS" ? "square" : "arrowDown", color: "#ef5350", text: kind, kind, direction: "bearish" });
+          trend = -1; swingL = null;
+        }
+      }
+    }
+
+    const fvg = rectangles.filter(r => r.kind === "FVG").slice(-8);
+    const ob = rectangles.filter(r => r.kind === "OB").slice(-4);
+    const session = rectangles.filter(r => r.kind === "AsianRange");
+    const chan = rectangles.filter(r => r.kind === "ChanZS");
+    return {
+      rectangles: [...fvg, ...ob, ...session, ...chan].slice(-14),
+      priceLines: priceLines.slice(-12),
+      markers: markers.slice(-12),
+    };
+  }
+
+  function renderICTSignals(chart, candleSeries, ictData) {
+    if (!chart || !candleSeries || !ictData) return;
+    candleSeries.setMarkers((ictData.markers || []).slice(-20));
+  }
+
+  // Equivalent of drawRectangle(): all rectangles are kept in chart coordinate
+  // space and rendered by the attached series primitive.
+  function drawRectangle(rectangles, startTime, endTime, low, high, direction, label) {
+    const colors = ictPalette(direction);
+    rectangles.push({
+      startTime, endTime, low, high, label,
+      fill: colors.fill, border: colors.border, labelColor: colors.labelColor,
+    });
   }
 
   function ensureChart() {
@@ -1175,20 +1256,21 @@
   }
 
   function applyChartAnnotations(bars) {
-    const lines = chartLevels();
+    const ict = buildICTData(bars);
+    const lines = [...chartLevels(), ...(ict.priceLines || [])];
     for (const line of lwc.priceLines) lwc.candles.removePriceLine(line);
     lwc.priceLines = [];
     for (const l of lines) {
       if (!Number.isFinite(Number(l.price)) || Number(l.price) <= 0) continue;
       lwc.priceLines.push(lwc.candles.createPriceLine({
-        price: Number(l.price), color: l.color, lineWidth: 1,
-        lineStyle: window.LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true, title: l.label,
+        price: Number(l.price), color: l.color, lineWidth: l.lineWidth || 1,
+        lineStyle: l.lineStyle ?? (l.dash ? 2 : 0),
+        axisLabelVisible: true, title: l.title || l.label || "",
       }));
     }
-    const markers = [];
-    const seen = new Set();
-    const addMarker = (time, direction, text) => {
+    const markers = [...(ict.markers || [])];
+    const seen = new Set(markers.map(m => m.time));
+    const addMarker = (time, direction, text, kind = "SIG") => {
       const t = chartTime(time);
       if (!Number.isFinite(t) || seen.has(t)) return;
       if (!bars.some(b => chartTime(b.open_time) === t)) return;
@@ -1198,7 +1280,7 @@
         position: direction === "long" ? "belowBar" : "aboveBar",
         color: CHART.sig,
         shape: direction === "long" ? "arrowUp" : "arrowDown",
-        text: text || "SIG",
+        text: text || "SIG", kind, direction,
       });
     };
     let anchor = S.anchorSignalId
@@ -1212,15 +1294,25 @@
       anchor = { bar_time: e.source_kline_open_time, direction: e.direction, engine: e.engine, evidence: e.evidence };
     }
     if (anchor?.bar_time) {
-      const bsp = anchor.evidence?.bsp_type || "";
-      addMarker(anchor.bar_time, anchor.direction, bsp || "SIG");
+      addMarker(anchor.bar_time, anchor.direction, anchor.evidence?.bsp_type || "SIG");
     }
     for (const e of (S.snap?.engine_signals || [])) {
       if (e.engine !== "chan") continue;
-      const bsp = e.evidence?.bsp_type || "CHAN";
-      addMarker(e.source_kline_open_time, e.direction, bsp);
+      addMarker(e.source_kline_open_time, e.direction, e.evidence?.bsp_type || "CHAN");
     }
-    lwc.candles.setMarkers(markers.slice(-12));
+    renderICTSignals(lwc.chart, lwc.candles, { markers: markers.slice(-20) });
+    lwc.overlay?.setData({ rectangles: ict.rectangles || [], lines: [] });
+  }
+
+  function vwapData(bars) {
+    let pv = 0, vv = 0;
+    return bars.map(b => {
+      const typical = (num(b.high) + num(b.low) + num(b.close)) / 3;
+      const volume = num(b.volume);
+      pv += typical * volume;
+      vv += volume;
+      return { time: chartTime(b.open_time), value: vv > 0 ? pv / vv : null };
+    }).filter(x => x.value !== null);
   }
 
   function setChartData(bars, fit) {
@@ -1244,7 +1336,6 @@
     lwc.ema50.setData(S.ema ? bars.map((b, i) => ({ time: chartTime(b.open_time), value: e50[i] })).filter(x => x.value !== null && Number.isFinite(x.value)) : []);
     lwc.vwap.setData(vwapData(bars));
     applyChartAnnotations(bars);
-    lwc.overlay?.setData(buildOverlays(bars));
     lwc.lastLen = bars.length;
     if (fit) lwc.chart.timeScale().fitContent();
   }
@@ -1281,7 +1372,6 @@
       if (vw.length) lwc.vwap.update(vw[vw.length - 1]);
       lwc.lastLen = bars.length;
       applyChartAnnotations(bars);
-      lwc.overlay?.setData(buildOverlays(bars));
     }
     $("#chartLoading").classList.add("hidden");
     $("#chartEmpty")?.classList.add("hidden");
@@ -1300,7 +1390,7 @@
       lwc.ema20.setData([]);
       lwc.ema50.setData([]);
       lwc.vwap?.setData([]);
-      lwc.overlay?.setData({ zones: [], lines: [] });
+      lwc.overlay?.setData({ rectangles: [], lines: [] });
       lwc.candles.setMarkers([]);
       lwc.lastLen = 0;
     }
