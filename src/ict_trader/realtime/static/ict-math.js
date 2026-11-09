@@ -428,15 +428,36 @@
       if (candidateL) swingL = candidateL;
     }
 
-    const fvg = rectangles.filter(r => r.kind === "FVG").slice(-8);
-    const ifvg = rectangles.filter(r => r.kind === "IFVG").slice(-4);
-    const ob = rectangles.filter(r => r.kind === "OB").slice(-4);
-    const session = rectangles.filter(r => r.kind === "AsianRange");
-    const chanRect = rectangles.filter(r => r.kind === "ChanZS").slice(-6);
+    // Clean chart: keep only the nearest/active zones and recent events.
+    const fvg = rectangles.filter(r => r.kind === "FVG").slice(-2);
+    const ifvg = rectangles.filter(r => r.kind === "IFVG").slice(-1);
+    const ob = rectangles.filter(r => r.kind === "OB").slice(-2);
+    const session = rectangles.filter(r => r.kind === "AsianRange").slice(-1);
+    const chanRect = rectangles.filter(r => r.kind === "ChanZS").slice(-3);
+    const now = timeOf(bars[bars.length - 1].open_time);
+    const within = (m, barsAge) => m.time >= now - barsAge * step;
+    const take = (kind, n, age) => markers
+      .filter(m => m.kind === kind && within(m, age)).slice(-n);
+    const selected = [
+      ...take("BOS", 1, 16), ...take("MSS", 1, 16),
+      ...take("BSL_SWEEP", 1, 8), ...take("SSL_SWEEP", 1, 8),
+      ...take("CISD", 1, 8), ...take("PO3", 1, 8), ...take("AMD", 1, 3),
+      ...take("SMT", 1, 3), ...take("BSP", 4, 24),
+    ];
+    const seenMarker = new Set();
+    const limitedMarkers = selected
+      .filter(m => {
+        const key = `${m.time}|${m.kind}|${m.text}`;
+        if (seenMarker.has(key)) return false;
+        seenMarker.add(key);
+        return true;
+      })
+      .sort((a, b) => a.time - b.time)
+      .slice(-14);
     return {
-      rectangles: [...fvg, ...ifvg, ...ob, ...session, ...chanRect].slice(-20),
+      rectangles: [...fvg, ...ifvg, ...ob, ...session, ...chanRect],
       priceLines: priceLines.slice(-12),
-      markers: markers.slice(-20),
+      markers: limitedMarkers.slice(-10),
       segments: segments.slice(-140),
     };
   }

@@ -21,8 +21,8 @@ def _ms(value: Any) -> int:
     return int(pd.Timestamp(value).timestamp() * 1000)
 
 
-def build_ict_overlays(frame: pd.DataFrame, *, max_fvg: int = 8,
-                       max_ob: int = 4) -> dict[str, list[dict[str, Any]]]:
+def build_ict_overlays(frame: pd.DataFrame, *, max_fvg: int = 3,
+                       max_ob: int = 1) -> dict[str, list[dict[str, Any]]]:
     if frame is None or len(frame) < 5:
         return {"rectangles": []}
     df = frame.copy()
