@@ -93,6 +93,8 @@ class Settings:
     symbols: list[str] = field(default_factory=lambda: [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
     ])
+    symbol_mode: str = "static"          # static | top10
+    top_symbols_count: int = 10
     intervals: list[str] = field(default_factory=lambda: ["15m", "1h", "4h", "1d"])
     strategy_interval: str = "15m"
     ws_base_url: str = SPOT_WS
@@ -146,6 +148,7 @@ class Settings:
     use_key_targets: bool = False
     target_mode: str = "fixed"
     rr: float = 2.0
+    setup_min_confidence: float = 0.65
     max_bars: int = 40
     commission_bps: float = 10.0         # round trip (5 bps/side)
     slippage_bps: float = 2.0            # per fill
@@ -176,6 +179,9 @@ class Settings:
     ai_scan_seconds: float = 300.0
 
     def __post_init__(self) -> None:
+        if self.symbol_mode not in {"static", "top10"}:
+            raise ValueError("symbol_mode must be 'static' or 'top10'")
+        self.top_symbols_count = max(1, min(int(self.top_symbols_count), 20))
         self.symbols = [s.upper() for s in self.symbols]
         self.intervals = list(dict.fromkeys(self.intervals))
         unknown = [i for i in self.intervals if i not in VALID_INTERVALS]
@@ -245,6 +251,8 @@ class Settings:
             "market": self.market.upper(),
             "venue": "BINANCE SPOT" if self.market == "spot" else "BINANCE USD-M",
             "symbols": self.symbols,
+            "symbol_mode": self.symbol_mode,
+            "top_symbols_count": self.top_symbols_count,
             "intervals": self.intervals,
             "strategy_interval": self.strategy_interval,
             "stack": self.stack,
@@ -252,6 +260,7 @@ class Settings:
             "paper_trade": self.paper_trade,
             "bootstrap_bars": self.bootstrap_bars,
             "risk_pct": self.risk_pct,
+            "setup_min_confidence": self.setup_min_confidence,
             "max_position_pct": self.max_position_pct,
             "max_open_positions": self.max_open_positions,
             "commission_bps": self.commission_bps,
@@ -276,6 +285,8 @@ class Settings:
             mode=_env_str("REALTIME_MODE", "live").lower(),
             market=market,
             symbols=_env_list("SYMBOLS", ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"]),
+            symbol_mode=_env_str("SYMBOL_MODE", "static").lower(),
+            top_symbols_count=_env_int("TOP_SYMBOLS_COUNT", 10),
             intervals=_env_list("INTERVALS", ["15m", "1h", "4h", "1d"]),
             strategy_interval=_env_str("STRATEGY_INTERVAL", "15m"),
             ws_base_url=_env_str("BINANCE_WS_URL", ws_default),
@@ -319,6 +330,7 @@ class Settings:
             use_key_targets=_env_bool("ICT_USE_KEY_TARGETS", False),
             target_mode=_env_str("ICT_TARGET_MODE", "fixed"),
             rr=_env_float("ICT_RR", 2.0),
+            setup_min_confidence=_env_float("SETUP_MIN_CONFIDENCE", 0.65),
             max_bars=_env_int("ICT_MAX_BARS", 40),
             commission_bps=_env_float("COMMISSION_BPS", 10.0),
             slippage_bps=_env_float("SLIPPAGE_BPS", 2.0),

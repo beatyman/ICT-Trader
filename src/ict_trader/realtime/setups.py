@@ -182,10 +182,12 @@ class SetupManager:
     def __init__(self, persist_setup: Callable[[tuple], Awaitable[None]],
                  persist_event: Callable[[tuple], Awaitable[None]],
                  *, max_bars: int = 40,
-                 on_created: Callable[["Setup"], Awaitable[None]] | None = None) -> None:
+                 on_created: Callable[["Setup"], Awaitable[None]] | None = None,
+                 on_entry: Callable[["Setup"], Awaitable[bool]] | None = None) -> None:
         self.persist_setup = persist_setup
         self.persist_event = persist_event
         self.on_created = on_created
+        self.on_entry = on_entry
         self.max_bars = max(4, int(max_bars))
         self._setups: dict[str, Setup] = {}
         self.events: list[dict[str, Any]] = []
@@ -199,8 +201,11 @@ class SetupManager:
     async def on_signal(self, signal: EngineSignal, *, now: int | None = None,
                         resonance: Any | None = None,
                         min_rr: float = 0.0,
+                        min_confidence: float = 0.0,
                         structure_bias: str | None = None) -> Setup | None:
         if signal.engine == "ict":
+            return None
+        if signal.confidence < min_confidence:
             return None
         now = now or signal.created_at
         if structure_bias and structure_bias != "neutral":
@@ -275,6 +280,16 @@ class SetupManager:
                     setup.updated_at = now
                     await self._transition(setup, "ENTRY", setup.fill_price, now,
                                            "favourable edge touched")
+                    if self.on_entry is not None:
+                        accepted = await self.on_entry(setup)
+                        if not accepted:
+                            setup.status = "INVALIDATED"
+                            setup.closed_at = now
+                            setup.updated_at = now
+                            await self._transition(
+                                setup, "ENTRY_REJECTED", setup.fill_price, now,
+                                "paper broker rejected entry",
+                            )
                     # Never evaluate TP on the same tick that opened the
                     # position: one bar's high/low can contain both prices,
                     # which would be look-ahead inside the bar.

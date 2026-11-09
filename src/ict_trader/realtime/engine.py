@@ -32,6 +32,7 @@ from .storage import ClickHouseStore, RedisStore, Wal
 from .storage.observability import Observability
 from .strategy_runner import ICTStrategyRunner, TradeSignal
 from .setups import SetupManager
+from .universe import fetch_top_usdt_symbols
 
 log = logging.getLogger(__name__)
 
@@ -267,6 +268,7 @@ class RealtimeEngine:
         self.setups = SetupManager(
             self.ch.insert_setup, self.ch.insert_tp_sl_event,
             on_created=self._on_setup_created,
+            on_entry=self._on_setup_entry,
         )
         self.runner.on_signal = self._on_signal
         self.broker.on_trade = self._on_trade
@@ -277,6 +279,7 @@ class RealtimeEngine:
         self.boot_error = ""
         self.boot_total = len(settings.streams)
         self.boot_done = 0
+        self.universe: list[dict[str, Any]] = []
         self.started_at = ""
         self._health_task: asyncio.Task | None = None
         self._loop_lag_task: asyncio.Task | None = None
@@ -300,6 +303,7 @@ class RealtimeEngine:
         try:
             await self._start_redis()
             await self.ch.start()
+            await self._select_universe()
             await self._bootstrap_all()
             self._start_sessions()
             if self.settings.mode == "demo":
@@ -378,6 +382,32 @@ class RealtimeEngine:
         self.metrics.event("INFO", "engine", "stopped cleanly")
 
     # ------------------------------------------------------------------
+    async def _select_universe(self) -> None:
+        if self.settings.symbol_mode != "top10":
+            return
+        try:
+            rows = await fetch_top_usdt_symbols(
+                self.settings.rest_base_url, self.settings.top_symbols_count,
+                timeout=30.0,
+            )
+            if len(rows) < self.settings.top_symbols_count:
+                raise RuntimeError(f"only {len(rows)} eligible USDT symbols")
+            self.universe = rows
+            self.settings.symbols = [r["symbol"] for r in rows]
+            self.boot_total = len(self.settings.streams)
+            self.metrics.event(
+                "INFO", "universe",
+                f"top {len(rows)} USDT by 24h quote volume selected",
+            )
+            log.info("volume universe: %s", self.settings.symbols)
+        except Exception as exc:
+            self.metrics.event(
+                "WARN", "universe",
+                "top10 volume ranking failed; keeping static SYMBOLS",
+                error=str(exc)[:300],
+            )
+            log.warning("volume universe failed, keeping static symbols: %s", exc)
+
     async def _bootstrap_all(self) -> None:
         sem = asyncio.Semaphore(max(1, self.settings.bootstrap_concurrency))
         self.metrics.event("INFO", "bootstrap", f"loading {self.boot_total} streams")
@@ -509,6 +539,36 @@ class RealtimeEngine:
                 await self.observability.error(
                     "ai", "scan_loop", "engine", "AI scan loop failed", exc=exc,
                 )
+
+    async def _on_setup_entry(self, setup) -> bool:
+        """Send an accepted registry setup to the paper broker."""
+        target = (setup.tp_levels[0] if setup.tp_levels else setup.target)
+        signal = TradeSignal(
+            id=setup.setup_id, symbol=setup.symbol, interval=setup.interval,
+            bar_time=int(setup.engine_signals[0].get("source_kline_open_time")
+                         if setup.engine_signals else setup.created_at),
+            created_at=setup.created_at, direction=setup.direction,
+            entry=setup.entry, stop=setup.stop, target=target,
+            rr=setup.rr_for(target), grade=5, quality=setup.confidence,
+            status="ARMED", actionable=True, executed=False,
+            reason=f"{setup.engine} setup · resonance {setup.resonance_score}/4",
+        )
+        result = await self.broker.execute(signal, setup.entry, bar_time=signal.bar_time)
+        if result.accepted:
+            setup.fill_price = float(result.fill)
+            await self.setups.persist_setup(setup.setup_row(datetime.now(timezone.utc)))
+            self.metrics.event(
+                "INFO", "execution",
+                f"paper {setup.direction} {setup.symbol} @ {result.fill:.6g}",
+                symbol=setup.symbol,
+            )
+        else:
+            self.metrics.event(
+                "WARN", "execution",
+                f"paper entry rejected {setup.symbol}: {result.reason}",
+                symbol=setup.symbol,
+            )
+        return bool(result.accepted)
 
     async def _on_setup_created(self, setup) -> None:
         if setup.ai_decision_id:
@@ -645,6 +705,7 @@ class RealtimeEngine:
                     self.auxiliary[signal.symbol] = aux.to_public()
                     await self.setups.on_signal(
                         signal, resonance=aux, min_rr=self.settings.rr,
+                        min_confidence=self.settings.setup_min_confidence,
                         structure_bias=structure["bias"],
                     )
                 self.registry_signals.extend(fresh)
@@ -833,6 +894,7 @@ class RealtimeEngine:
             "metrics": metrics,
             "ai": {**self.ai.status(), "auto": self.settings.ai_auto},
             "ai_decisions": list(self.ai_decisions)[-20:],
+            "universe": list(self.universe),
             "selected": self.settings.symbols[0] if self.settings.symbols else "",
         }
 

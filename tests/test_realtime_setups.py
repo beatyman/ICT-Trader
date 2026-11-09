@@ -177,3 +177,25 @@ def test_setup_targets_are_sorted_and_rr_uses_fill_edge():
         assert setup.targets == [2060.0, 2139.3, 2139.7]
 
     asyncio.run(run())
+
+
+def test_setup_sends_accepted_entry_to_paper_callback():
+    entered = []
+
+    async def persist(row):
+        pass
+
+    async def on_entry(setup):
+        entered.append(setup)
+        return True
+
+    async def run():
+        manager = SetupManager(persist, persist, on_entry=on_entry)
+        setup = await manager.on_signal(signal(), now=1_700_000_100_000)
+        await manager.on_price("BTCUSDT", 100.0, interval="15m",
+                               high=100.5, low=98.8, now=1_700_000_200_000)
+        assert setup.status == "OPEN"
+        assert setup.fill_price == 99.0
+        assert entered and entered[0] is setup
+
+    asyncio.run(run())
