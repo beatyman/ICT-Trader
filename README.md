@@ -54,6 +54,10 @@ PAPER ONLY — no exchange keys and no order routing. DeepSeek V4.1 Flash
 [`docs/REALTIME.md`](docs/REALTIME.md) for architecture, data contracts, gap
 semantics, resource limits and acceptance checks.
 
+Project-level agent instructions and the phased backlog live in
+[`docs/PROJECT_PROMPT.md`](docs/PROJECT_PROMPT.md) and
+[`docs/EXECUTION_PLAN.md`](docs/EXECUTION_PLAN.md).
+
 ## Install
 
 ```bash
