@@ -99,7 +99,12 @@ class Setup:
         else:
             levels = [t for t in levels if t > self.entry]
             levels.sort()
-        return levels
+        merged: list[float] = []
+        for level in levels:
+            if merged and abs(level - merged[-1]) / max(self.entry, 1e-9) < 0.0015:
+                continue
+            merged.append(level)
+        return merged
 
     @property
     def is_active(self) -> bool:

@@ -171,7 +171,7 @@ def test_setup_targets_are_sorted_and_rr_uses_fill_edge():
         )
         manager = SetupManager(persist_setup, persist_event, max_bars=40)
         setup = await manager.on_signal(s, now=1_700_000_100_000)
-        assert setup.tp_levels == [2139.7, 2139.3, 2060.0]
+        assert setup.tp_levels == [2139.7, 2060.0]
         assert setup.rr_for(2139.7) > 2.0
         assert setup.rr_for(2060.0) > 2.0
         assert setup.targets == [2060.0, 2139.3, 2139.7]
