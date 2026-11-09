@@ -149,3 +149,31 @@ def test_setup_requires_current_ltf_structure_alignment():
         assert allowed.structure_bias == "bullish"
 
     asyncio.run(run())
+
+
+def test_setup_targets_are_sorted_and_rr_uses_fill_edge():
+    rows = []
+
+    async def persist_setup(row):
+        rows.append(row)
+
+    async def persist_event(row):
+        rows.append(row)
+
+    async def run():
+        s = EngineSignal(
+            engine="wyckoff", symbol="ETHUSDT", interval="15m", direction="short",
+            signal_type="wyckoff_upthrust", trigger_price_zone=PriceZone(2151.26, 2235.24),
+            invalidation_price=2245.99, confidence=0.9,
+            source_kline_open_time=1_700_000_000_000 // 900_000 * 900_000,
+            engine_version="test",
+            evidence={"target": 2060.0, "targets": [2060.0, 2139.3, 2139.7]},
+        )
+        manager = SetupManager(persist_setup, persist_event, max_bars=40)
+        setup = await manager.on_signal(s, now=1_700_000_100_000)
+        assert setup.tp_levels == [2139.7, 2139.3, 2060.0]
+        assert setup.rr_for(2139.7) > 2.0
+        assert setup.rr_for(2060.0) > 2.0
+        assert setup.targets == [2060.0, 2139.3, 2139.7]
+
+    asyncio.run(run())

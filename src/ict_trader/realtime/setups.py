@@ -50,6 +50,7 @@ class Setup:
     confidence: float
     engine: str
     engine_version: str
+    targets: list[float] = field(default_factory=list)
     signal_ids: list[str] = field(default_factory=list)
     engine_signals: list[dict[str, Any]] = field(default_factory=list)
     opened_at: int | None = None
@@ -80,10 +81,25 @@ class Setup:
     def entry_mid(self) -> float:
         return (self.entry_low + self.entry_high) / 2.0
 
+    def rr_for(self, target: float) -> float:
+        risk = abs(self.entry - self.stop)
+        return abs(float(target) - self.entry) / risk if risk > 0 else 0.0
+
     @property
     def rr(self) -> float:
-        risk = abs(self.entry - self.stop)
-        return abs(self.target - self.entry) / risk if risk > 0 else 0.0
+        return self.rr_for(self.target)
+
+    @property
+    def tp_levels(self) -> list[float]:
+        levels = [float(t) for t in (self.targets or [self.target])]
+        levels = [t for t in levels if t > 0]
+        if self.direction == "short":
+            levels = [t for t in levels if t < self.entry]
+            levels.sort(reverse=True)
+        else:
+            levels = [t for t in levels if t > self.entry]
+            levels.sort()
+        return levels
 
     @property
     def is_active(self) -> bool:
@@ -106,6 +122,9 @@ class Setup:
             "fill_price": self.fill_price,
             "stop": self.stop,
             "target": self.target,
+            "targets": list(self.targets),
+            "tp_levels": list(self.tp_levels),
+            "tp_rr": [round(self.rr_for(t), 3) for t in self.tp_levels],
             "rr": round(self.rr, 3),
             "confidence": round(self.confidence, 4),
             "engine": self.engine,
@@ -132,7 +151,7 @@ class Setup:
             _dt(self.updated_at), list(self.signal_ids), engine_signals,
             self.ai_decision_id, float(self.ai_confidence), self.ai_decision,
             float(self.entry), "market", 0.0,
-            json.dumps([self.target], separators=(",", ":")), float(self.stop),
+            json.dumps(self.targets or [self.target], separators=(",", ":")), float(self.stop),
             float(self.rr), "[]", self.exit_price, self.exit_price,
             0.0, 0.0, 0.0, self.engine_version, "setup-v1", "auto-v1",
             ingested_at,
@@ -198,6 +217,7 @@ class SetupManager:
             entry_high=signal.trigger_price_zone.high,
             stop=signal.invalidation_price,
             target=float(signal.evidence_plain().get("target", signal.trigger_price_zone.mid)),
+            targets=[],
             confidence=signal.confidence,
             engine=signal.engine,
             engine_version=signal.engine_version,
@@ -212,6 +232,13 @@ class SetupManager:
                 "structural_invalidation_price"),
             structure_bias=structure_bias or "neutral",
         )
+        ev = signal.evidence_plain()
+        raw_targets = ev.get("targets")
+        if not raw_targets:
+            raw_targets = [ev.get(k) for k in ("tp1", "tp2", "tp3") if ev.get(k)]
+        setup.targets = [float(x) for x in (raw_targets or []) if float(x) > 0]
+        if not setup.targets:
+            setup.targets = [setup.target]
         if setup.target <= 0 or setup.rr < min_rr:
             return None
         self._setups[setup.setup_id] = setup

@@ -1267,37 +1267,71 @@
     return out;
   }
 
+  function setupEntryZone(setup) {
+    if (!Number.isFinite(Number(setup.entry_low)) || !Number.isFinite(Number(setup.entry_high))) return null;
+    const low = Math.min(Number(setup.entry_low), Number(setup.entry_high));
+    const high = Math.max(Number(setup.entry_low), Number(setup.entry_high));
+    if (high <= low) return null;
+    const e = setup.engine_signals?.[0];
+    const start = chartTime(e?.source_kline_open_time || setup.created_at);
+    if (!Number.isFinite(start)) return null;
+    return {
+      kind: "ENTRY", direction: "neutral", startTime: start,
+      endTime: start + 12 * ((TF_MS[S.tf] || 900000) / 1000),
+      low, high, fill: "rgba(41,98,255,.10)", border: "rgba(41,98,255,.55)",
+      label: "ENTRY ZONE", labelColor: "rgba(120,170,255,.8)",
+    };
+  }
+
+  function activeSetupForChart() {
+    if (!S.snap) return null;
+    const setups = S.snap.setups || [];
+    const anchor = S.anchorSignalId
+      ? setups.find(s => s.setup_id === S.anchorSignalId && s.symbol === S.symbol)
+      : null;
+    return anchor
+      || setups.find(s => s.symbol === S.symbol && ["DETECTED", "OPEN"].includes(s.status))
+      || setups.find(s => s.symbol === S.symbol)
+      || null;
+  }
+
   function chartLevels() {
     if (!S.snap) return [];
-    const setup = (S.snap.setups || []).find(
-      s => s.setup_id === S.anchorSignalId && s.symbol === S.symbol,
-    );
+    const setup = activeSetupForChart();
     if (setup) {
+      const targets = (setup.tp_levels && setup.tp_levels.length)
+        ? setup.tp_levels : [setup.target];
+      const tps = targets.map((price, i) => ({
+        price,
+        color: i === 0 ? CHART.target : i === 1 ? "rgba(38,166,154,.78)" : "rgba(38,166,154,.54)",
+        label: `TP${i + 1} · ${(setup.tp_rr?.[i] ?? setup.rr).toFixed(2)}R`,
+        dash: false,
+      }));
       return [
-        { price: setup.entry, color: CHART.entry, label: "SETUP", dash: true },
+        { price: setup.entry, color: CHART.entry, label: "ENTRY", dash: true },
         { price: setup.stop, color: CHART.stop, label: "SL", dash: true },
-        { price: setup.target, color: CHART.target, label: "TP", dash: true },
+        ...tps,
       ];
     }
     const pos = (S.snap.positions || []).find(p => p.symbol === S.symbol);
     if (pos) {
       return [
         { price: pos.entry, color: CHART.entry, label: "ENTRY", dash: true },
-        { price: pos.stop, color: CHART.stop, label: "STOP", dash: true },
-        { price: pos.target, color: CHART.target, label: "TARGET", dash: true },
+        { price: pos.stop, color: CHART.stop, label: "SL", dash: true },
+        { price: pos.target, color: CHART.target, label: "TP", dash: true },
       ];
     }
     const anchored = S.anchorSignalId
       ? (S.snap.signals || []).find(s => s.id === S.anchorSignalId)
       : null;
     const sig = anchored || (S.snap.signals || []).find(
-      s => s.symbol === S.symbol && s.status === "ARMED",
+      s => s.symbol === S.symbol && ["ARMED", "EXECUTED"].includes(s.status),
     );
     if (sig) {
       return [
-        { price: sig.entry, color: CHART.entry, label: "SIGNAL", dash: true },
+        { price: sig.entry, color: CHART.entry, label: "ENTRY", dash: true },
         { price: sig.stop, color: CHART.stop, label: "SL", dash: true },
-        { price: sig.target, color: CHART.target, label: "TP", dash: true },
+        { price: sig.target, color: CHART.target, label: `TP1 · ${num(sig.rr).toFixed(2)}R`, dash: false },
       ];
     }
     return [];
@@ -1327,7 +1361,9 @@
 
   function applyChartAnnotations(bars) {
     const ict = buildICTData(bars);
-    const lines = [...chartLevels(), ...(ict.priceLines || [])];
+    const planSetup = activeSetupForChart();
+    const lines = [...chartLevels()];
+    if (!planSetup) lines.push(...(ict.priceLines || []));
     for (const line of lwc.priceLines) lwc.candles.removePriceLine(line);
     lwc.priceLines = [];
     for (const l of lines) {
@@ -1338,7 +1374,7 @@
         axisLabelVisible: false, title: l.title || l.label || "",
       }));
     }
-    const markers = [...(ict.markers || [])];
+    const markers = planSetup ? [] : [...(ict.markers || [])];
     const seen = new Set(markers.map(m => m.time));
     const addMarker = (time, direction, text, kind = "SIG") => {
       const t = chartTime(time);
@@ -1363,15 +1399,29 @@
       const e = anchorSetup.engine_signals[0];
       anchor = { bar_time: e.source_kline_open_time, direction: e.direction, engine: e.engine, evidence: e.evidence };
     }
-    if (anchor?.bar_time) {
+    if (!planSetup && anchor?.bar_time) {
       addMarker(anchor.bar_time, anchor.direction, anchor.evidence?.bsp_type || "SIG");
     }
-    for (const e of (S.snap?.engine_signals || [])) {
+    if (!planSetup) for (const e of (S.snap?.engine_signals || [])) {
       if (e.engine !== "chan") continue;
       addMarker(e.source_kline_open_time, e.direction, e.evidence?.bsp_type || "CHAN");
     }
+    if (planSetup) {
+      const e = planSetup.engine_signals?.[0];
+      const bt = chartTime(e?.source_kline_open_time || planSetup.created_at);
+      if (Number.isFinite(bt)) {
+        markers.push({
+          time: bt, position: planSetup.direction === "long" ? "belowBar" : "aboveBar",
+          color: CHART.entry, shape: planSetup.direction === "long" ? "arrowUp" : "arrowDown",
+          text: "ENTRY", kind: "SIG", direction: planSetup.direction,
+        });
+      }
+    }
     renderICTSignals(lwc.chart, lwc.candles, { markers: markers.slice(-20) });
-    lwc.overlay?.setData({ rectangles: ict.rectangles || [], segments: ict.segments || [], lines: [] });
+    const rects = planSetup ? [] : (ict.rectangles || []);
+    const planRect = planSetup ? setupEntryZone(planSetup) : null;
+    if (planRect) rects.push(planRect);
+    lwc.overlay?.setData({ rectangles: rects, segments: planSetup ? [] : (ict.segments || []), lines: [] });
     lwc.lastLines = lines;
     applyPriceLabels(lines);
   }
