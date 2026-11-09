@@ -60,6 +60,10 @@ class Setup:
     ai_decision: str = ""
     bars_alive: int = 0
     last_price: float = 0.0
+    resonance_score: int = 0
+    resonance_breakdown: dict[str, Any] = field(default_factory=dict)
+    structural_invalidation_price: float | None = None
+    structural_invalidation_status: str = ""
 
     @property
     def entry(self) -> float:
@@ -100,6 +104,10 @@ class Setup:
             "ai_decision": self.ai_decision,
             "bars_alive": self.bars_alive,
             "last_price": self.last_price,
+            "resonance_score": self.resonance_score,
+            "resonance_breakdown": self.resonance_breakdown,
+            "structural_invalidation_price": self.structural_invalidation_price,
+            "structural_invalidation_status": self.structural_invalidation_status,
         }
 
     def setup_row(self, ingested_at: datetime) -> tuple:
@@ -114,6 +122,9 @@ class Setup:
             float(self.rr), "[]", self.exit_price, self.exit_price,
             0.0, 0.0, 0.0, self.engine_version, "setup-v1", "auto-v1",
             ingested_at,
+            "", self.resonance_score,
+            json.dumps(self.resonance_breakdown, separators=(",", ":")),
+            self.structural_invalidation_price, self.structural_invalidation_status,
         )
 
     def event_row(self, event_type: str, price: float, now: int,
@@ -147,7 +158,8 @@ class SetupManager:
     def active(self) -> list[Setup]:
         return [s for s in self.all() if s.is_active]
 
-    async def on_signal(self, signal: EngineSignal, *, now: int | None = None) -> Setup | None:
+    async def on_signal(self, signal: EngineSignal, *, now: int | None = None,
+                        resonance: Any | None = None) -> Setup | None:
         if signal.engine == "ict":
             return None
         now = now or signal.created_at
@@ -171,6 +183,10 @@ class SetupManager:
             engine_version=signal.engine_version,
             signal_ids=[signal.signal_id],
             engine_signals=[signal.to_public()],
+            resonance_score=int(getattr(resonance, "resonance_score", 0)),
+            resonance_breakdown=dict(getattr(resonance, "breakdown", {}) or {}),
+            structural_invalidation_price=signal.evidence_plain().get(
+                "structural_invalidation_price"),
         )
         if setup.target <= 0:
             return None
@@ -212,6 +228,19 @@ class SetupManager:
                     setup.updated_at = now
                     await self._transition(setup, "INVALIDATED", setup.stop, now,
                                            "invalidated before entry")
+            if setup.structural_invalidation_price is not None and setup.status in {"DETECTED", "OPEN"}:
+                if self._hits_structural(setup, low if low is not None else price,
+                                         high if high is not None else price):
+                    setup.status = "INVALIDATED"
+                    setup.structural_invalidation_status = "hit"
+                    setup.closed_at = now
+                    setup.updated_at = now
+                    await self._transition(
+                        setup, "STRUCTURAL_INVALIDATION",
+                        setup.structural_invalidation_price, now,
+                        "close crossed structural invalidation level",
+                    )
+                    continue
             if setup.status == "OPEN":
                 if self._hits_target(setup, float(high if high is not None else price),
                                      float(low if low is not None else price)):
@@ -259,6 +288,13 @@ class SetupManager:
     @staticmethod
     def _hits_stop(setup: Setup, low: float, high: float) -> bool:
         return low <= setup.stop if setup.direction == "long" else high >= setup.stop
+
+    @staticmethod
+    def _hits_structural(setup: Setup, low: float, high: float) -> bool:
+        price = setup.structural_invalidation_price
+        if price is None:
+            return False
+        return low <= price if setup.direction == "long" else high >= price
 
     @staticmethod
     def _hits_target(setup: Setup, high: float, low: float) -> bool:

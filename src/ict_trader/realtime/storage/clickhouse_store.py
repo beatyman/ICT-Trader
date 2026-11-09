@@ -388,6 +388,8 @@ class ClickHouseStore:
             "tp_planned", "sl_planned", "risk_reward_planned", "tp_actual",
             "sl_actual", "exit_price", "pnl", "pnl_pct", "fees",
             "engine_version", "strategy_version", "prompt_version", "ingested_at",
+            "htf_range_id", "resonance_score", "resonance_breakdown",
+            "structural_invalidation_price", "structural_invalidation_status",
         ]
         await self.analytics.enqueue("setups", columns, [row])
 

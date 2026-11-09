@@ -6,14 +6,14 @@ from ict_trader.realtime.analysis import EngineSignal, PriceZone
 from ict_trader.realtime.setups import SetupManager
 
 
-def signal() -> EngineSignal:
+def signal(evidence: dict | None = None) -> EngineSignal:
     return EngineSignal(
         engine="wyckoff", symbol="BTCUSDT", interval="15m", direction="long",
         signal_type="wyckoff_spring", trigger_price_zone=PriceZone(99.0, 101.0),
         invalidation_price=95.0, confidence=0.7,
         source_kline_open_time=1_700_000_000_000 // 900_000 * 900_000,
         engine_version="wyckoff-test",
-        evidence={"target": 110.0},
+        evidence=evidence or {"target": 110.0},
     )
 
 
@@ -67,3 +67,33 @@ def test_setup_expires_without_trigger():
 
     asyncio.run(run())
     assert rows
+
+
+def test_setup_records_resonance_and_structural_invalidation():
+    rows = []
+
+    async def persist_setup(row):
+        rows.append(row)
+
+    async def persist_event(row):
+        rows.append(row)
+
+    async def run():
+        from ict_trader.realtime.analysis.auxiliary import build_auxiliary_context
+        s = signal({"target": 110.0, "structural_invalidation_price": 98.0})
+        aux = build_auxiliary_context("long", htf_bias="bullish",
+                                      chan_bias="bullish", ichimoku_bias="bearish",
+                                      wyckoff_bias="bullish")
+        manager = SetupManager(persist_setup, persist_event, max_bars=10)
+        setup = await manager.on_signal(s, now=1_700_000_100_000, resonance=aux)
+        assert setup.resonance_score == 3
+        assert setup.structural_invalidation_price == 98.0
+        await manager.on_price("BTCUSDT", 100.0, interval="15m", high=100.5,
+                               low=99.5, now=1_700_000_200_000)
+        assert setup.status == "OPEN"
+        await manager.on_price("BTCUSDT", 97.0, interval="15m", high=97.5,
+                               low=96.5, now=1_700_000_300_000)
+        assert setup.status == "INVALIDATED"
+        assert setup.structural_invalidation_status == "hit"
+
+    asyncio.run(run())

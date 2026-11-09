@@ -247,6 +247,20 @@
           </div>
         </section>
 
+        <section class="panel ai-log-panel">
+          <div class="panel-head">
+            <span class="eyebrow">AI DECISION LOG</span>
+            <div class="ai-log-filters">
+              <select id="aiLogSymbol" aria-label="Filter AI log by symbol"><option value="">ALL</option></select>
+              <select id="aiLogStatus" aria-label="Filter AI log by status">
+                <option value="">ALL</option><option value="1">SUCCESS</option>
+                <option value="2">SCHEMA</option><option value="4">ERROR</option>
+                <option value="5">DEGRADED</option>
+              </select>
+            </div>
+          </div>
+          <div class="ai-log-list" id="aiLogList"><div class="empty-mini">no AI decisions yet</div></div>
+        </section>
         <section class="panel events-panel">
           <div class="panel-head"><span class="eyebrow">EVENT LOG</span><span class="tiny-live">LIVE</span></div>
           <div class="event-list" id="eventList">

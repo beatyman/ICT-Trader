@@ -252,6 +252,7 @@ class RealtimeEngine:
         self.registry.register(WyckoffEngine(WyckoffConfig()))
         self.registry.register(ChanEngine(ChanConfig(freq=settings.strategy_interval)))
         self.registry_signals: deque[EngineSignal] = deque(maxlen=200)
+        self.auxiliary: dict[str, dict[str, Any]] = {}
         self.registry_runs: deque[dict[str, Any]] = deque(maxlen=100)
         self._registry_sem = asyncio.Semaphore(1)
         self._registry_tasks: set[asyncio.Task] = set()
@@ -590,11 +591,23 @@ class RealtimeEngine:
         frame = pd.DataFrame([b.to_csv_row() for b in history])
         for col in ("open", "high", "low", "close", "volume"):
             frame[col] = frame[col].astype(float)
+        from .analysis.arrays import build_ict_arrays
+        try:
+            await self.ch.insert_ict_arrays(build_ict_arrays(frame, bar.symbol, bar.interval))
+        except Exception as exc:
+            log.warning("ICT arrays persist failed for %s %s: %s", bar.symbol, bar.interval, exc)
         context = AnalysisContext(bar.symbol, bar.interval, utc_ms())
         runs = await self.registry.analyze_all(
             frame, context, timeout_seconds=8.0,
             engine_ids=["ichimoku", "wyckoff", "chan"],
         )
+        from .analysis.auxiliary import build_auxiliary_context
+        biases = {"chan": "neutral", "ichimoku": "neutral", "wyckoff": "neutral"}
+        for run in runs:
+            if run.signals:
+                biases[run.engine] = run.signals[-1].direction.value
+        ema = float(frame["close"].ewm(span=50, adjust=False).mean().iloc[-1])
+        htf_bias = "bullish" if float(bar.close) > ema else "bearish"
         for run in runs:
             version = self.registry.get(run.engine).version
             await self.observability.engine_timing(
@@ -621,7 +634,14 @@ class RealtimeEngine:
             if fresh:
                 await self.ch.insert_engine_signals(fresh)
                 for signal in fresh:
-                    await self.setups.on_signal(signal)
+                    aux = build_auxiliary_context(
+                        signal.direction.value, htf_bias=htf_bias,
+                        chan_bias=biases["chan"],
+                        ichimoku_bias=biases["ichimoku"],
+                        wyckoff_bias=biases["wyckoff"],
+                    )
+                    self.auxiliary[signal.symbol] = aux.to_public()
+                    await self.setups.on_signal(signal, resonance=aux)
                 self.registry_signals.extend(fresh)
                 self.metrics.inc("engine_signal", len(fresh))
                 self.metrics.event(
@@ -794,6 +814,7 @@ class RealtimeEngine:
             "watchlist": self.runner.watchlist(self.latest_bars),
             "live_bars": [bar.to_public() for bar in self.latest_bars.values()],
             "engine_signals": [s.to_public() for s in list(self.registry_signals)[-30:]],
+            "auxiliary": list(self.auxiliary.values()),
             "setups": [s.to_public() for s in self.setups.all()[:30]],
             "engines": {
                 "registry": list(self.registry.names()),

@@ -749,3 +749,14 @@ html[data-theme="light"] .price-label { background: rgba(255,255,255,.96); }
 .legend-toggle.active { color: var(--text); }
 .legend-line.bi { background: rgba(120,123,134,.9); }
 .legend-line.seg { background: rgba(84,200,248,.9); }
+
+.ai-log-panel { flex: 0 0 auto; min-height: 130px; max-height: 220px; overflow: hidden; }
+.ai-log-filters { display: flex; gap: 4px; }
+.ai-log-filters select { background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 3px; font: 7px var(--mono); padding: 2px 3px; }
+.ai-log-list { overflow-y: auto; max-height: 180px; padding: 2px 10px 8px; }
+.ai-log-row { display: grid; grid-template-columns: 54px 1fr auto; gap: 6px; align-items: center; padding: 5px 0; border-bottom: 1px solid rgba(157,184,214,.06); font: 7px var(--mono); color: var(--muted); cursor: pointer; }
+.ai-log-row b { color: var(--text); font-weight: 500; }
+.ai-log-row .ai-log-status { font-size: 6px; letter-spacing: .04em; }
+.ai-log-row .ai-log-status.success { color: var(--green); }
+.ai-log-row .ai-log-status.error { color: var(--red); }
+.ai-log-row .ai-log-status.degraded { color: var(--amber); }

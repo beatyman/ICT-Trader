@@ -279,6 +279,7 @@
     renderSignals(snap);
     renderPositions(snap);
     renderEvents(snap);
+    renderAiLogs(snap);
     renderHealth(snap);
     renderChartHeader(snap);
     renderFooter(snap);
@@ -529,6 +530,44 @@
   }
 
   // ------------------------------------------------------------- events
+  function renderAiLogs(snap) {
+    const list = $("#aiLogList");
+    if (!list) return;
+    const rows = (snap.ai_decisions || []).slice(0, 20);
+    const symbolFilter = $("#aiLogSymbol")?.value || "";
+    const statusFilter = $("#aiLogStatus")?.value || "";
+    if ($("#aiLogSymbol")) {
+      const symbols = [...new Set(rows.map(r => r.symbol).filter(Boolean))].sort();
+      const current = $("#aiLogSymbol").value;
+      $("#aiLogSymbol").innerHTML = `<option value="">ALL</option>` +
+        symbols.map(s => `<option value="${escapeHtml(s)}"${s === current ? " selected" : ""}>${escapeHtml(s)}</option>`).join("");
+    }
+    const filtered = rows.filter(r => (!symbolFilter || r.symbol === symbolFilter)
+      && (!statusFilter || String(r.status) === statusFilter));
+    if (!filtered.length) {
+      list.innerHTML = `<div class="empty-mini">no matching AI decisions</div>`;
+      return;
+    }
+    list.innerHTML = filtered.map((r, i) => {
+      const status = r.status === 1 ? "success" : r.status === 2 ? "schema" : r.status === 5 ? "degraded" : "error";
+      const time = r.created_at ? new Date(Number(r.created_at)).toISOString().slice(11, 19) : "--:--:--";
+      return `<div class="ai-log-row" data-ai-row="${i}">
+        <span>${time}</span>
+        <span><b>${escapeHtml(r.symbol || "")}</b> ${escapeHtml((r.verdict || "").toUpperCase())} ${Number(r.confidence ?? 0)}%</span>
+        <span class="ai-log-status ${status}">${status.toUpperCase()}</span>
+      </div>`;
+    }).join("");
+    list.querySelectorAll("[data-ai-row]").forEach(row => {
+      row.addEventListener("click", () => {
+        const r = filtered[Number(row.dataset.aiRow)];
+        if (r?.parsed) {
+          S.aiReview = r.parsed;
+          openAiModal();
+        }
+      });
+    });
+  }
+
   function renderEvents(snap) {
     const events = (snap.metrics?.events || []).slice(0, 12);
     if (!events.length) {
@@ -1609,6 +1648,9 @@
         if (lwc.chart) lwc.chart.timeScale().fitContent();
       }
     });
+    $("#aiLogSymbol")?.addEventListener("change", () => renderAiLogs(S.snap || {}));
+    $("#aiLogStatus")?.addEventListener("change", () => renderAiLogs(S.snap || {}));
+
     $("#indicatorBtn").addEventListener("click", e => {
       S.ema = !S.ema;
       e.currentTarget.classList.toggle("active", S.ema);

@@ -64,7 +64,12 @@ test("full dashboard renders a fixed signal scenario", async () => {
     ai_decision_id: "", ai_confidence: 0, ai_decision: "",
     bars_alive: 2, last_price: last.close,
   }];
-  snapshot.ai_decisions = [];
+  snapshot.ai_decisions = [{
+    decision_id: "AI-FIXTURE", setup_id: "SET-FIXTURE", symbol: "XRPUSDT",
+    verdict: "support", confidence: 72, headline: "fixed review",
+    summary: "fixture", status: 1, created_at: last.close_time,
+    parsed: { verdict: "support", confidence: 72, headline: "fixed review", summary: "fixture" },
+  }];
 
   const browser = await chromium.launch({ executablePath: CHROME, headless: true });
   try {
@@ -124,6 +129,7 @@ test("full dashboard renders a fixed signal scenario", async () => {
     assert.ok(await page.locator(".signal-item").count() >= 1);
     await page.screenshot({ path: path.join(ARTIFACTS, "dashboard-debug.png"), fullPage: false });
     assert.ok(await page.locator("#priceLabelLayer .price-label").count() >= 1);
+    assert.ok(await page.locator("#aiLogList .ai-log-row").count() >= 1);
     assert.ok(await page.locator("#chartWrap canvas").count() >= 1);
     await page.locator("#chanBtn").click();
     assert.equal(await page.locator(".legend-toggle[data-chan].active").count(), 0);

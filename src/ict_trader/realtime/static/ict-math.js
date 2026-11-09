@@ -379,12 +379,12 @@
     const lMap = new Map(pivotL.map(p => [p.i, p]));
     let swingH = null, swingL = null, trend = 0;
     for (let i = startIdx + 2; i < bars.length; i++) {
-      if (hMap.has(i)) swingH = hMap.get(i);
-      if (lMap.has(i)) swingL = lMap.get(i);
+      const candidateH = hMap.get(i);
+      const candidateL = lMap.get(i);
       const b = bars[i], c = num(b.close), h = num(b.high), l = num(b.low);
       if (swingH && i > swingH.i) {
         if (h > swingH.price && c < swingH.price) {
-          markers.push({ time: timeOf(b.open_time), position: "aboveBar", shape: "circle", color: "#ef5350", text: "Sweep", kind: "Sweep", direction: "bearish" });
+          markers.push({ time: timeOf(b.open_time), position: "aboveBar", shape: "circle", color: "#ef5350", text: "BSL Sweep", kind: "BSL_SWEEP", direction: "bearish" });
           swingH = null;
         } else if (c > swingH.price) {
           const kind = trend < 0 ? "MSS" : "BOS";
@@ -394,7 +394,7 @@
       }
       if (swingL && i > swingL.i) {
         if (l < swingL.price && c > swingL.price) {
-          markers.push({ time: timeOf(b.open_time), position: "belowBar", shape: "circle", color: "#26a69a", text: "Sweep", kind: "Sweep", direction: "bullish" });
+          markers.push({ time: timeOf(b.open_time), position: "belowBar", shape: "circle", color: "#26a69a", text: "SSL Sweep", kind: "SSL_SWEEP", direction: "bullish" });
           swingL = null;
         } else if (c < swingL.price) {
           const kind = trend > 0 ? "MSS" : "BOS";
@@ -402,6 +402,8 @@
           trend = -1; swingL = null;
         }
       }
+      if (candidateH) swingH = candidateH;
+      if (candidateL) swingL = candidateL;
     }
 
     const fvg = rectangles.filter(r => r.kind === "FVG").slice(-8);

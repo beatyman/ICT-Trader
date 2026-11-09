@@ -315,7 +315,7 @@ class DeepSeekReviewer:
         if verdict not in {"support", "caution", "reject"}:
             verdict = "caution"
         confidence = int(max(0, min(100, _safe_number(obj.get("confidence"), 0))))
-        return {
+        normalized = {
             "verdict": verdict,
             "confidence": confidence,
             "headline": str(obj.get("headline") or "No headline"),
@@ -325,3 +325,8 @@ class DeepSeekReviewer:
             "invalidation": str(obj.get("invalidation") or ""),
             "data_quality": str(obj.get("data_quality") or ""),
         }
+        from .ai_schema import ReviewDecision
+        try:
+            return ReviewDecision.model_validate(normalized).model_dump()
+        except Exception as exc:
+            raise AiReviewError(f"DeepSeek schema invalid: {exc}") from exc

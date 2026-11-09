@@ -79,3 +79,14 @@ def test_parse_clamps_confidence_and_unknown_verdict():
     out = DeepSeekReviewer._parse('{"verdict":"buy","confidence":999}')
     assert out["verdict"] == "caution"
     assert out["confidence"] == 100
+
+
+def test_ai_schema_rejects_out_of_range_confidence():
+    import pytest
+    from pydantic import ValidationError
+    from ict_trader.realtime.ai_schema import ReviewDecision
+
+    with pytest.raises(ValidationError):
+        ReviewDecision(verdict="support", confidence=101, headline="x")
+    valid = ReviewDecision(verdict="caution", confidence=50, headline="x")
+    assert valid.verdict == "caution"

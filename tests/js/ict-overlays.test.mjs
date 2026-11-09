@@ -185,3 +185,17 @@ test("CISD uses the first open of a multi-candle run", () => {
   assert.ok(data.markers.some(m => m.kind === "CISD" && m.direction === "bullish"
     && m.time === ICT.timeOf(bars[63].open_time)));
 });
+
+
+test("BSL and SSL sweeps are distinguishable", () => {
+  const bars = Array.from({ length: 30 }, (_, i) => bar(i, { high: 95, low: 85, open: 90, close: 90 }));
+  bars[10].high = 100;
+  bars[10].low = 90;
+  bars[15] = bar(15, { open: 96, high: 101, low: 95, close: 97 });
+  bars[20].low = 80;
+  bars[20].high = 90;
+  bars[25] = bar(25, { open: 84, high: 85, low: 79, close: 84 });
+  const data = ICT.buildICTData(bars, { tf: "15m" });
+  assert.ok(data.markers.some(m => m.kind === "BSL_SWEEP" && m.text === "BSL Sweep"));
+  assert.ok(data.markers.some(m => m.kind === "SSL_SWEEP" && m.text === "SSL Sweep"));
+});
