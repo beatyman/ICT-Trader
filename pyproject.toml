@@ -18,13 +18,29 @@ dependencies = [
 
 [project.optional-dependencies]
 futu = ["futu-api>=9.0"]
+realtime = [
+  "clickhouse-connect>=0.8",
+  "fastapi>=0.110",
+  "httpx>=0.27",
+  "orjson>=3.9",
+  "redis>=5.0",
+  "uvicorn[standard]>=0.29",
+  "websockets>=12",
+]
 dev = ["pytest>=7.0"]
+all = [
+  "ict-trader[realtime,dev]",
+]
 
 [project.scripts]
 ict-trader = "ict_trader.cli:main"
+ict-realtime = "ict_trader.realtime.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"ict_trader.realtime" = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

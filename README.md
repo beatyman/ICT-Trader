@@ -27,6 +27,31 @@ Most ICT scripts draw boxes and arrows. This one is built around four rules:
 3. **Executable test** — next-bar entry, stop/target, costs, A-share T+1, stamp duty.
 4. **Auditable output** — every trade keeps its checks, quality score, MAE and MFE.
 
+## Realtime paper terminal
+
+This branch adds a local, Docker-backed realtime paper-trading stack around the
+same frozen setup: Binance combined-stream WS ingestion, Redis hot cache,
+ClickHouse closed-bar storage, gap detection + REST backfill, a SQLite WAL retry
+queue, a closed-bar strategy adapter, a deterministic paper broker and a
+self-contained Canvas dashboard.
+
+```powershell
+# Redis + ClickHouse (memory-capped, local-only ports)
+pwsh -File scripts/dev_up.ps1 -Install
+
+# Accelerated demo tape; use --mode live for Binance market data
+.\.venv\Scripts\python.exe -m ict_trader.realtime --mode demo
+
+# http://127.0.0.1:8080
+.\.venv\Scripts\python.exe scripts/smoke_realtime.py
+```
+
+![Realtime paper terminal](docs/assets/realtime-dashboard.png)
+
+PAPER ONLY — no exchange keys and no order routing. See
+[`docs/REALTIME.md`](docs/REALTIME.md) for architecture, data contracts, gap
+semantics, resource limits and acceptance checks.
+
 ## Install
 
 ```bash
@@ -36,6 +61,8 @@ python -m venv .venv
 # Windows
 .venv\Scripts\activate
 pip install -e ".[dev]"
+# realtime extras (Redis, ClickHouse, FastAPI, orjson, websockets)
+pip install -e ".[dev,realtime]"
 ```
 
 Optional Futu OpenD:

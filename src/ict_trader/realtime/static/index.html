@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>ICT // REALTIME PAPER TERMINAL</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" fill="none"><path d="M6 21.5 16 5l10 16.5-10 5.5L6 21.5Z" stroke="currentColor" stroke-width="1.4"/><path d="M11 20.5 16 12l5 8.5-5 2.8-5-2.8Z" fill="currentColor" opacity=".85"/></svg>
+        </div>
+        <div class="brand-type"><span>ICT</span><small>TERMINAL</small></div>
+      </div>
+      <div class="venue">
+        <span class="venue-label">BINANCE SPOT</span>
+        <span class="slash">/</span>
+        <span class="venue-sub">KLINE PIPELINE</span>
+      </div>
+      <nav class="nav" aria-label="Primary">
+        <button class="nav-item active" data-view="overview">Overview</button>
+        <button class="nav-item" data-view="signals">Signals</button>
+        <button class="nav-item" data-view="risk">Risk</button>
+        <button class="nav-item" data-view="replay">Replay</button>
+      </nav>
+      <div class="top-right">
+        <div class="status-cluster" aria-label="Dependency status">
+          <span class="status-pill" id="status-ws"><i class="dot"></i>WS</span>
+          <span class="status-pill" id="status-redis"><i class="dot"></i>R</span>
+          <span class="status-pill" id="status-ch"><i class="dot"></i>CH</span>
+        </div>
+        <div class="clock-block">
+          <b id="clock">--:--:--</b>
+          <span>UTC+8</span>
+        </div>
+        <button class="mode-badge" id="modeBadge" title="Paper execution only">SIM</button>
+        <button class="icon-btn" id="soundBtn" aria-label="Toggle notifications">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="paper-banner">
+      <div class="banner-left"><span class="lock"></span> PAPER EXECUTION <span class="sep">·</span> NO LIVE ORDERS <span class="sep">·</span> SIMULATED FILLS</div>
+      <div class="banner-right"><span id="feedModeLabel">LOCAL DOCKER</span><span class="sep">·</span><span id="bootMeta">booting</span></div>
+    </div>
+
+    <main class="layout">
+      <aside class="left-rail">
+        <section class="panel markets-panel">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">MARKETS</span>
+              <span class="head-count" id="marketCount">0</span>
+            </div>
+            <button class="mini-btn" id="refreshBtn" aria-label="Refresh">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+            </button>
+          </div>
+          <div class="watchlist" id="watchlist">
+            <div class="skeleton-row"></div><div class="skeleton-row"></div><div class="skeleton-row"></div>
+          </div>
+        </section>
+
+        <section class="panel infra-panel">
+          <div class="panel-head"><span class="eyebrow">INFRASTRUCTURE</span><span class="tiny-live" id="healthLabel">PROBING</span></div>
+          <div class="infra-row">
+            <div class="infra-icon">WS</div>
+            <div class="infra-body"><span>Market stream</span><small id="infra-ws-sub">connecting</small></div>
+            <span class="infra-value" id="infra-ws">—</span>
+          </div>
+          <div class="infra-row">
+            <div class="infra-icon">R</div>
+            <div class="infra-body"><span>Redis cache</span><small id="infra-redis-sub">pipeline</small></div>
+            <span class="infra-value" id="infra-redis">—</span>
+          </div>
+          <div class="infra-row">
+            <div class="infra-icon">CH</div>
+            <div class="infra-body"><span>ClickHouse</span><small id="infra-ch-sub">merge tree</small></div>
+            <span class="infra-value" id="infra-ch">—</span>
+          </div>
+          <div class="latency-block">
+            <div class="latency-head"><span>INGEST LATENCY</span><b id="latencyP99">—</b></div>
+            <div class="latency-bars" id="latencyBars"></div>
+            <div class="latency-foot"><span>P50 <b id="latencyP50">—</b></span><span>writes <b id="writeRate">0/s</b></span></div>
+          </div>
+          <div class="memory-line">
+            <div class="memory-label"><span>Redis memory</span><b id="redisMem">—</b></div>
+            <div class="track"><i id="redisMemBar" style="width:0%"></i></div>
+          </div>
+          <div class="infra-foot"><span class="dot ok"></span><span id="walLabel">WAL clear</span><span class="grow"></span><span id="chRows">0 rows</span></div>
+        </section>
+        <div class="rail-note">
+          <span class="note-kicker">LOCAL STACK</span>
+          Docker Desktop · Redis 7 · ClickHouse 24.8<br>CPU 2 · MEM 4 GB design envelope
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <div class="workspace-head">
+          <div>
+            <div class="eyebrow">PORTFOLIO / PAPER ACCOUNT</div>
+            <h1>Execution overview</h1>
+          </div>
+          <div class="account-chip">
+            <span class="acct-dot"></span>
+            <div><small>PAPER ACCOUNT</small><b>ICT-ALPHA-01</b></div>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m6 9 6 6 6-6"/></svg>
+          </div>
+        </div>
+
+        <div class="kpi-grid">
+          <article class="kpi kpi-primary">
+            <div class="kpi-top"><span>EQUITY</span><span class="kpi-tag">USDT</span></div>
+            <div class="kpi-value" id="kpiEquity">—</div>
+            <div class="kpi-foot"><span class="delta" id="kpiReturn">—</span><span>since inception</span></div>
+            <svg class="kpi-spark" id="equitySpark" viewBox="0 0 180 44" preserveAspectRatio="none"></svg>
+          </article>
+          <article class="kpi">
+            <div class="kpi-top"><span>DAY P&amp;L</span><span class="kpi-mark" id="pnlMark">—</span></div>
+            <div class="kpi-value" id="kpiPnl">—</div>
+            <div class="kpi-foot"><span id="kpiTrades">0 closed</span><span>UTC reset</span></div>
+            <div class="micro-bars" id="pnlBars"></div>
+          </article>
+          <article class="kpi">
+            <div class="kpi-top"><span>OPEN RISK</span><span class="kpi-tag">R</span></div>
+            <div class="kpi-value" id="kpiRisk">—</div>
+            <div class="kpi-foot"><span id="kpiRiskPct">0.00% of equity</span><span id="kpiRiskCount">0 positions</span></div>
+            <div class="risk-track"><i id="riskBar" style="width:0%"></i><em></em><em></em><em></em><em></em></div>
+          </article>
+          <article class="kpi">
+            <div class="kpi-top"><span>WIN RATE</span><span class="kpi-tag">PAPER</span></div>
+            <div class="kpi-value" id="kpiWinRate">—</div>
+            <div class="kpi-foot"><span id="kpiPf">PF —</span><span id="kpiAvgR">avg R —</span></div>
+            <div class="win-split"><i id="winBar"></i></div>
+          </article>
+        </div>
+
+        <section class="panel chart-panel">
+          <div class="chart-head">
+            <div class="instrument">
+              <div class="coin coin-btc" id="coinIcon">₿</div>
+              <div>
+                <div class="instrument-title"><b id="chartSymbol">BTCUSDT</b><span class="pair">/ USDT</span><span class="mode-dot"></span></div>
+                <div class="instrument-sub"><span id="chartPrice">—</span><span class="delta" id="chartChange">—</span><span class="chart-source" id="chartSource">15m · CLOSED BARS</span></div>
+              </div>
+            </div>
+            <div class="chart-tools">
+              <div class="tf-tabs" id="tfTabs">
+                <button class="tf active" data-tf="15m">15m</button>
+                <button class="tf" data-tf="1h">1H</button>
+                <button class="tf" data-tf="4h">4H</button>
+                <button class="tf" data-tf="1d">1D</button>
+              </div>
+              <button class="tool-btn active" id="indicatorBtn" style="color: var(--cyan)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 18 9 9l4 5 3-7 4 8"/><path d="M4 4v16h16"/></svg>
+                EMA
+              </button>
+              <button class="tool-btn icon-only" id="fitBtn" aria-label="Fit chart">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="chart-wrap" id="chartWrap">
+            <canvas id="chart"></canvas>
+            <div class="chart-ohlc" id="chartOhlc"></div>
+            <div class="chart-watermark" id="chartWatermark">ICT</div>
+            <div class="chart-loading" id="chartLoading"><span></span>loading price action</div>
+            <div class="crosshair-tip" id="crosshairTip"></div>
+          </div>
+          <div class="chart-foot">
+            <div class="legend"><span><i class="legend-line ema20"></i>EMA 20</span><span><i class="legend-line ema50"></i>EMA 50</span><span><i class="legend-box"></i>Session levels</span></div>
+            <div class="chart-live"><span class="pulse"></span><span id="chartFeedNote">streaming close-only signals</span></div>
+          </div>
+        </section>
+
+        <section class="panel positions-panel">
+          <div class="panel-head">
+            <div><span class="eyebrow">OPEN POSITIONS</span><span class="head-count" id="positionCount">0</span></div>
+            <div class="head-right"><span class="risk-chip" id="openRiskChip">RISK 0.00%</span><button class="mini-btn" id="flattenBtn" title="Paper only">FLATTEN</button></div>
+          </div>
+          <div class="positions-table-wrap">
+            <table class="data-table" id="positionsTable">
+              <thead><tr><th>SYMBOL</th><th>SIDE</th><th>ENTRY</th><th>MARK</th><th>STOP</th><th>TARGET</th><th>QTY</th><th>U-R</th><th>PNL</th></tr></thead>
+              <tbody id="positionsBody"></tbody>
+            </table>
+            <div class="empty-state" id="positionsEmpty">
+              <div class="empty-glyph">◇</div>
+              <b>No active exposure</b>
+              <span>Strategies are waiting for a confirmed closed-bar setup.</span>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <aside class="right-rail">
+        <section class="panel setup-panel">
+          <div class="panel-head">
+            <span class="eyebrow">LATEST SETUP</span>
+            <span class="setup-status" id="setupStatus">WAITING</span>
+          </div>
+          <div id="setupContent">
+            <div class="setup-empty">
+              <div class="scanner"><i></i></div>
+              <b>Scanning for ICT confluence</b>
+              <span>1D / 4H bias · liquidity sweep · CISD · PDA</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel signals-panel">
+          <div class="panel-head">
+            <span class="eyebrow">SIGNAL STREAM</span>
+            <div class="segmented" id="signalFilter">
+              <button class="active" data-filter="all">ALL</button>
+              <button data-filter="live">LIVE</button>
+            </div>
+          </div>
+          <div class="signal-list" id="signalList">
+            <div class="empty-mini">awaiting first evaluation</div>
+          </div>
+        </section>
+
+        <section class="panel events-panel">
+          <div class="panel-head"><span class="eyebrow">EVENT LOG</span><span class="tiny-live">LIVE</span></div>
+          <div class="event-list" id="eventList">
+            <div class="empty-mini">no events yet</div>
+          </div>
+          <div class="ai-reserved">
+            <span class="ai-mark">DS</span>
+            <div><b>DeepSeek review</b><small id="aiStatus">API key reserved</small></div>
+            <span class="soon">SOON</span>
+          </div>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="statusbar">
+      <div class="status-left">
+        <span class="engine-state"><i class="dot ok" id="engineDot"></i><b id="engineLabel">ENGINE BOOTING</b></span>
+        <span class="sb-sep"></span>
+        <span>P50 <b id="sbP50">—</b></span>
+        <span>P99 <b id="sbP99">—</b></span>
+        <span class="sb-sep"></span>
+        <span>WS <b id="sbMsgRate">0/s</b></span>
+        <span>GAPS <b id="sbGaps">0</b></span>
+        <span>CH <b id="sbRows">0</b></span>
+      </div>
+      <div class="status-right">
+        <span id="sbSymbols">— symbols</span>
+        <span class="sb-sep"></span>
+        <span>ict-trader v0.1.0</span>
+        <span class="sb-sep"></span>
+        <span class="build-tag">feat/realtime-paper-trading</span>
+      </div>
+    </footer>
+  </div>
+
+  <div class="toast-stack" id="toastStack"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -11,6 +11,7 @@ output/
 data/
 .DS_Store
 Thumbs.db
+.env
 
 # Local infrastructure / non-ICT files (never commit)
 scripts/install_verify_proxy.sh
