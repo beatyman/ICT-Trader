@@ -180,30 +180,34 @@
     }
 
     }
-    // CISD.
-    let runDir = 0, runCount = 0, runOpen = 0;
+    // CISD: close through the open of the first candle in a 2+ run.
+    let bearRun = 0, bearFirstOpen = 0;
+    let bullRun = 0, bullFirstOpen = 0;
     for (let i = startIdx; i < bars.length; i++) {
       const b = bars[i], o = num(b.open), c = num(b.close);
-      const dir = c > o ? 1 : c < o ? -1 : 0;
-      if (dir === 0) continue;
-      if (dir !== runDir) { runDir = dir; runCount = 1; runOpen = o; }
-      else runCount += 1;
-      if (dir === 1 && i >= 2) {
-        const firstBear = bars[i - 2];
-        if (num(firstBear.close) < num(firstBear.open) && c > num(firstBear.open)) {
-          markers.push({
-            time: timeOf(b.open_time), position: "belowBar", shape: "square",
-            color: "#26a69a", text: "CISD", kind: "CISD", direction: "bullish",
-          });
-        }
-      } else if (dir === -1 && i >= 2) {
-        const firstBull = bars[i - 2];
-        if (num(firstBull.close) > num(firstBull.open) && c < num(firstBull.open)) {
+      if (c < o) {
+        if (bullRun >= 2 && c < bullFirstOpen) {
           markers.push({
             time: timeOf(b.open_time), position: "aboveBar", shape: "square",
             color: "#ef5350", text: "CISD", kind: "CISD", direction: "bearish",
           });
         }
+        if (bearRun === 0) bearFirstOpen = o;
+        bearRun += 1;
+        bullRun = 0;
+      } else if (c > o) {
+        if (bearRun >= 2 && c > bearFirstOpen) {
+          markers.push({
+            time: timeOf(b.open_time), position: "belowBar", shape: "square",
+            color: "#26a69a", text: "CISD", kind: "CISD", direction: "bullish",
+          });
+        }
+        if (bullRun === 0) bullFirstOpen = o;
+        bullRun += 1;
+        bearRun = 0;
+      } else {
+        bearRun = 0;
+        bullRun = 0;
       }
     }
 

@@ -173,3 +173,15 @@ test("Chan BI and SEG can be hidden independently", () => {
   assert.equal(noBi.segments.some(s => s.label === "BI"), false);
   assert.equal(noBi.segments.some(s => s.label === "SEG"), true);
 });
+
+
+test("CISD uses the first open of a multi-candle run", () => {
+  const bars = flat();
+  bars[60] = bar(60, { open: 100, high: 100.2, low: 99.5, close: 99.8 });
+  bars[61] = bar(61, { open: 99.8, high: 100, low: 99.2, close: 99.4 });
+  bars[62] = bar(62, { open: 99.4, high: 99.6, low: 98.8, close: 99 });
+  bars[63] = bar(63, { open: 99, high: 100.5, low: 98.9, close: 100.2 });
+  const data = ICT.buildICTData(bars, { tf: "15m" });
+  assert.ok(data.markers.some(m => m.kind === "CISD" && m.direction === "bullish"
+    && m.time === ICT.timeOf(bars[63].open_time)));
+});
