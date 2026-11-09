@@ -48,10 +48,11 @@ pwsh -File scripts/dev_up.ps1 -Install
 
 ![Realtime paper terminal](docs/assets/realtime-dashboard.png)
 
-PAPER ONLY — no exchange keys and no order routing. DeepSeek Flash is available
-as an optional, on-demand risk reviewer (server-side key, no execution
-authority). See [`docs/REALTIME.md`](docs/REALTIME.md) for architecture, data
-contracts, gap semantics, resource limits and acceptance checks.
+PAPER ONLY — no exchange keys and no order routing. DeepSeek V4.1 Flash
+(`deepseek-flash`) is available as an optional, on-demand risk reviewer
+(server-side key, no execution authority). See
+[`docs/REALTIME.md`](docs/REALTIME.md) for architecture, data contracts, gap
+semantics, resource limits and acceptance checks.
 
 ## Install
 

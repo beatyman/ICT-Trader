@@ -27,6 +27,7 @@ def test_status_and_availability(tmp_path):
     r2 = reviewer(tmp_path / "with-key", key="sk-test-not-real")
     assert r2.available
     assert r2.status()["model"] == "deepseek-flash"
+    assert r2.status()["model_name"] == "DeepSeek-V4.1-Flash"
 
 
 def test_context_is_compact_and_contains_risk(tmp_path):

@@ -506,7 +506,7 @@
     }
     if (ai.configured) {
       const reviews = num(ai.reviews);
-      $("#aiStatus").textContent = `${ai.model || "deepseek-flash"} · ${reviews} review${reviews === 1 ? "" : "s"}`;
+      $("#aiStatus").textContent = `${ai.model_name || "DeepSeek-V4.1-Flash"} · ${reviews} review${reviews === 1 ? "" : "s"}`;
     } else {
       $("#aiStatus").textContent = "API key not configured";
     }
@@ -874,7 +874,7 @@
     const modal = $("#aiModal");
     modal.hidden = false;
     if (!S.aiReview) {
-      $("#aiModalBody").innerHTML = `<div class="ai-empty">点击 REVIEW，让 DeepSeek Flash 对当前 ${escapeHtml(S.symbol || "市场")} 的 paper setup、仓位、风险和系统健康做一次只读审查。模型不会下单。</div>`;
+      $("#aiModalBody").innerHTML = `<div class="ai-empty">点击 REVIEW，让 DeepSeek V4.1 Flash 对当前 ${escapeHtml(S.symbol || "市场")} 的 paper setup、仓位、风险和系统健康做一次只读审查。模型不会下单。</div>`;
     } else {
       renderAiReview(S.aiReview);
     }
@@ -896,7 +896,7 @@
     $("#aiModalBody").innerHTML = `
       <div class="ai-loading">
         <div class="ring"></div>
-        <span>DEEPSEEK FLASH // REVIEWING ${escapeHtml(S.symbol || "")}</span>
+        <span>DEEPSEEK V4.1 FLASH // REVIEWING ${escapeHtml(S.symbol || "")}</span>
         <small style="color:var(--muted-2);font-size:7px">paper snapshot · closed bars · no order authority</small>
       </div>`;
     const controller = new AbortController();
@@ -954,7 +954,7 @@
           <div class="ai-section"><h3>DATA QUALITY</h3><p>${escapeHtml(review.data_quality || "—")}</p></div>
         </div>
         <div class="ai-result-foot">
-          <span><b>${escapeHtml(review.model || "deepseek-flash")}</b> · ${num(review.latency_ms).toFixed(0)}ms · ${tokens} tokens</span>
+          <span><b>${escapeHtml(review.model_name || "DeepSeek-V4.1-Flash")}</b> · ${num(review.latency_ms).toFixed(0)}ms · ${tokens} tokens</span>
           <span>${escapeHtml(review.reviewed_at || "")} · ${escapeHtml(review.disclaimer || "advisory only")}</span>
         </div>
       </div>`;

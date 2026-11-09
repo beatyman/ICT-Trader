@@ -257,6 +257,7 @@ class Settings:
                 "configured": bool(self.deepseek_api_key),
                 "enabled": bool(self.deepseek_api_key),
                 "model": self.deepseek_model,
+                "model_name": "DeepSeek-V4.1-Flash",
                 "mode": "on-demand risk review (never executes orders)",
             },
         }

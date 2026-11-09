@@ -16,8 +16,8 @@ per-stream queue → gap state machine → REST backfill / replay
 
 It is **paper-only by design**. There is no exchange order API key, no order
 routing, and no claim that the frozen setup is profitable. The engine refuses
-to start if `PAPER_TRADE=false`. An optional server-side DeepSeek Flash key is
-used only for on-demand risk review.
+to start if `PAPER_TRADE=false`. An optional server-side DeepSeek V4.1 Flash
+key is used only for on-demand risk review.
 
 ![Realtime paper terminal](assets/realtime-dashboard.png)
 
@@ -193,9 +193,9 @@ build_setup(df_15m, result, SetupConfig(market="crypto", stack=...))
 * WebSocket snapshot at 1 Hz, `/api/snapshot`, `/api/klines`,
   `/api/health`, `/api/docs`.
 
-### DeepSeek Flash risk review
+### DeepSeek V4.1 Flash risk review
 
-![DeepSeek Flash risk review](assets/realtime-ai-review.png)
+![DeepSeek V4.1 Flash risk review](assets/realtime-ai-review.png)
 
 `DEEPSEEK_API_KEY` lives in `.env` (git-ignored) and is **never sent to the
 browser**. To enable it:
@@ -204,14 +204,15 @@ browser**. To enable it:
 Copy-Item .env.example .env
 # edit .env:
 # DEEPSEEK_API_KEY=sk-...
-# DEEPSEEK_MODEL=deepseek-flash
+# DEEPSEEK_MODEL=deepseek-flash   # API id for DeepSeek-V4.1-Flash
 ```
 
 The model is called only when the operator presses `AI`/`REVIEW`; it receives a
 compact snapshot (last 50 closed bars, selected-symbol signals, positions,
 account, gap/latency health) and returns structured JSON.
 
-* model: `deepseek-flash`, `reasoning_effort=low`, JSON-object response;
+* model: API id `deepseek-flash` (DeepSeek-V4.1-Flash), `reasoning_effort=low`,
+  JSON-object response;
 * role: risk reviewer only — it cannot open, close or modify a paper position;
 * it is told to reject `HISTORICAL`/`actionable=false` setups and never invent
   prices;

@@ -1,4 +1,4 @@
-"""On-demand DeepSeek Flash risk review.
+"""On-demand DeepSeek V4.1 Flash risk review.
 
 This layer is deliberately narrow:
 
@@ -90,6 +90,7 @@ class DeepSeekReviewer:
             "enabled": self.available,
             "provider": "deepseek",
             "model": self.settings.deepseek_model,
+            "model_name": "DeepSeek-V4.1-Flash",
             "mode": "on-demand risk review",
             "reviews": self.reviews,
             "total_tokens": self.total_tokens,
@@ -260,6 +261,7 @@ class DeepSeekReviewer:
                 result = {
                     **review,
                     "model": data.get("model", self.settings.deepseek_model),
+                    "model_name": "DeepSeek-V4.1-Flash",
                     "usage": usage,
                     "latency_ms": round((time.perf_counter() - started) * 1000.0, 1),
                     "reviewed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
