@@ -15,7 +15,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[3]
+_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+# In a source checkout the package root is the repo; in an installed Docker
+# image it lives under site-packages, while /app (or the caller's cwd) is the
+# writable project root. Prefer a directory that actually has pyproject.toml.
+ROOT = _PACKAGE_ROOT if (_PACKAGE_ROOT / "pyproject.toml").exists() else Path.cwd()
 DEFAULT_DATA_DIR = ROOT / "data" / "realtime"
 
 SPOT_WS = "wss://data-stream.binance.vision/stream"
@@ -183,6 +187,10 @@ class Settings:
             raise ValueError(
                 "live order routing is intentionally not implemented; this build is paper-only"
             )
+        if self.deepseek_effort not in {"low", "high", "max"}:
+            raise ValueError("DEEPSEEK_EFFORT must be low, high or max")
+        self.deepseek_max_tokens = max(256, int(self.deepseek_max_tokens))
+        self.deepseek_timeout = max(10.0, float(self.deepseek_timeout))
         self.data_dir.mkdir(parents=True, exist_ok=True)
         if self.market == "futures":
             # The data layer only differs by URL and field mapping; kline fields

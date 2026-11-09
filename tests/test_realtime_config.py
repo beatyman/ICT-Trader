@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ict_trader.realtime.config import Settings
+from ict_trader.realtime.config import Settings, load_env_file
 
 
 def test_stream_grouping_respects_connection_cap(tmp_path, monkeypatch):
@@ -22,6 +22,21 @@ def test_strategy_interval_is_always_subscribed(tmp_path):
                    mode="demo", data_dir=tmp_path)
     assert "15m" in cfg.intervals
     assert ("BTCUSDT", "15m") in cfg.streams
+
+
+def test_env_file_supports_inline_comments(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text(
+        "ICT_TEST_FLAG=abc # demo | live\n"
+        "ICT_TEST_QUOTED='value # kept'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ICT_TEST_FLAG", raising=False)
+    monkeypatch.delenv("ICT_TEST_QUOTED", raising=False)
+    load_env_file(env)
+    import os
+    assert os.environ["ICT_TEST_FLAG"] == "abc"
+    assert os.environ["ICT_TEST_QUOTED"] == "value # kept"
 
 
 def test_public_dict_does_not_leak_secrets(tmp_path):
