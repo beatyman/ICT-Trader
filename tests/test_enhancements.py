@@ -45,3 +45,19 @@ def test_analyze_enhanced():
     assert hasattr(res, "sessions")
     assert hasattr(res, "smts")
 
+
+
+def test_session_levels_accept_timezone_aware_dates():
+    import pandas as pd
+    from datetime import datetime, timezone, timedelta
+    from ict_trader.enhancements import detect_session_levels
+
+    start = datetime(2026, 11, 9, tzinfo=timezone.utc)
+    rows = []
+    for i in range(96 * 3):
+        px = 100 + i * 0.01
+        rows.append({"date": start + timedelta(minutes=15 * i),
+                     "open": px, "high": px + 0.2, "low": px - 0.2,
+                     "close": px, "volume": 1.0})
+    levels = detect_session_levels(pd.DataFrame(rows))
+    assert levels is not None

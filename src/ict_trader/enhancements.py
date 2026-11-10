@@ -93,10 +93,10 @@ def detect_session_levels(df: pd.DataFrame, max_per: int = 2) -> list[SessionLev
     # Asia 20:00-00:00 ET, London 02:00-05:00 ET (same defaults as the Pine)
     if n >= 4:
         tz = ZoneInfo("America/New_York")
-        try:
+        if dates.dt.tz is None:
             et = dates.dt.tz_localize("Asia/Shanghai").dt.tz_convert(tz)
-        except Exception:
-            et = dates.dt.tz_localize("UTC").dt.tz_convert(tz)
+        else:
+            et = dates.dt.tz_convert(tz)
         for name, start_t, end_t in (
             ("Asia", dtime(20, 0), dtime(23, 59, 59)),
             ("London", dtime(2, 0), dtime(5, 0)),
