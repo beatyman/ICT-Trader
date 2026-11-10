@@ -261,10 +261,7 @@ class RealtimeEngine:
             setup_config=SetupConfig(
                 rr=settings.rr,
                 allow_short=True,
-                stack="4h_15m",
-                require_1d_cloud=False,
-                require_1d_macd=False,
-                require_1d_tk=False,
+                stack="1d_4h_15m",
             ),
             ict_config=ICTConfig(),
         ))
