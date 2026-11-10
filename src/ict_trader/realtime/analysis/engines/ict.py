@@ -18,6 +18,7 @@ from ....setup import SetupConfig, build_setup
 from ...overlays import build_ict_overlays
 from ...models import dt_to_ms
 from ..contracts import AnalysisContext, EngineSignal, PriceZone
+from ..evidence import breaker_evidence, extract_sweep, structure_evidence
 
 ENGINE_VERSION = "ict_trader-0.1.0"
 
@@ -97,6 +98,16 @@ class ICTEngine:
                 continue
             zone_low, zone_high = sorted((entry, float(c.level)))
             overlay_evidence = build_ict_overlays(frame)
+            source_ms = int(pd.Timestamp(frame["date"].iloc[idx]).timestamp() * 1000)
+            times = [int(pd.Timestamp(x).timestamp() * 1000) for x in frame["date"]]
+            direction = "long" if c.direction == "bull" else "short"
+            sweep = extract_sweep(
+                overlay_evidence.get("sweeps", []),
+                direction=direction,
+                source_kline_open_time=source_ms,
+            )
+            structure = structure_evidence(result.events, idx, times)
+            breakers = breaker_evidence(result.pd_arrays, idx)
             evidence = {
                 "entry": entry,
                 "stop": stop,
@@ -109,6 +120,9 @@ class ICTEngine:
                 "setup_level": float(c.level),
                 "thesis": self._thesis(c),
                 "ict_overlays": overlay_evidence,
+                "sweep": sweep,
+                "structure": structure,
+                "breaker": breakers,
             }
             symbol = (context.symbol if context else frame.attrs.get("symbol", ""))
             interval = (context.interval if context else frame.attrs.get("interval", "15m"))
@@ -121,9 +135,7 @@ class ICTEngine:
                 trigger_price_zone=PriceZone(zone_low, zone_high),
                 invalidation_price=stop,
                 confidence=max(0.0, min(1.0, float(c.quality))),
-                source_kline_open_time=dt_to_ms(
-                    pd.Timestamp(frame["date"].iloc[idx]).to_pydatetime()
-                ),
+                source_kline_open_time=source_ms,
                 engine_version=self.version,
                 evidence=evidence,
             ))
