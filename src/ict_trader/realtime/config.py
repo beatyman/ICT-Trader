@@ -115,7 +115,7 @@ class Settings:
     reconnect_max_seconds: float = 30.0
 
     # ---- data bootstrap / demo ------------------------------------------
-    bootstrap_bars: int = 5000            # strategy interval
+    bootstrap_bars: int = 8000            # strategy interval
     bootstrap_bars_fast: int = 320        # non-strategy intervals
     bootstrap_concurrency: int = 3
     demo_speed: float = 15.0              # logical bars are emitted every N seconds
@@ -327,7 +327,7 @@ class Settings:
             ping_interval=_env_float("WS_PING_INTERVAL", 20.0),
             ping_timeout=_env_float("WS_PING_TIMEOUT", 20.0),
             reconnect_max_seconds=_env_float("WS_RECONNECT_MAX", 30.0),
-            bootstrap_bars=_env_int("BOOTSTRAP_BARS", 5000),
+            bootstrap_bars=_env_int("BOOTSTRAP_BARS", 8000),
             bootstrap_bars_fast=_env_int("BOOTSTRAP_BARS_FAST", 320),
             bootstrap_concurrency=_env_int("BOOTSTRAP_CONCURRENCY", 3),
             demo_speed=_env_float("DEMO_SPEED", 15.0),
