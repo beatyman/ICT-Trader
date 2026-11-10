@@ -25,6 +25,14 @@ class Candidate:
     evidence: dict[str, Any] = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
 
+    def to_public(self) -> dict:
+        return {
+            "rule_id": self.rule_id, "direction": self.direction,
+            "entry_low": self.entry_low, "entry_high": self.entry_high,
+            "stop": self.stop, "targets": list(self.targets), "rr": self.rr,
+            "evidence": self.evidence, "blockers": list(self.blockers),
+        }
+
 
 def _bias_ok(features: dict, direction: str) -> bool:
     want = "bullish" if direction == "long" else "bearish"

@@ -45,6 +45,7 @@ class ICTEngine:
     engine_id: str = "ict"
     version: str = ENGINE_VERSION
     warmup_bars: int = 800
+    rule_mode: bool = False
 
     def analyze(self, window: pd.DataFrame,
                 context: AnalysisContext) -> list[EngineSignal]:
@@ -161,6 +162,18 @@ class ICTEngine:
                 engine_version=self.version,
                 evidence=evidence,
             ))
+        if self.rule_mode:
+            from ..candidate_adapter import to_engine_signal
+            from ..candidate_builder import build_candidates
+            source_ms = int(pd.Timestamp(frame["date"].iloc[-1]).timestamp() * 1000)
+            candidates = build_candidates(
+                frame, result, symbol=symbol, now=pd.Timestamp(frame["date"].iloc[-1]).to_pydatetime(),
+            )
+            return [to_engine_signal(
+                c, symbol=symbol, interval=interval,
+                source_kline_open_time=source_ms,
+                engine_version=self.version,
+            ) for c in candidates]
         return out
 
     @staticmethod
