@@ -533,7 +533,7 @@ class RealtimeEngine:
                 await self.ch.enqueue(bar)
             await self.redis.seed_closed(bars[-max(200, min(800, limit)):])
             if interval == self.settings.strategy_interval:
-                await self.runner.bootstrap(symbol, bars)
+                await self.runner.bootstrap(symbol, bars, compute=False)
         self.metrics.event(
             "INFO", "bootstrap",
             f"{symbol} {interval}: {len(bars)} bars from {source}",

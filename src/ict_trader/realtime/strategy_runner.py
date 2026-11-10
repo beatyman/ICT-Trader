@@ -159,7 +159,8 @@ class ICTStrategyRunner:
         )
 
     # ------------------------------------------------------------------
-    async def bootstrap(self, symbol: str, bars: list[Kline]) -> list[TradeSignal]:
+    async def bootstrap(self, symbol: str, bars: list[Kline],
+                        *, compute: bool = True) -> list[TradeSignal]:
         """Load history and expose recent *historical* setups to the dashboard."""
         closed = [b for b in bars if b.is_closed]
         if len(closed) < 100:
@@ -167,8 +168,11 @@ class ICTStrategyRunner:
         # Full history is evaluated once to populate the research signal stream;
         # only the tail is retained for per-close live evaluation.
         full = list(closed)
-        async with self._eval_sem:
-            signals = await asyncio.to_thread(self._compute, symbol, full, False)
+        if compute:
+            async with self._eval_sem:
+                signals = await asyncio.to_thread(self._compute, symbol, full, False)
+        else:
+            signals = []
         async with self._locks[symbol]:
             self.histories[symbol] = deque(closed[-self.eval_window:], maxlen=self.eval_window)
         # Keep only setups whose source K-line actually remains in the retained
