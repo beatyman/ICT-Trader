@@ -69,6 +69,8 @@ class Setup:
     structure_bias: str = "neutral"
     shadow: bool = False
     execution_mode: str = ""
+    entry_pending_reason: str = ""
+    events_pending_conflict: bool = False
 
     @property
     def entry(self) -> float:
@@ -150,6 +152,7 @@ class Setup:
             "structure_bias": self.structure_bias,
             "shadow": self.shadow,
             "execution_mode": self.execution_mode,
+            "entry_pending_reason": self.entry_pending_reason,
         }
 
     def setup_row(self, ingested_at: datetime) -> tuple:
@@ -292,6 +295,28 @@ class SetupManager:
                             "shadow mode: broker blocked",
                         )
                         continue
+                    accepted = True
+                    if self.on_entry is not None:
+                        accepted = await self.on_entry(setup)
+                    if accepted is None:
+                        setup.entry_pending_reason = "position_conflict"
+                        setup.updated_at = now
+                        if not setup.events_pending_conflict:
+                            setup.events_pending_conflict = True
+                            await self._transition(
+                                setup, "ENTRY_WAIT", setup.entry, now,
+                                "same-symbol paper position already open",
+                            )
+                        continue
+                    if not accepted:
+                        setup.status = "INVALIDATED"
+                        setup.closed_at = now
+                        setup.updated_at = now
+                        await self._transition(
+                            setup, "ENTRY_REJECTED", setup.entry, now,
+                            "paper broker rejected entry",
+                        )
+                        continue
                     setup.fill_price = (setup.entry_high if setup.direction == "short"
                                         else setup.entry_low)
                     setup.status = "OPEN"
@@ -299,16 +324,6 @@ class SetupManager:
                     setup.updated_at = now
                     await self._transition(setup, "ENTRY", setup.fill_price, now,
                                            "favourable edge touched")
-                    if self.on_entry is not None:
-                        accepted = await self.on_entry(setup)
-                        if not accepted:
-                            setup.status = "INVALIDATED"
-                            setup.closed_at = now
-                            setup.updated_at = now
-                            await self._transition(
-                                setup, "ENTRY_REJECTED", setup.fill_price, now,
-                                "paper broker rejected entry",
-                            )
                     # Never evaluate TP on the same tick that opened the
                     # position: one bar's high/low can contain both prices,
                     # which would be look-ahead inside the bar.

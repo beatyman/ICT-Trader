@@ -593,8 +593,17 @@ class RealtimeEngine:
                     "ai", "scan_loop", "engine", "AI scan loop failed", exc=exc,
                 )
 
-    async def _on_setup_entry(self, setup) -> bool:
-        """Send an accepted registry setup to the paper broker."""
+    async def _on_setup_entry(self, setup) -> bool | None:
+        """Send an accepted registry setup to the paper broker.
+
+        None means: a same-symbol paper position exists; keep the Setup pending
+        instead of invalidating it. The SetupManager will retry after that
+        position closes.
+        """
+        positions = self.broker.snapshot().get("positions", [])
+        if any((p.get("symbol") if isinstance(p, dict) else getattr(p, "symbol", None))
+               == setup.symbol for p in positions):
+            return None
         target = (setup.tp_levels[0] if setup.tp_levels else setup.target)
         signal = TradeSignal(
             id=setup.setup_id, symbol=setup.symbol, interval=setup.interval,
