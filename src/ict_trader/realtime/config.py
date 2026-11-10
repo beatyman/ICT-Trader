@@ -85,6 +85,16 @@ def _env_list(name: str, default: list[str]) -> list[str]:
     return [part.strip() for part in raw.replace(";", ",").split(",") if part.strip()]
 
 
+def validate_ict_settings(s: "Settings") -> None:
+    if s.ict_setup_enabled and not s.ict_setup_shadow:
+        if s.ict_entry_policy == "legacy":
+            raise RuntimeError(
+                "ICT_SETUP_ENABLED=true requires a non-legacy entry policy"
+            )
+    if s.ict_structure_exits and not s.ict_setup_enabled:
+        raise RuntimeError("ICT_STRUCTURE_EXITS requires ICT_SETUP_ENABLED")
+
+
 @dataclass(slots=True)
 class Settings:
     # ---- runtime ---------------------------------------------------------
@@ -178,12 +188,19 @@ class Settings:
     ai_auto_cooldown_seconds: float = 300.0
     ai_scan_seconds: float = 300.0
     analysis_scan_seconds: float = 300.0
+    ict_setup_enabled: bool = False
+    ict_setup_shadow: bool = True
+    ict_entry_policy: str = "legacy"
+    ict_structure_exits: bool = False
+    setup_engine_ids: str = "ict,ichimoku,wyckoff,chan"
+    setup_primary_engine: str = "ict"
     ai_market_scan: bool = False
     ai_execution_enabled: bool = False
     ai_market_scan_seconds: float = 300.0
     ai_market_scan_max_symbols: int = 10
 
     def __post_init__(self) -> None:
+        validate_ict_settings(self)
         if self.symbol_mode not in {"static", "top10"}:
             raise ValueError("symbol_mode must be 'static' or 'top10'")
         self.top_symbols_count = max(1, min(int(self.top_symbols_count), 20))
@@ -267,6 +284,10 @@ class Settings:
             "risk_pct": self.risk_pct,
             "setup_min_confidence": self.setup_min_confidence,
             "analysis_scan_seconds": self.analysis_scan_seconds,
+            "ict_setup_enabled": self.ict_setup_enabled,
+            "ict_setup_shadow": self.ict_setup_shadow,
+            "ict_entry_policy": self.ict_entry_policy,
+            "ict_structure_exits": self.ict_structure_exits,
             "ai_market_scan": self.ai_market_scan,
             "ai_execution_enabled": self.ai_execution_enabled,
             "ai_market_scan_seconds": self.ai_market_scan_seconds,
@@ -365,6 +386,12 @@ class Settings:
             ai_auto_cooldown_seconds=_env_float("AI_AUTO_COOLDOWN_SECONDS", 300.0),
             ai_scan_seconds=_env_float("AI_SCAN_SECONDS", 300.0),
             analysis_scan_seconds=_env_float("ANALYSIS_SCAN_SECONDS", 300.0),
+            ict_setup_enabled=_env_bool("ICT_SETUP_ENABLED", False),
+            ict_setup_shadow=_env_bool("ICT_SETUP_SHADOW", True),
+            ict_entry_policy=_env_str("ICT_ENTRY_POLICY", "legacy").lower(),
+            ict_structure_exits=_env_bool("ICT_STRUCTURE_EXITS", False),
+            setup_engine_ids=_env_str("SETUP_ENGINE_IDS", "ict,ichimoku,wyckoff,chan"),
+            setup_primary_engine=_env_str("SETUP_PRIMARY_ENGINE", "ict").lower(),
             ai_market_scan=_env_bool("AI_MARKET_SCAN", False),
             ai_execution_enabled=_env_bool("AI_EXECUTION_ENABLED", False),
             ai_market_scan_seconds=_env_float("AI_MARKET_SCAN_SECONDS", 300.0),

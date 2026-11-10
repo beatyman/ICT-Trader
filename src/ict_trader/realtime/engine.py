@@ -269,6 +269,7 @@ class RealtimeEngine:
             self.ch.insert_setup, self.ch.insert_tp_sl_event,
             on_created=self._on_setup_created,
             on_entry=self._on_setup_entry,
+            settings=settings,
         )
         self.runner.on_signal = self._on_signal
         self.broker.on_trade = self._on_trade

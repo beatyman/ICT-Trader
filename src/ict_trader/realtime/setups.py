@@ -67,6 +67,8 @@ class Setup:
     structural_invalidation_price: float | None = None
     structural_invalidation_status: str = ""
     structure_bias: str = "neutral"
+    shadow: bool = False
+    execution_mode: str = ""
 
     @property
     def entry(self) -> float:
@@ -146,6 +148,8 @@ class Setup:
             "structural_invalidation_price": self.structural_invalidation_price,
             "structural_invalidation_status": self.structural_invalidation_status,
             "structure_bias": self.structure_bias,
+            "shadow": self.shadow,
+            "execution_mode": self.execution_mode,
         }
 
     def setup_row(self, ingested_at: datetime) -> tuple:
@@ -183,11 +187,13 @@ class SetupManager:
                  persist_event: Callable[[tuple], Awaitable[None]],
                  *, max_bars: int = 40,
                  on_created: Callable[["Setup"], Awaitable[None]] | None = None,
-                 on_entry: Callable[["Setup"], Awaitable[bool]] | None = None) -> None:
+                 on_entry: Callable[["Setup"], Awaitable[bool]] | None = None,
+                 settings: Any | None = None) -> None:
         self.persist_setup = persist_setup
         self.persist_event = persist_event
         self.on_created = on_created
         self.on_entry = on_entry
+        self.settings = settings
         self.max_bars = max(4, int(max_bars))
         self._setups: dict[str, Setup] = {}
         self.events: list[dict[str, Any]] = []
@@ -271,8 +277,19 @@ class SetupManager:
                 continue
             setup.last_price = float(price)
             if setup.status == "DETECTED":
+                if setup.shadow:
+                    continue
                 if self._hits_entry(setup, float(low if low is not None else price),
                                     float(high if high is not None else price)):
+                    if self.settings is not None and self.settings.ict_setup_shadow:
+                        setup.shadow = True
+                        setup.execution_mode = "shadow"
+                        setup.updated_at = now
+                        await self._transition(
+                            setup, "SHADOW_ENTRY", setup.entry, now,
+                            "shadow mode: broker blocked",
+                        )
+                        continue
                     setup.fill_price = (setup.entry_high if setup.direction == "short"
                                         else setup.entry_low)
                     setup.status = "OPEN"
