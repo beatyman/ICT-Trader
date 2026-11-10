@@ -11,6 +11,10 @@ from typing import Any
 
 import pandas as pd
 
+from ...concepts import ICTConfig, build_zigzag, detect_liquidity, find_pivots
+from ...enhancements import detect_session_levels
+from ...sweeps import detect_key_levels, detect_sweeps
+
 
 @dataclass(slots=True)
 class SweepEvent:
@@ -23,6 +27,7 @@ class SweepEvent:
     expires_at: int
     bar_index: int
     active: bool
+    source_name: str = ""
 
     def to_public(self) -> dict[str, Any]:
         return {
@@ -36,49 +41,41 @@ class SweepEvent:
 
 def build_sweep_events(frame: pd.DataFrame, *, ttl_bars: int = 8,
                        left: int = 2, right: int = 2) -> list[SweepEvent]:
+    """Return the same sweep events used by the ICT strategy engine.
+
+    The canonical detector is ``ict_trader.sweeps.detect_sweeps`` over
+    ``detect_key_levels``.  The realtime overlay must not maintain a second
+    swing-only sweep algorithm.
+    """
     if frame is None or len(frame) < 12:
         return []
-    df = frame.reset_index(drop=True)
-    highs = df["high"].astype(float).to_numpy()
-    lows = df["low"].astype(float).to_numpy()
-    closes = df["close"].astype(float).to_numpy()
+    df = frame.reset_index(drop=True).copy()
+    if "date" not in df.columns:
+        return []
+    pivots = find_pivots(df, 5, 1)
+    swings = build_zigzag(pivots)
+    sessions = detect_session_levels(df)
+    liq = detect_liquidity(df, pivots, ICTConfig())
+    levels = detect_key_levels(df, swings, sessions, liq)
+    raw = detect_sweeps(df, levels, reclaim_window=3)
     times = [int(pd.Timestamp(x).timestamp() * 1000) for x in df["date"]]
-    n = len(df)
-    step = max(1, times[-1] - times[-2]) if n > 1 else 900_000
-    atr = sum(float(highs[i] - lows[i]) for i in range(max(0, n - 14), n))
-    atr = max(atr / max(1, min(14, n)), 1e-9)
-    piv_h: dict[int, float] = {}
-    piv_l: dict[int, float] = {}
-    for i in range(left, n - right):
-        if highs[i] >= max(highs[i - left:i]) and highs[i] >= max(highs[i + 1:i + right + 1]):
-            piv_h[i] = float(highs[i])
-        if lows[i] <= min(lows[i - left:i]) and lows[i] <= min(lows[i + 1:i + right + 1]):
-            piv_l[i] = float(lows[i])
-    out: list[SweepEvent] = []
-    last_h: float | None = None
-    last_l: float | None = None
-    used_h: set[float] = set()
-    used_l: set[float] = set()
-    for i in range(left + 1, n):
-        if last_h is not None and i > left and highs[i] > last_h and closes[i] < last_h:
-            if last_h not in used_h:
-                used_h.add(last_h)
-                out.append(SweepEvent("BSL", "bearish", times[i], last_h,
-                                      float(closes[i]), abs(float(closes[i]) - last_h) / atr,
-                                      times[i] + ttl_bars * step, i, False))
-            last_h = None
-        if last_l is not None and i > left and lows[i] < last_l and closes[i] > last_l:
-            if last_l not in used_l:
-                used_l.add(last_l)
-                out.append(SweepEvent("SSL", "bullish", times[i], last_l,
-                                      float(closes[i]), abs(float(closes[i]) - last_l) / atr,
-                                      times[i] + ttl_bars * step, i, False))
-            last_l = None
-        if i in piv_h:
-            last_h = piv_h[i]
-        if i in piv_l:
-            last_l = piv_l[i]
+    step = max(1, times[-1] - times[-2]) if len(times) > 1 else 900_000
     now = times[-1]
-    for ev in out:
+    # ICT analyze(mode="present") exposes the last 500 bars only.
+    cutoff = max(0, len(df) - 500)
+    out: list[SweepEvent] = []
+    for s in raw:
+        if int(s.reclaim_bar) < cutoff:
+            continue
+        i = max(0, min(int(s.sweep_bar), len(times) - 1))
+        t = times[i]
+        ev = SweepEvent(
+            "SSL" if s.direction == "bull" else "BSL",
+            "bullish" if s.direction == "bull" else "bearish",
+            t, float(s.level), float(s.reclaim_close),
+            float(s.penetration_atr), t + max(1, int(ttl_bars)) * step,
+            int(s.reclaim_bar), False, str(s.name),
+        )
         ev.active = now <= ev.expires_at
+        out.append(ev)
     return out

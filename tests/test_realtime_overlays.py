@@ -82,3 +82,15 @@ def test_sweep_events_have_type_and_expiry():
     assert bsl[-1].reclaim_strength > 0
     # The event is older than its TTL by the end of this frame.
     assert bsl[-1].active is False
+
+
+def test_sweep_events_match_canonical_engine():
+    from ict_trader.concepts import ICTConfig, analyze
+    from ict_trader.realtime.analysis.sweeps import build_sweep_events
+    df = frame()
+    result = analyze(df, ICTConfig())
+    events = build_sweep_events(df)
+    canonical = {(s.name, s.reclaim_bar, s.level, s.direction) for s in result.sweeps}
+    adapted = {(e.source_name, e.bar_index, e.level,
+                "bull" if e.direction == "bullish" else "bear") for e in events}
+    assert adapted == canonical
