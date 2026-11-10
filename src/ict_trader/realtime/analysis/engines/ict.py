@@ -18,7 +18,10 @@ from ....setup import SetupConfig, build_setup
 from ...overlays import build_ict_overlays
 from ...models import dt_to_ms
 from ..contracts import AnalysisContext, EngineSignal, PriceZone
-from ..evidence import breaker_evidence, extract_sweep, structure_evidence
+from ..evidence import (
+    breaker_evidence, extract_sweep, htf_bias_evidence,
+    pd_array_evidence, rvol_evidence, structure_evidence,
+)
 
 ENGINE_VERSION = "ict_trader-0.1.0"
 
@@ -108,6 +111,18 @@ class ICTEngine:
             )
             structure = structure_evidence(result.events, idx, times)
             breakers = breaker_evidence(result.pd_arrays, idx)
+            pd_arrays = pd_array_evidence(result, idx)
+            htf = htf_bias_evidence(frame, idx)
+            rvol = rvol_evidence(frame, idx)
+            data_gaps = []
+            if sweep is None:
+                data_gaps.append("sweep")
+            if structure is None:
+                data_gaps.append("structure")
+            if htf is None or any(v is None for v in htf.values()):
+                data_gaps.append("htf_bias")
+            if rvol is None:
+                data_gaps.append("rvol")
             evidence = {
                 "entry": entry,
                 "stop": stop,
@@ -123,6 +138,13 @@ class ICTEngine:
                 "sweep": sweep,
                 "structure": structure,
                 "breaker": breakers,
+                "fvg": pd_arrays["fvg"],
+                "ifvg": pd_arrays["ifvg"],
+                "ob": pd_arrays["ob"],
+                "pd_array": pd_arrays["pd_array"],
+                "htf_bias": htf,
+                "rvol": rvol,
+                "data_gaps": sorted(set(data_gaps)),
             }
             symbol = (context.symbol if context else frame.attrs.get("symbol", ""))
             interval = (context.interval if context else frame.attrs.get("interval", "15m"))

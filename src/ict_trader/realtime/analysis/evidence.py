@@ -62,3 +62,71 @@ def breaker_evidence(pd_arrays: list[Any], end_idx: int,
             "bottom": float(a.bottom),
         })
     return out[-limit:]
+
+
+def _box(b, kind: str, inverted: bool = False) -> dict:
+    return {
+        "kind": kind,
+        "direction": "bullish" if getattr(b, "direction", "") == "bull" else "bearish",
+        "top": float(b.top),
+        "bottom": float(b.bottom),
+        "created": int(getattr(b, "created", 0)),
+        "confirmed_at": int(getattr(b, "confirmed_at", getattr(b, "created", 0))),
+        "inverted": bool(inverted),
+    }
+
+
+def pd_array_evidence(result: Any, end_idx: int, *, limit: int = 5) -> dict:
+    fvgs = [f for f in getattr(result, "fvgs", [])
+            if int(getattr(f, "created", 0)) <= end_idx]
+    obs = [o for o in getattr(result, "order_blocks", [])
+           if int(getattr(o, "created", 0)) <= end_idx]
+    arrays = [a for a in getattr(result, "pd_arrays", [])
+              if int(getattr(a, "confirmed_at", 0)) <= end_idx]
+    return {
+        "fvg": [_box(f, "fvg", bool(getattr(f, "inverted", False)))
+                for f in fvgs[-limit:]],
+        "ifvg": [_box(f, "ifvg", True) for f in fvgs
+                 if bool(getattr(f, "inverted", False))][-limit:],
+        "ob": [_box(o, "ob") for o in obs[-limit:]],
+        "pd_array": [{
+            "kind": str(getattr(a, "kind", "")),
+            "direction": "bullish" if getattr(a, "direction", "") == "bull" else "bearish",
+            "top": float(a.top), "bottom": float(a.bottom),
+        } for a in arrays[-limit:]],
+    }
+
+
+def rvol_evidence(frame: Any, end_idx: int, *, window: int = 20) -> float | None:
+    if "volume" not in frame or end_idx < 1:
+        return None
+    vol = frame["volume"].astype(float).to_numpy()
+    lo = max(0, end_idx - window)
+    base = float(vol[lo:end_idx].mean()) if end_idx > lo else 0.0
+    if base <= 0:
+        return None
+    return float(vol[end_idx] / base)
+
+
+def htf_bias_evidence(frame: Any, end_idx: int) -> dict | None:
+    import pandas as pd
+    from .structure import structure_bias
+
+    sub = frame.iloc[:end_idx + 1].copy()
+    if len(sub) < 20:
+        return None
+    sub["date"] = pd.to_datetime(sub["date"], utc=True)
+    sub = sub.set_index("date")
+    out = {}
+    for rule in ("4h", "1D"):
+        x = sub.resample(rule).agg({
+            "open": "first", "high": "max", "low": "min",
+            "close": "last", "volume": "sum",
+        }).dropna().reset_index()
+        if len(x) < 20:
+            out[rule] = None
+            continue
+        b = structure_bias(x)
+        out[rule] = {"bias": b["bias"], "event": b["event"],
+                     "event_time": b["event_time"]}
+    return out
