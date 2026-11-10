@@ -162,7 +162,7 @@ class ICTEngine:
                 engine_version=self.version,
                 evidence=evidence,
             ))
-        if self.rule_mode:
+        if self.rule_mode and actionable_only:
             from ..candidate_adapter import to_engine_signal
             from ..candidate_builder import build_candidates
             source_ms = int(pd.Timestamp(frame["date"].iloc[-1]).timestamp() * 1000)
