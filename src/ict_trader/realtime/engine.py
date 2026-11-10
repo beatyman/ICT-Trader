@@ -258,7 +258,7 @@ class RealtimeEngine:
         self.registry.register(WyckoffEngine(WyckoffConfig()))
         self.registry.register(ChanEngine(ChanConfig(freq=settings.strategy_interval)))
         self.registry.register(ICTEngine(
-            setup_config=SetupConfig(rr=settings.rr),
+            setup_config=SetupConfig(rr=settings.rr, allow_short=True),
             ict_config=ICTConfig(),
         ))
         self.registry_signals: deque[EngineSignal] = deque(maxlen=200)
