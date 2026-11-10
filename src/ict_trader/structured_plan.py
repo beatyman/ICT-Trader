@@ -308,6 +308,17 @@ def _build_ict(inp: dict, df_15m, df_daily, market: str) -> None:
         ict["grade"] = {"grade": g.get("grade"), "hits": g.get("hits", 0),
                         "enabled": g.get("enabled", 0)}
 
+        # 结构硬门：sweep 后必须剧烈反应(CISD/位移) + 直接反转(MSS)，否则不开仓
+        gs_criteria = {}
+        if isinstance(aud, dict):
+            gs = aud.get("good_setup") or {}
+            for c in gs.get("criteria", []):
+                gs_criteria[c.get("id")] = c.get("status")
+        ict["structure_gate"] = {
+            "cisd": gs_criteria.get("GS-04") == "PASS",   # 位移/CISD
+            "mss": gs_criteria.get("GS-05") == "PASS",    # 直接反转/MSS
+        }
+
         sc = md["structure_context"]
         kinds = [getattr(e, "kind", "") for e in evts]
         sc["bos_count"] = kinds.count("BOS")
@@ -443,6 +454,7 @@ def build_input_from_data(df_15m, df_4h, df_daily, symbol: str, market: str = "c
             "po3_phase": None,
             "po3_range": {"high": None, "low": None},
             "grade": {"grade": None, "hits": 0, "enabled": 0},
+            "structure_gate": {"cisd": False, "mss": False},  # 默认保守：未确认 PASS 就不开仓
         },
         "wyckoff": {"phase": None, "events": [], "volume_note": None,
                     "range": {"low": None, "high": None}},
@@ -794,6 +806,14 @@ def structured_plan(inp: dict) -> dict:
     if sweep is None and not has_ob and not has_fvg:
         no_trade.append("15m has no sweep / OB / FVG entry confirmation")
 
+    # 结构硬门（流动性清扫精髓）：sweep 后必须剧烈反应(CISD/位移) + 直接反转(MSS)
+    sg = _get(inp, "ict_trader_15m", "structure_gate") or {}
+    structure_blocked = (sg.get("cisd") is False) or (sg.get("mss") is False)
+    if sg.get("cisd") is False:
+        no_trade.append("no displacement/CISD after sweep (GS-04) — sweep without violent reaction")
+    if sg.get("mss") is False:
+        no_trade.append("no MSS/direct reversal after sweep (GS-05) — sweep not confirmed")
+
     # 多方案
     if bias in ("bullish", "neutral") and price is not None:
         long_setups.append(_build_setup(inp, "long", bias, "A", 1, confluence))
@@ -806,6 +826,13 @@ def structured_plan(inp: dict) -> dict:
 
     long_setups = [s for s in long_setups if s is not None]
     short_setups = [s for s in short_setups if s is not None]
+
+    # 结构硬门失败 → 所有 setup 降级为 conditional（不可开仓，仅供观察）
+    if structure_blocked:
+        for s in long_setups + short_setups:
+            if s.get("status") == "valid":
+                s["status"] = "conditional"
+                s["risk_note"] = "structure gate failed (no CISD/MSS), conditional only"
 
     # 风险门：每个 setup 过一遍风控（止损/盈亏比/单笔亏损/当日亏损/次数）
     try:
