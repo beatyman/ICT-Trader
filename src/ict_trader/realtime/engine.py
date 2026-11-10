@@ -18,7 +18,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .analysis import AnalysisContext, CircuitBreaker, EngineRegistry, EngineSignal
-from .analysis.engines import ChanConfig, ChanEngine, IchimokuConfig, IchimokuEngine, WyckoffConfig, WyckoffEngine
+from .analysis.engines import (
+    ChanConfig, ChanEngine, ICTEngine, IchimokuConfig, IchimokuEngine,
+    WyckoffConfig, WyckoffEngine,
+)
+from ..concepts import ICTConfig
+from ..setup import SetupConfig
 from .ai import DeepSeekReviewer
 from .broker import PaperBroker
 from .config import Settings
@@ -252,6 +257,10 @@ class RealtimeEngine:
         self.registry.register(IchimokuEngine(IchimokuConfig()))
         self.registry.register(WyckoffEngine(WyckoffConfig()))
         self.registry.register(ChanEngine(ChanConfig(freq=settings.strategy_interval)))
+        self.registry.register(ICTEngine(
+            setup_config=SetupConfig(rr=settings.rr),
+            ict_config=ICTConfig(),
+        ))
         self.registry_signals: deque[EngineSignal] = deque(maxlen=200)
         self.auxiliary: dict[str, dict[str, Any]] = {}
         self.registry_runs: deque[dict[str, Any]] = deque(maxlen=100)
@@ -847,7 +856,8 @@ class RealtimeEngine:
         context = AnalysisContext(bar.symbol, bar.interval, utc_ms())
         runs = await self.registry.analyze_all(
             frame, context, timeout_seconds=8.0,
-            engine_ids=["ichimoku", "wyckoff", "chan"],
+            engine_ids=[x.strip() for x in self.settings.setup_engine_ids.split(",")
+                        if x.strip()],
         )
         from .analysis.auxiliary import build_auxiliary_context
         from .analysis.structure import structure_bias

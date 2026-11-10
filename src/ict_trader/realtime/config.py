@@ -288,6 +288,8 @@ class Settings:
             "ict_setup_shadow": self.ict_setup_shadow,
             "ict_entry_policy": self.ict_entry_policy,
             "ict_structure_exits": self.ict_structure_exits,
+            "setup_engine_ids": self.setup_engine_ids,
+            "setup_primary_engine": self.setup_primary_engine,
             "ai_market_scan": self.ai_market_scan,
             "ai_execution_enabled": self.ai_execution_enabled,
             "ai_market_scan_seconds": self.ai_market_scan_seconds,

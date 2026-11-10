@@ -209,7 +209,9 @@ class SetupManager:
                         min_rr: float = 0.0,
                         min_confidence: float = 0.0,
                         structure_bias: str | None = None) -> Setup | None:
-        if signal.engine == "ict":
+        if signal.engine == "ict" and not (
+            self.settings and self.settings.ict_setup_enabled
+        ):
             return None
         if signal.confidence < min_confidence:
             return None
