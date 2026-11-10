@@ -262,9 +262,9 @@ class RealtimeEngine:
                 rr=settings.rr,
                 allow_short=True,
                 stack="1d_4h_15m",
-                rule_mode=settings.ict_setup_enabled,
             ),
             ict_config=ICTConfig(),
+            rule_mode=settings.ict_setup_enabled,
         ))
         self.registry_signals: deque[EngineSignal] = deque(maxlen=200)
         self.auxiliary: dict[str, dict[str, Any]] = {}
