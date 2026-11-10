@@ -440,7 +440,13 @@ class RealtimeEngine:
         async def one(symbol: str, interval: str) -> None:
             async with sem:
                 try:
-                    await self._bootstrap_stream(symbol, interval)
+                    # Strategy interval must be complete. Fast context frames
+                    # must not hold startup hostage to a slow REST fallback;
+                    # they will be filled by live streams and marked as gaps.
+                    timeout = 180.0 if interval == self.settings.strategy_interval else 20.0
+                    await asyncio.wait_for(
+                        self._bootstrap_stream(symbol, interval), timeout=timeout,
+                    )
                 except Exception as exc:
                     self.metrics.event(
                         "ERROR", "bootstrap", f"{symbol} {interval} bootstrap failed",
