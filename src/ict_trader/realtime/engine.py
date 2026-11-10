@@ -439,6 +439,7 @@ class RealtimeEngine:
 
         async def one(symbol: str, interval: str) -> None:
             async with sem:
+                started = time.perf_counter()
                 try:
                     # Strategy interval must be complete. Fast context frames
                     # must not hold startup hostage to a slow REST fallback;
@@ -455,8 +456,21 @@ class RealtimeEngine:
                     log.exception("bootstrap failed for %s %s", symbol, interval)
                 finally:
                     self.boot_done += 1
+                    self.metrics.event(
+                        "INFO", "bootstrap",
+                        f"{symbol} {interval} done in {time.perf_counter()-started:.1f}s",
+                    )
 
-        await asyncio.gather(*(one(s, i) for s, i in self.settings.streams))
+        strategy = [x for x in self.settings.streams
+                    if x[1] == self.settings.strategy_interval]
+        context = [x for x in self.settings.streams
+                   if x[1] != self.settings.strategy_interval]
+        # Load the bars that actually drive signals first.  Context streams
+        # (1h/4h/1d) cannot be allowed to starve the 15m strategy bootstrap.
+        if strategy:
+            await asyncio.gather(*(one(s, i) for s, i in strategy))
+        if context:
+            await asyncio.gather(*(one(s, i) for s, i in context))
 
     async def _bootstrap_stream(self, symbol: str, interval: str) -> None:
         limit = self.settings.bootstrap_limit(interval)
