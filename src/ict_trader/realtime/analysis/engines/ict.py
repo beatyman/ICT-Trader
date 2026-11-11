@@ -14,13 +14,16 @@ import numpy as np
 import pandas as pd
 
 from ....concepts import ICTConfig, analyze
+from ....context import dealing_range as ctx_dealing_range
 from ....setup import SetupConfig, build_setup
 from ...overlays import build_ict_overlays
 from ...models import dt_to_ms
 from ..contracts import AnalysisContext, EngineSignal, PriceZone
+from ..dealing_range import DealingRange as AnalysisDealingRange
 from ..evidence import (
     breaker_evidence, extract_sweep, htf_bias_evidence,
-    pd_array_evidence, rvol_evidence, structure_evidence,
+    hidden_ob_evidence, ifvg_evidence, pd_array_evidence,
+    rvol_evidence, structure_evidence,
 )
 
 ENGINE_VERSION = "ict_trader-0.1.0"
@@ -81,6 +84,11 @@ class ICTEngine:
         close = frame["close"].to_numpy(float)
         symbol = (context.symbol if context else frame.attrs.get("symbol", ""))
         interval = (context.interval if context else frame.attrs.get("interval", "15m"))
+        # corpus context, computed once per scan rather than per setup
+        dr_ctx = ctx_dealing_range(result.swings, n - 1)
+        dr_analysis = (AnalysisDealingRange(float(dr_ctx.high), float(dr_ctx.low))
+                       if dr_ctx is not None else None)
+        hidden_obs = hidden_ob_evidence(frame, n - 1)
         out: list[EngineSignal] = []
         for c in setups:
             idx = int(c.end)
@@ -143,6 +151,13 @@ class ICTEngine:
                 "breaker": breakers,
                 "fvg": pd_arrays["fvg"],
                 "ifvg": pd_arrays["ifvg"],
+                "ifvg_context": ifvg_evidence(pd_arrays["ifvg"], dr_analysis),
+                "hidden_ob": hidden_obs,
+                "dealing_range": (
+                    {"high": float(dr_analysis.high), "low": float(dr_analysis.low),
+                     "ce": float(dr_analysis.ce), "zone": dr_analysis.zone(entry)}
+                    if dr_analysis is not None else None
+                ),
                 "ob": pd_arrays["ob"],
                 "pd_array": pd_arrays["pd_array"],
                 "htf_bias": htf,

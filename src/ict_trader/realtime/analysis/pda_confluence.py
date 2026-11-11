@@ -43,3 +43,36 @@ def body_close_invalidated(fvg: dict, last_bar: dict) -> str | None:
     if fvg["direction"] == "bearish" and close > float(fvg["top"]):
         return "INVERTED"
     return None
+
+
+def valid_ifvg_context(ifvg_direction: str, pd_zone: str,
+                       failed_mss: bool = False) -> tuple[bool, tuple[str, ...]]:
+    """Doc 502: an IFVG is only reliable in three contexts.
+
+    L118: "is the IFVG forming in the premium zone, discount zone, or after a
+    failed MSS? These are the three reliable conditions. Outside them, the IFVG
+    is a coin flip."  A *bullish* IFVG (a violated bearish FVG) belongs in
+    premium; a *bearish* IFVG belongs in discount.
+    """
+    reasons: list[str] = []
+    if ifvg_direction == "bullish":
+        if pd_zone not in ("premium", "deep_premium") and not failed_mss:
+            reasons.append("bullish_ifvg_outside_premium")
+    elif ifvg_direction == "bearish":
+        if pd_zone not in ("discount", "deep_discount") and not failed_mss:
+            reasons.append("bearish_ifvg_outside_discount")
+    else:
+        reasons.append("invalid_direction")
+    return (not reasons, tuple(reasons))
+
+
+def ifvg_ce(zone: dict) -> float:
+    """Doc 502 L119: "the consequent encroachment (50% level) is the precise entry"."""
+    return (float(zone["top"]) + float(zone["bottom"])) / 2.0
+
+
+def ifvg_stop(direction: str, zone: dict, buffer: float = 0.0) -> float:
+    """Doc 502 L121: stop beyond the IFVG extreme, never inside the zone."""
+    if direction == "bullish":
+        return float(zone["bottom"]) - abs(float(buffer))
+    return float(zone["top"]) + abs(float(buffer))

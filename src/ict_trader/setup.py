@@ -94,6 +94,7 @@ class SetupConfig:
     t1_at_r: float = 0.0             # partial scale-out level (0 = off)
     t1_fraction: float = 0.5
     t1_move_be: bool = True
+    t1_at_eq: bool = False           # doc 631: first leg at the dealing-range EQ
     session_gate: str = "none"  # none | auto | london | ny_am | ny_pm | cn | hk
     pd_gate: bool = False
     pd_buy_max: float = 0.5
@@ -688,6 +689,12 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             })
             if pd_pos is not None:
                 quality_parts["pd"] = float(pd_pos)
+            if dr is not None:
+                # doc 631 L76: the equilibrium is the partial-exit level, so the
+                # exact price must travel with the setup to the strategy layer.
+                quality_parts["dr_eq"] = float(dr.eq)
+                quality_parts["dr_high"] = float(dr.high)
+                quality_parts["dr_low"] = float(dr.low)
             if ote_pos is not None:
                 quality_parts["ote"] = float(ote_pos)
             if array_hits:
@@ -800,7 +807,7 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
                         t_plus_1=cfg.t_plus_1, sell_tax_bps=cfg.sell_tax_bps,
                         commission_bps=cfg.commission_bps, slippage_bps=cfg.slippage_bps,
                         t1_at_r=cfg.t1_at_r, t1_fraction=cfg.t1_fraction,
-                        t1_move_be=cfg.t1_move_be,
+                        t1_move_be=cfg.t1_move_be, t1_at_eq=cfg.t1_at_eq,
                         max_concurrent=cfg.max_concurrent,
                         min_rr=cfg.min_target_rr,
                         entry_mode=cfg.entry_mode,

@@ -114,6 +114,7 @@ def _setup_config(args) -> SetupConfig:
         t1_at_r=getattr(args, "t1_at_r", 0.0),
         t1_fraction=getattr(args, "t1_fraction", 0.5),
         t1_move_be=not getattr(args, "t1_no_be", False),
+        t1_at_eq=getattr(args, "t1_at_eq", False),
         stack=args.stack,
     )
 
@@ -369,6 +370,8 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="fraction of the position taken off at --t1-at-r")
     p.add_argument("--t1-no-be", action="store_true",
                    help="keep the runner's original stop instead of moving it to break-even")
+    p.add_argument("--t1-at-eq", action="store_true",
+                   help="take the first leg at the dealing-range EQ (doc 631) instead of --t1-at-r")
     p.add_argument("--min-net-rr", type=float, default=2.0)
     p.add_argument("--strict-audit", action="store_true",
                    help="require killzone + DOL + sweep + net RR for a TRADE")
@@ -412,7 +415,7 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
     p.add_argument("--quality-profile", choices=["standard", "high_value", "high_rr", "btc_15m"],
                    default="standard",
                    help="opt-in stricter profile (btc_15m = sweep>=3 + stop>2ATR + "
-                        "grade>=4 + 2.5R; holdout win 60% on n=20)")
+                        "grade>=4 + 2.5R; holdout win 60%% on n=20)")
     p.add_argument("--min-sweep-strength", type=float, default=0.0,
                    help="reject signals whose best recent sweep is weaker than this")
     p.add_argument("--min-stop-atr", type=float, default=0.0,

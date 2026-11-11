@@ -27,6 +27,10 @@ class SweepEvent:
     expires_at: int
     bar_index: int
     active: bool
+    # doc 69 L178/L181: the stop belongs beyond the sweep's EXTREME (the wick that
+    # took the stops), not at the swept level - "a retest of that wick can take a
+    # stop placed there before the reversal gets going".
+    sweep_price: float = 0.0
     source_name: str = ""
 
     def to_public(self) -> dict[str, Any]:
@@ -35,7 +39,7 @@ class SweepEvent:
             "time": self.time, "level": self.level, "close": self.close,
             "reclaim_strength": round(self.reclaim_strength, 4),
             "expires_at": self.expires_at, "bar_index": self.bar_index,
-            "active": self.active,
+            "active": self.active, "sweep_price": round(self.sweep_price, 8),
         }
 
 
@@ -74,7 +78,7 @@ def build_sweep_events(frame: pd.DataFrame, *, ttl_bars: int = 8,
             "bullish" if s.direction == "bull" else "bearish",
             t, float(s.level), float(s.reclaim_close),
             float(s.penetration_atr), t + max(1, int(ttl_bars)) * step,
-            int(s.reclaim_bar), False, str(s.name),
+            int(s.reclaim_bar), False, float(s.sweep_price), str(s.name),
         )
         ev.active = now <= ev.expires_at
         out.append(ev)

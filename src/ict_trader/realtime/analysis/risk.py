@@ -16,12 +16,43 @@ class RiskPlan:
 
 
 def structural_stop(direction: str, entry: float, atr: float,
-                    sweep: dict | None, structure: dict | None) -> float:
-    buffer = max(0.25 * atr, 0.0)
-    level = float((sweep or {}).get("level") or (structure or {}).get("price") or entry)
+                    sweep: dict | None, structure: dict | None,
+                    ob: dict | None = None, *, pad_atr: float = 0.25,
+                    min_stop_atr: float = 1.0) -> float:
+    """Structural stop beyond the *outermost* invalidation reference.
+
+    Corpus anchors, all of which must sit beyond the level itself:
+      * doc 69 L181 - "The stop belongs beyond the sweep's extreme, not at the
+        swept level ... a retest of that wick can take a stop placed there"
+      * doc 556 L116 - "stop loss 10-20 pips beyond the OB extreme"
+      * doc 491 L158 - "beyond the FVG far edge or beyond the MSS swing extreme"
+
+    The sweep anchor therefore uses ``extreme`` (the wick that took the stops)
+    and only falls back to ``level`` for legacy payloads.  ``min_stop_atr`` keeps
+    the repo's existing floor (a 1 ATR minimum) explicit instead of hardcoded.
+    """
+    buffer = max(pad_atr * atr, 0.0)
+    refs: list[float] = []
+    if sweep:
+        level = sweep.get("level")
+        extreme = sweep.get("extreme", sweep.get("sweep_price"))
+        if level is not None:
+            refs.append(float(level))
+        if extreme is not None:
+            refs.append(float(extreme))
+    if ob:
+        for key in ("bottom", "top"):
+            if ob.get(key) is not None:
+                refs.append(float(ob[key]))
+    if structure and structure.get("price") is not None:
+        refs.append(float(structure["price"]))
+    if not refs:
+        refs = [float(entry)]
     if direction == "long":
-        return min(level - buffer, entry - 1.0 * atr)
-    return max(level + buffer, entry + 1.0 * atr)
+        anchor = min(refs)
+        return min(anchor - buffer, entry - max(min_stop_atr, 0.0) * atr)
+    anchor = max(refs)
+    return max(anchor + buffer, entry + max(min_stop_atr, 0.0) * atr)
 
 
 def build_risk_plan(direction: str, entry: float, atr: float,

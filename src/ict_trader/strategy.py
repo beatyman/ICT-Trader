@@ -105,6 +105,10 @@ class StrategyConfig:
     t1_at_r: float = 0.0
     t1_fraction: float = 0.5
     t1_move_be: bool = True
+    # Doc 631 L76: "For longs from discount, take 30-50% at equilibrium. For
+    # shorts from premium, same."  When enabled, the first leg is taken at the
+    # setup's dealing-range EQ (`quality_parts["dr_eq"]`) instead of at t1_at_r R.
+    t1_at_eq: bool = False
     max_daily_loss_r: float = 0.0     # stop new entries after this daily R loss (0=off)
 
 
@@ -371,6 +375,15 @@ def simulate_cisd(
         t1_price: float | None = None
         t1_filled = False
         t1_at = (entry + cfg.t1_at_r * risk) if c.direction == "bull" else (entry - cfg.t1_at_r * risk)
+        # doc 631: optional equilibrium-price partial exit
+        t1_eq_armed = False
+        if cfg.t1_at_eq:
+            eq_price = (getattr(c, "quality_parts", None) or {}).get("dr_eq")
+            if eq_price is not None:
+                eq_price = float(eq_price)
+                if (c.direction == "bull" and eq_price > entry) or (
+                        c.direction == "bear" and eq_price < entry):
+                    t1_at, t1_eq_armed = eq_price, True
         atr_entry = float(atr[max(0, entry_idx - 1)]) if len(atr) else 0.0
         if not np.isfinite(atr_entry) or atr_entry <= 0:
             atr_entry = risk
@@ -430,7 +443,7 @@ def simulate_cisd(
                     break
                 # partial take-profit on the first leg; the runner keeps the
                 # original target and (optionally) a break-even stop.
-                if cfg.t1_at_r > 0 and not t1_filled:
+                if (cfg.t1_at_r > 0 or t1_eq_armed) and not t1_filled:
                     reached = (high[k] >= t1_at) if c.direction == "bull" else (low[k] <= t1_at)
                     if reached:
                         t1_price, t1_filled = t1_at, True

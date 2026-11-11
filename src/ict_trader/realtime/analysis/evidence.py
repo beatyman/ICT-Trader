@@ -27,6 +27,8 @@ def extract_sweep(sweeps: list[dict], *, direction: str,
         "direction": s["direction"],
         "time": int(s["time"]),
         "level": float(s["level"]),
+        # doc 69 L181: the stop anchors on the sweep extreme, not on `level`.
+        "extreme": float(s.get("sweep_price") or s["level"]),
         "reclaim_atr": float(s.get("reclaim_strength", 0.0)),
         "expires_at": int(s["expires_at"]),
     }
@@ -94,6 +96,55 @@ def pd_array_evidence(result: Any, end_idx: int, *, limit: int = 5) -> dict:
             "direction": "bullish" if getattr(a, "direction", "") == "bull" else "bearish",
             "top": float(a.top), "bottom": float(a.bottom),
         } for a in arrays[-limit:]],
+    }
+
+
+def hidden_ob_evidence(frame: Any, end_idx: int, *, limit: int = 3,
+                       max_scan: int = 400) -> list[dict]:
+    """Hidden order blocks near ``end_idx`` (doc 570).
+
+    Bar indices are relative to the scanned window, so ``bars_ago`` is exposed
+    instead of absolute indices.
+    """
+    from .hidden_ob import detect_hidden_ob
+
+    if frame is None or len(frame) < 3 or end_idx < 1:
+        return []
+    lo = max(0, int(end_idx) - max_scan + 1)
+    sub = frame.iloc[lo:int(end_idx) + 1]
+    if len(sub) < 3:
+        return []
+    zones = detect_hidden_ob(sub)
+    n = len(sub)
+    out = []
+    for z in zones[-limit:]:
+        row = z.to_public()
+        row.pop("first_bar", None)
+        row.pop("second_bar", None)
+        row["bars_ago"] = n - 1 - int(z.second_bar)
+        out.append(row)
+    return out
+
+
+def ifvg_evidence(ifvgs: list[dict], dealing_range: Any = None) -> dict | None:
+    """Annotate the latest IFVG with its doc-502 context and CE entry price."""
+    from .pda_confluence import ifvg_ce, valid_ifvg_context
+
+    if not ifvgs:
+        return None
+    best = ifvgs[-1]
+    ce = ifvg_ce(best)
+    zone = "unknown"
+    if dealing_range is not None:
+        try:
+            zone = dealing_range.zone(ce)
+        except Exception:  # pragma: no cover - zone() is total, kept defensive
+            zone = "unknown"
+    ok, reasons = valid_ifvg_context(str(best.get("direction", "")), zone)
+    return {
+        "direction": best.get("direction"), "top": best.get("top"),
+        "bottom": best.get("bottom"), "ce": ce, "pd_zone": zone,
+        "tradable": bool(ok), "reasons": list(reasons),
     }
 
 

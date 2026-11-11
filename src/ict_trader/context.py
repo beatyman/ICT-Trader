@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 
 Market = Literal["cn", "hk", "crypto", "other"]
-SessionGate = Literal["none", "auto", "asian", "london", "london_close", "ny_am", "ny_pm", "silver_bullet", "cn", "hk"]
+SessionGate = Literal["none", "auto", "asian", "asian_dr", "london", "london_close", "ny_am", "ny_pm",
+                      "silver_bullet", "macro_0950", "venom", "cn", "hk"]
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,16 @@ _SESSION_WINDOWS: dict[str, tuple[str, list[tuple[dtime, dtime]]]] = {
     "london": ("America/New_York", [(dtime(2, 0), dtime(5, 0))]),
     # ICT teaching: Asian range accumulates 19:00-00:00 NY; London close 10:00-12:00 NY.
     "asian": ("America/New_York", [(dtime(19, 0), dtime(23, 59, 59))]),
+    # doc 601 (liquiditysweeps.com): "The Asian range (00:00-02:00 EST) functions as
+    # a micro-dealing range for the London open."  Kept as a separate key because
+    # the legacy "asian" window above uses the 19:00-00:00 NY convention.
+    "asian_dr": ("America/New_York", [(dtime(0, 0), dtime(2, 0))]),
+    # doc 546: "the 09:50 NY-AM macro window ... concentrated inside that 20-minute
+    # window"; doc 491 lists 09:50 as a highest-conviction FVG window.
+    "macro_0950": ("America/New_York", [(dtime(9, 50), dtime(10, 10))]),
+    # doc 69 (ICT Venom model): "a raid of the 08:00-09:30 New York range after the
+    # 09:30 open".  The gate selects the pre-open range that gets raided.
+    "venom": ("America/New_York", [(dtime(8, 0), dtime(9, 30))]),
     "london_close": ("America/New_York", [(dtime(10, 0), dtime(12, 0))]),
     "ny_am": ("America/New_York", [(dtime(7, 0), dtime(10, 0))]),
     "ny_pm": ("America/New_York", [(dtime(13, 30), dtime(16, 0))]),

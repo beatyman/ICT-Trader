@@ -12,6 +12,7 @@ from typing import Any
 
 import pandas as pd
 
+from ...concepts import build_zigzag, find_pivots
 from ..models import dt_to_ms
 
 
@@ -140,12 +141,31 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str,
             bull_run += 1
             bear_run = 0
 
-    # A simple confirmed swing dealing range.
+    # A dealing range from the last confirmed structural swing pair.
+    # Doc 601 L56: the range is defined by "structural swing points - not by
+    # arbitrary time periods or fixed candle counts"; doc 631 L56 says the same.
+    # The 40-bar fallback only runs when the zigzag produced no usable pair.
     if n >= 20:
-        lo = int(min(range(n - 40, n), key=lambda i: low[i]))
-        hi = int(max(range(n - 40, n), key=lambda i: high[i]))
-        add("DEALING_RANGE", "neutral", high[hi], low[lo], ms[min(lo, hi)],
-            anchor=(high[hi] + low[lo]) / 2.0)
+        swings = []
+        try:
+            swings = build_zigzag(find_pivots(df, 5, 1))
+        except Exception:  # pragma: no cover - defensive, keeps the overlay alive
+            swings = []
+        last_t = n - 1
+        hs = [s for s in swings
+              if s.kind == "H" and int(getattr(s, "confirmed_at", s.index)) <= last_t]
+        ls = [s for s in swings
+              if s.kind == "L" and int(getattr(s, "confirmed_at", s.index)) <= last_t]
+        if hs and ls:
+            h, l = hs[-1], ls[-1]
+            add("DEALING_RANGE", "neutral", float(h.price), float(l.price),
+                ms[min(int(h.index), int(l.index))],
+                anchor=(float(h.price) + float(l.price)) / 2.0)
+        else:
+            lo = int(min(range(max(0, n - 40), n), key=lambda i: low[i]))
+            hi = int(max(range(max(0, n - 40), n), key=lambda i: high[i]))
+            add("DEALING_RANGE", "neutral", high[hi], low[lo], ms[min(lo, hi)],
+                anchor=(high[hi] + low[lo]) / 2.0)
 
     active = [a for a in arrays if a.is_active]
     inactive = [a for a in arrays if not a.is_active][-max_inactive:]

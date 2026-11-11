@@ -52,9 +52,33 @@ class DealingRange:
                 self.low + 0.79 * (self.high - self.low))
 
 
-def valid_ob(direction: str, *, engulf: bool, fvg: bool, mss: bool) -> tuple[bool, tuple[str, ...]]:
-    """Four-condition OB validation from doc 556; no numeric thresholds added."""
+def ob_grab(direction: str, c1_high: float, c1_low: float,
+            c2_high: float, c2_low: float) -> bool:
+    """Doc 556 condition 1: the impulse candle grabs the OB candle's extreme.
+
+    Bullish: ``low(c2) < low(c1)``; bearish: ``high(c2) > high(c1)``.
+    Doc 556 L78: "The second candle (bullish) must grab the low of the previous
+    bearish candle - price goes below the low of the bearish OB before reversing."
+    """
+    if direction == "long":
+        return float(c2_low) < float(c1_low)
+    if direction == "short":
+        return float(c2_high) > float(c1_high)
+    return False
+
+
+def valid_ob(direction: str, *, engulf: bool, fvg: bool, mss: bool,
+             grab: bool = True) -> tuple[bool, tuple[str, ...]]:
+    """Four-condition OB validation from doc 556; no numeric thresholds added.
+
+    Doc 556 L76: "To validate a bullish Order Block, four conditions must be true"
+    (grab / engulf / lower-timeframe FVG / market structure shift).  ``grab``
+    defaults to True so an unverified grab fails the check rather than being
+    silently ignored; pass ``grab=True`` only after evaluating :func:`ob_grab`.
+    """
     reasons = []
+    if not grab:
+        reasons.append("no_grab")
     if not engulf:
         reasons.append("no_engulf")
     if not fvg:
@@ -64,3 +88,4 @@ def valid_ob(direction: str, *, engulf: bool, fvg: bool, mss: bool) -> tuple[boo
     if direction not in ("long", "short"):
         reasons.append("invalid_direction")
     return (not reasons, tuple(reasons))
+
