@@ -125,9 +125,14 @@ class EngineSignal:
     created_at: int = 0
     evidence: Mapping[str, Any] = field(default_factory=dict)
     signal_id: str = ""
+    role: str = ""
 
     def __post_init__(self) -> None:
         engine = self.engine.strip().lower()
+        role = (self.role or "").strip().lower()
+        if role not in ("primary", "auxiliary", "observer"):
+            role = "primary" if engine == "ict" else "auxiliary"
+        object.__setattr__(self, "role", role)
         symbol = self.symbol.upper().strip()
         signal_type = self.signal_type.strip().lower()
         version = self.engine_version.strip()

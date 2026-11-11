@@ -212,6 +212,18 @@ class SetupManager:
                         min_rr: float = 0.0,
                         min_confidence: float = 0.0,
                         structure_bias: str | None = None) -> Setup | None:
+        if self.settings and getattr(self.settings, "require_primary_setup", True):
+            if signal.engine != "ict" or getattr(signal, "role", "") != "primary":
+                self.events.append({
+                    "setup_id": "",
+                    "type": "setup_rejected",
+                    "reason": "non_primary_engine",
+                    "engine": signal.engine,
+                    "role": getattr(signal, "role", ""),
+                    "symbol": signal.symbol,
+                    "signal_id": signal.signal_id,
+                })
+                return None
         if signal.engine == "ict" and not (
             self.settings and self.settings.ict_setup_enabled
         ):

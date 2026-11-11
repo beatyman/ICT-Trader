@@ -189,6 +189,7 @@ class Settings:
     ai_scan_seconds: float = 300.0
     analysis_scan_seconds: float = 300.0
     ict_setup_enabled: bool = False
+    require_primary_setup: bool = True
     ict_setup_shadow: bool = True
     ict_entry_policy: str = "legacy"
     ict_structure_exits: bool = False
@@ -389,6 +390,7 @@ class Settings:
             ai_scan_seconds=_env_float("AI_SCAN_SECONDS", 300.0),
             analysis_scan_seconds=_env_float("ANALYSIS_SCAN_SECONDS", 300.0),
             ict_setup_enabled=_env_bool("ICT_SETUP_ENABLED", False),
+            require_primary_setup=_env_bool("REQUIRE_PRIMARY_SETUP", True),
             ict_setup_shadow=_env_bool("ICT_SETUP_SHADOW", True),
             ict_entry_policy=_env_str("ICT_ENTRY_POLICY", "legacy").lower(),
             ict_structure_exits=_env_bool("ICT_STRUCTURE_EXITS", False),
