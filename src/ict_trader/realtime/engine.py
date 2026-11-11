@@ -994,21 +994,22 @@ class RealtimeEngine:
                 )
 
     async def _on_signal(self, signal: TradeSignal) -> None:
-        result = await self.broker.execute(signal, signal.entry, bar_time=signal.bar_time)
-        if result.accepted:
-            self.runner.update_signal(
-                signal.id, status="EXECUTED", executed=True,
-                order_id=result.position_id,
-                reason=f"fill {result.fill:.6g}",
-            )
-        else:
-            self.runner.update_signal(signal.id, status="REJECTED", executed=False, reason=result.reason)
-            self.metrics.inc("signal_rejected")
-        await self._persist_signal(signal)
-        await self.setups.on_ict_signal(
-            signal, accepted=result.accepted,
-            fill=float(getattr(result, "fill", 0.0) or signal.entry),
+        """Legacy runner output is audit-only.
+
+        Execution is owned by SetupManager through the registry path.  Keeping
+        this callback from calling PaperBroker prevents duplicate / untracked
+        positions and, importantly, avoids the removed ``on_ict_signal`` API.
+        """
+        self.runner.update_signal(
+            signal.id, status="LEGACY_IGNORED", executed=False,
+            reason="registry SetupManager owns execution",
         )
+        self.metrics.event(
+            "WARN", "legacy_signal",
+            "legacy ICT runner signal ignored; SetupManager owns execution",
+            symbol=signal.symbol,
+        )
+        await self._persist_signal(signal)
 
     async def _on_trade(self, trade) -> None:
         self.runner.update_signal(trade.signal_id, status="CLOSED")
