@@ -79,6 +79,8 @@ class ICTEngine:
         else:
             setups = setups[-60:]
         close = frame["close"].to_numpy(float)
+        symbol = (context.symbol if context else frame.attrs.get("symbol", ""))
+        interval = (context.interval if context else frame.attrs.get("interval", "15m"))
         out: list[EngineSignal] = []
         for c in setups:
             idx = int(c.end)
@@ -147,8 +149,6 @@ class ICTEngine:
                 "rvol": rvol,
                 "data_gaps": sorted(set(data_gaps)),
             }
-            symbol = (context.symbol if context else frame.attrs.get("symbol", ""))
-            interval = (context.interval if context else frame.attrs.get("interval", "15m"))
             out.append(EngineSignal(
                 engine=self.engine_id,
                 symbol=symbol,

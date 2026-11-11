@@ -89,3 +89,23 @@ def test_ict_engine_ignores_stale_setup_for_actionable(monkeypatch):
     history = engine.scan_history(frame(), ctx)
     assert len(history) == 1
     assert history[0].source_kline_open_time > 0
+
+
+def test_rule_mode_does_not_use_unbound_symbol(monkeypatch):
+    import pandas as pd
+    from ict_trader.realtime.analysis.engines.ict import ICTEngine
+    from ict_trader.realtime.analysis import AnalysisContext
+    from ict_trader.concepts import ICTConfig
+    from ict_trader.setup import SetupConfig
+
+    df = pd.DataFrame({
+        "date": pd.date_range("2026-01-01", periods=140, freq="15min"),
+        "open": 100.0, "high": 100.1, "low": 99.9, "close": 100.0,
+        "volume": 1.0,
+    })
+    engine = ICTEngine(
+        setup_config=SetupConfig(rr=2.0, stack="4h_15m"),
+        ict_config=ICTConfig(), rule_mode=True,
+    )
+    out = engine.analyze(df, AnalysisContext("ZECUSDT", "15m", 1_700_000_000_000))
+    assert out == []
