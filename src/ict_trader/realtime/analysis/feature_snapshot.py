@@ -11,6 +11,7 @@ from typing import Any
 
 import pandas as pd
 
+from .pda_confluence import annotate_confluence
 from .structure import structure_bias
 
 
@@ -116,17 +117,18 @@ def build_feature_snapshot(symbol: str, frame: pd.DataFrame, result: Any,
             atr=_atr(x),
         )
 
-    fvg = tuple({
+    raw_fvg = [{
         "direction": "bullish" if f.direction == "bull" else "bearish",
         "top": float(f.top), "bottom": float(f.bottom),
         "created": int(getattr(f, "created", 0)),
         "inverted": bool(getattr(f, "inverted", False)),
-    } for f in getattr(result, "fvgs", [])[-fvg_limit:])
-    ifvg = tuple(x for x in fvg if x["inverted"])
+    } for f in getattr(result, "fvgs", [])[-fvg_limit:]]
     ob = tuple({
         "direction": "bullish" if o.direction == "bull" else "bearish",
         "top": float(o.top), "bottom": float(o.bottom),
     } for o in getattr(result, "order_blocks", [])[-fvg_limit:])
+    fvg = tuple(annotate_confluence(raw_fvg, list(ob)))
+    ifvg = tuple(x for x in fvg if x["inverted"])
     breaker = tuple([{
         "direction": "bullish" if a.direction == "bull" else "bearish",
         "top": float(a.top), "bottom": float(a.bottom),

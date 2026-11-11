@@ -29,17 +29,17 @@ def update_fvg_states(fvgs: list[dict], frame, *, max_age: int = 500) -> list[FV
         state = "EXPIRED" if age > max_age else "CREATED"
         if state != "EXPIRED":
             if f["direction"] == "bullish":
-                if lows[-1] <= bottom:
-                    state = "MITIGATED"
-                elif closes[-1] < bottom:
+                if closes[-1] < bottom:
                     state = "INVERTED"
+                elif lows[-1] <= bottom:
+                    state = "MITIGATED"
                 elif lows[-1] <= top:
                     state = "ACTIVE" if lows[-1] > bottom else "PARTIAL"
             else:
-                if highs[-1] >= top:
-                    state = "MITIGATED"
-                elif closes[-1] > top:
+                if closes[-1] > top:
                     state = "INVERTED"
+                elif highs[-1] >= top:
+                    state = "MITIGATED"
                 elif highs[-1] >= bottom:
                     state = "ACTIVE" if highs[-1] < top else "PARTIAL"
         out.append(FVGState(f"FVG-{i}", f["direction"], top, bottom, state, age))
