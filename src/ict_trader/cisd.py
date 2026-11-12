@@ -23,6 +23,62 @@ import pandas as pd
 
 Direction = Literal["bull", "bear"]
 
+#: Anchor names the declared stop policy may select.  A stop is built from the
+#: first *resolvable* anchor in the policy order; anchors are never unioned.
+KNOWN_STOP_ANCHORS = frozenset({"sweep_extreme", "structure", "ob_extreme"})
+
+
+@dataclass(frozen=True, slots=True)
+class StopPolicy:
+    """One declared stop construction (the ``STOP_POLICY`` register entry).
+
+    ``anchors`` is an **ordered precedence**, not a set: the resolver uses the
+    first anchor that is present and ignores the others.  The corpus names the
+    anchors but not their precedence, so the order is declared here instead of
+    being inferred from an unspecified "outermost of all anchors" union
+    (RK-06, [RE:C-04]).
+
+    ``buffer_atr`` and ``floor_atr`` are repo values: the corpus gives no
+    portable buffer or minimum (RK-04).  ``floor_atr`` is an explicitly labelled
+    widening and is only applied when an entry is known.
+    """
+
+    anchors: tuple[str, ...] = ("sweep_extreme", "structure", "ob_extreme")
+    buffer_atr: float = 0.25
+    floor_atr: float = 1.0
+
+    def __post_init__(self) -> None:
+        unknown = set(self.anchors) - KNOWN_STOP_ANCHORS
+        if unknown:
+            raise ValueError(f"unknown stop anchor(s): {sorted(unknown)}")
+        if self.buffer_atr < 0:
+            raise ValueError("buffer_atr must be >= 0")
+        if self.floor_atr < 0:
+            raise ValueError("floor_atr must be >= 0")
+
+
+#: The single declared stop policy.  ``realtime.analysis.risk`` re-exports it so
+#: the backtest (this module) never imports the optional realtime stack.
+STOP_POLICY = StopPolicy()
+
+
+def stop_from_anchor(direction: str, anchor: float, atr: float, *,
+                     policy: StopPolicy = STOP_POLICY,
+                     buffer_atr: float | None = None) -> float:
+    """Author a stop from **one** anchor plus the declared buffer.
+
+    This is the only place a stop price is constructed: long ``anchor - buffer``,
+    short ``anchor + buffer``.  ``buffer >= 0`` is enforced, so a negative pad
+    can never move the stop inside the invalidation level.  A caller that knows
+    the entry may add the declared repo floor (``risk.structural_stop``); the
+    wired CISD stop exists before an entry, so it carries the buffer only.
+    """
+    pad = policy.buffer_atr if buffer_atr is None else buffer_atr
+    buffer = max(float(pad), 0.0) * max(float(atr), 0.0)
+    if direction == "long":
+        return float(anchor) - buffer
+    return float(anchor) + buffer
+
 
 @dataclass
 class CISDConfig:
@@ -448,7 +504,15 @@ def detect_cisd(
             continue
 
         start = int(level_idx)
-        sl = float(pivot)  # Pine current-TF body/wick placement uses cm_pivot
+        # The pivot is the invalidation extreme, not the stop: place the stop
+        # beyond it with the declared buffer (RK-01, RK-06).  A look-ahead-free
+        # ATR fallback keeps the buffer defined on the seed bar.
+        atr_t = float(atr[t])
+        if not np.isfinite(atr_t) or atr_t <= 0:
+            prior = atr[:t]
+            prior = prior[np.isfinite(prior) & (prior > 0)]
+            atr_t = float(prior[-1]) if prior.size else 0.0
+        sl = stop_from_anchor("long" if is_bull else "short", float(pivot), atr_t)
         target = _nearest_target(levels + sess, level, is_bull, t)
         target_ok = target is not None and abs(target - level) / max(abs(level - sl), 1e-9) >= cfg.min_rr
         if sweep_list:

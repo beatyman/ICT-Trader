@@ -5,10 +5,26 @@ the reason, and a refused plan carries **no size and no target ladder**.  A stop
 is only ever computed from a structural anchor; when no anchor exists the plan
 refuses with ``NT_STOP_ANCHOR_UNRESOLVED`` instead of inventing a ``1xATR`` stop
 (§1.5, X3, X18, §12).
+
+P0-06 stop policy: there is one declared policy (``STOP_POLICY``) and one price
+constructor (``stop_from_anchor``).  The policy resolves **one** anchor in a
+declared precedence order; it never unions every available anchor (RK-06,
+[RE:C-04]).  The buffer is non-negative and the wired CISD stop is built from
+the pivot plus that buffer instead of sitting on the pivot (RK-01, RK-04).
+
+``STOP_POLICY``/``stop_from_anchor`` live in :mod:`ict_trader.cisd` because that
+is the wired call site and the backtest must remain importable without the
+optional realtime stack; they are re-exported here as the public risk API.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from ict_trader.cisd import (  # re-exported: the one declared stop policy
+    STOP_POLICY,
+    StopPolicy,
+    stop_from_anchor,
+)
 
 #: §12 code: the stop policy produced no usable anchor (fail-closed, §1.5, A3).
 STOP_ANCHOR_UNRESOLVED = "NT_STOP_ANCHOR_UNRESOLVED"
@@ -31,49 +47,74 @@ class RiskPlan:
     blockers: tuple[str, ...] = ()
 
 
+def _select_stop_anchor(direction: str, sweep: dict | None,
+                        structure: dict | None, ob: dict | None,
+                        policy: StopPolicy) -> float:
+    """Resolve exactly one anchor, in the policy's declared precedence order."""
+    for name in policy.anchors:
+        if name == "sweep_extreme":
+            if not sweep:
+                continue
+            # ``level`` is deliberately not an anchor: it is the swept level,
+            # which RK-01/RK-07 name as the misplaced stop.
+            extreme = sweep.get("extreme", sweep.get("sweep_price"))
+            if extreme is not None:
+                return float(extreme)
+        elif name == "structure":
+            if structure and structure.get("price") is not None:
+                return float(structure["price"])
+        elif name == "ob_extreme":
+            if not ob:
+                continue
+            edges = [float(ob[k]) for k in ("bottom", "top")
+                     if ob.get(k) is not None]
+            if edges:
+                return min(edges) if direction == "long" else max(edges)
+    raise StopAnchorUnresolved(
+        "no structural stop anchor (sweep extreme/ob/structure) is available")
+
+
 def structural_stop(direction: str, entry: float, atr: float,
                     sweep: dict | None, structure: dict | None,
-                    ob: dict | None = None, *, pad_atr: float = 0.25,
-                    min_stop_atr: float = 1.0) -> float:
-    """Structural stop beyond the *outermost* invalidation reference.
+                    ob: dict | None = None, *,
+                    pad_atr: float | None = None,
+                    min_stop_atr: float | None = None,
+                    policy: StopPolicy | None = None) -> float:
+    """Structural stop beyond the *one* anchor selected by ``STOP_POLICY``.
 
-    Corpus anchors, all of which must sit beyond the level itself:
-      * doc 69 L181 - "The stop belongs beyond the sweep's extreme, not at the
-        swept level ... a retest of that wick can take a stop placed there"
-      * doc 556 L116 - "stop loss 10-20 pips beyond the OB extreme"
-      * doc 491 L158 - "beyond the FVG far edge or beyond the MSS swing extreme"
+    The policy declares an ordered anchor precedence (sweep extreme -> structure
+    -> OB extreme) and a non-negative ATR buffer.  Unlike the previous
+    implementation, every available anchor is **not** unioned into one ``min``/
+    ``max`` set: with more than one anchor present only the first is used, so the
+    result is reproducible from the declaration (RK-06, [RE:C-04]).
 
-    The sweep anchor therefore uses ``extreme`` (the wick that took the stops)
-    and only falls back to ``level`` for legacy payloads.  ``min_stop_atr`` keeps
-    the repo's existing floor (a 1 ATR minimum) explicit instead of hardcoded.
+    A sweep payload with only ``level`` (the swept level) has no anchor and is a
+    refusal: RK-01/RK-07 place the stop beyond the wick, never on the level that
+    was swept.
+
+    ``pad_atr``/``min_stop_atr`` remain accepted for API compatibility and
+    override ``policy.buffer_atr``/``policy.floor_atr`` when supplied.  The floor
+    is the repo's labelled minimum-distance widening; it is applied after the
+    buffer, only when an entry is known (P0-06, conflict #4).
 
     No anchor at all is a refusal, not a default: ``StopAnchorUnresolved`` is
     raised instead of falling back to ``entry -/+ 1xATR``, which would author a
     price the corpus never provides (§1.5, X3, X18).
     """
-    buffer = max(pad_atr * atr, 0.0)
-    refs: list[float] = []
-    if sweep:
-        level = sweep.get("level")
-        extreme = sweep.get("extreme", sweep.get("sweep_price"))
-        if level is not None:
-            refs.append(float(level))
-        if extreme is not None:
-            refs.append(float(extreme))
-    if ob:
-        for key in ("bottom", "top"):
-            if ob.get(key) is not None:
-                refs.append(float(ob[key]))
-    if structure and structure.get("price") is not None:
-        refs.append(float(structure["price"]))
-    if not refs:
-        raise StopAnchorUnresolved(
-            "no structural stop anchor (sweep/ob/structure) is available")
-    if direction == "long":
-        anchor = min(refs)
-        return min(anchor - buffer, entry - max(min_stop_atr, 0.0) * atr)
-    anchor = max(refs)
-    return max(anchor + buffer, entry + max(min_stop_atr, 0.0) * atr)
+    p = policy if policy is not None else STOP_POLICY
+    anchor = _select_stop_anchor(direction, sweep, structure, ob, p)
+    stop = stop_from_anchor(direction, anchor, atr, policy=p, buffer_atr=pad_atr)
+
+    floor_atr = p.floor_atr if min_stop_atr is None else min_stop_atr
+    floor = max(float(floor_atr), 0.0) * max(float(atr), 0.0)
+    if floor > 0:
+        # Declared repo widening, not a corpus value (RK-04).  It only ever
+        # moves the stop farther from the entry.
+        if direction == "long":
+            stop = min(stop, float(entry) - floor)
+        else:
+            stop = max(stop, float(entry) + floor)
+    return stop
 
 
 def build_risk_plan(direction: str, entry: float, atr: float,

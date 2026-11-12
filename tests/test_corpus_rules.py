@@ -28,7 +28,10 @@ from ict_trader.realtime.analysis.hidden_ob import detect_hidden_ob, nearest_hid
 from ict_trader.realtime.analysis.pda_confluence import (
     ifvg_ce, ifvg_stop, valid_ifvg_context,
 )
-from ict_trader.realtime.analysis.risk import structural_stop
+from ict_trader.realtime.analysis.risk import (
+    StopAnchorUnresolved,
+    structural_stop,
+)
 from ict_trader.strategy import StrategyConfig, simulate_cisd
 
 
@@ -111,21 +114,32 @@ def test_doc69_stop_goes_beyond_the_sweep_extreme_not_the_level():
     assert stop == pytest.approx(97.2 - 0.25, abs=1e-9)
 
 
-def test_doc69_short_stop_mirrors_and_legacy_payload_still_works():
+def test_doc69_short_stop_mirrors_and_legacy_payload_refuses():
+    """P0-06: a level-only payload has no wick to anchor on and must refuse."""
     stop = structural_stop("short", entry=100.0, atr=1.0,
                            sweep={"level": 102.0, "extreme": 102.8}, structure=None)
     assert stop > 102.8
-    legacy = structural_stop("long", entry=100.0, atr=1.0,
-                             sweep={"level": 98.0}, structure=None)
-    assert legacy == pytest.approx(98.0 - 0.25, abs=1e-9)
+    assert stop == pytest.approx(102.8 + 0.25, abs=1e-9)
+    with pytest.raises(StopAnchorUnresolved):
+        structural_stop("long", entry=100.0, atr=1.0,
+                        sweep={"level": 98.0}, structure=None)
 
 
-def test_doc69_ob_edge_is_also_an_adverse_anchor():
-    """Doc 556 L116 places the stop beyond the OB extreme, so it joins the min/max."""
+def test_doc69_declared_policy_selects_one_anchor_not_the_outermost_union():
+    """P0-06: the declared policy uses the sweep extreme first, not a union.
+
+    Doc 556 L116 also allows the OB extreme, but the policy's declared precedence
+    means it only becomes the anchor when no sweep/structure anchor resolves.
+    """
     stop = structural_stop("long", entry=100.0, atr=1.0,
                            sweep={"level": 98.0, "extreme": 97.8},
                            structure=None, ob={"bottom": 96.5, "top": 99.0})
-    assert stop < 96.5
+    assert stop == pytest.approx(97.8 - 0.25, abs=1e-9)
+    assert stop > 96.5          # not the outermost-of-all-anchors union
+    ob_only = structural_stop("long", entry=100.0, atr=1.0,
+                              sweep=None, structure=None,
+                              ob={"bottom": 96.5, "top": 99.0})
+    assert ob_only == pytest.approx(96.5 - 0.25, abs=1e-9)
 
 
 def test_doc69_extract_sweep_exposes_the_extreme():
