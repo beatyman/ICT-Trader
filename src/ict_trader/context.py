@@ -50,7 +50,8 @@ _SESSION_WINDOWS: dict[str, tuple[str, list[tuple[dtime, dtime]]]] = {
     "hk": ("Asia/Hong_Kong", [(dtime(9, 30), dtime(12, 0)), (dtime(13, 0), dtime(16, 0))]),
     "london": ("America/New_York", [(dtime(2, 0), dtime(5, 0))]),
     # ICT teaching: Asian range accumulates 19:00-00:00 NY; London close 10:00-12:00 NY.
-    "asian": ("America/New_York", [(dtime(19, 0), dtime(23, 59, 59))]),
+    # Declared half-open: the 00:00 end is exclusive, not 23:59:59.
+    "asian": ("America/New_York", [(dtime(19, 0), dtime(0, 0))]),
     # doc 601 (liquiditysweeps.com): "The Asian range (00:00-02:00 EST) functions as
     # a micro-dealing range for the London open."  Kept as a separate key because
     # the legacy "asian" window above uses the 19:00-00:00 NY convention.
@@ -86,6 +87,19 @@ def _as_zone(df: pd.DataFrame, idx: int, zone: str, market: str = "other") -> pd
     return ts.tz_convert(zone)
 
 
+def _in_window(t: dtime, start: dtime, end: dtime) -> bool:
+    """Half-open window test: ``[start, end)`` on the session wall clock.
+
+    A declared end of ``00:00`` means the window runs to *next-day* midnight,
+    which is the exclusive end instant (``19:00-00:00`` is 19:00 up to but not
+    including 00:00).  Such a window crosses the date boundary, so its start is
+    later than its end on the clock.
+    """
+    if start <= end:
+        return start <= t < end
+    return t >= start or t < end
+
+
 def in_session(df: pd.DataFrame, idx: int, market: str, gate: SessionGate) -> bool:
     """Return whether a closed bar falls in the requested cash/session window.
 
@@ -106,7 +120,7 @@ def in_session(df: pd.DataFrame, idx: int, market: str, gate: SessionGate) -> bo
         key = gate
     zone, windows = _SESSION_WINDOWS[key]
     t = _as_zone(df, idx, zone, market).time()
-    return any(start <= t <= end for start, end in windows)
+    return any(_in_window(t, start, end) for start, end in windows)
 
 
 def dealing_range(swings: Iterable, idx: int, lookback_bars: int = 120) -> DealingRange | None:

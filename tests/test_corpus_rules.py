@@ -257,7 +257,7 @@ def test_doc69_venom_window_covers_the_0800_0930_new_york_range():
     """Doc 69 L128: "a raid of the 08:00-09:30 New York range after the 09:30 open"."""
     df = _bars("2026-07-15 08:00", "2026-07-15 09:30", "2026-07-15 09:45", "2026-07-15 07:45")
     assert in_session(df, 0, "crypto", "venom") is True
-    assert in_session(df, 1, "crypto", "venom") is True
+    assert in_session(df, 1, "crypto", "venom") is False  # half-open [08:00, 09:30)
     assert in_session(df, 2, "crypto", "venom") is False
     assert in_session(df, 3, "crypto", "venom") is False
 

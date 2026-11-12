@@ -167,6 +167,7 @@ def htf_bias_evidence(frame: Any, end_idx: int) -> dict | None:
     if len(sub) < 20:
         return None
     sub["date"] = pd.to_datetime(sub["date"], utc=True)
+    last_base = pd.Timestamp(sub["date"].iloc[-1])
     sub = sub.set_index("date")
     out = {}
     for rule in ("4h", "1D"):
@@ -174,6 +175,14 @@ def htf_bias_evidence(frame: Any, end_idx: int) -> dict | None:
             "open": "first", "high": "max", "low": "min",
             "close": "last", "volume": "sum",
         }).dropna().reset_index()
+        # Left-labelled buckets are knowable only at their close.  Drop the
+        # still-forming bucket so its partial OHLC (and in particular its
+        # close) never reaches the bias attached to a signal (P0-01).
+        if len(x):
+            bucket_close = (pd.Timestamp(x["date"].iloc[-1])
+                            + pd.tseries.frequencies.to_offset(rule))
+            if bucket_close > last_base:
+                x = x.iloc[:-1].reset_index(drop=True)
         if len(x) < 20:
             out[rule] = None
             continue

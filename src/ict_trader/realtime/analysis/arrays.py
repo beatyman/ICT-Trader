@@ -158,8 +158,12 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str,
               if s.kind == "L" and int(getattr(s, "confirmed_at", s.index)) <= last_t]
         if hs and ls:
             h, l = hs[-1], ls[-1]
+            # CB-07: the range is knowable only once *both* anchors have
+            # confirmed, so its knowledge time is the later confirmation.
+            known_at = max(int(getattr(h, "confirmed_at", h.index)),
+                           int(getattr(l, "confirmed_at", l.index)))
             add("DEALING_RANGE", "neutral", float(h.price), float(l.price),
-                ms[min(int(h.index), int(l.index))],
+                ms[known_at],
                 anchor=(float(h.price) + float(l.price)) / 2.0)
         else:
             lo = int(min(range(max(0, n - 40), n), key=lambda i: low[i]))
