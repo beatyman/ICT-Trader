@@ -158,11 +158,24 @@ class OrderBlock:
     active: bool = True
     mitigated: bool = False
     signal_id: str = ""
+    #: Body of the selected candle.  AR-17 defines the mean threshold on the
+    #: body, not on the zone: the zone may reach a wick (AR-16 hybrid), while
+    #: ``mean`` must ignore it.  ``None`` only for hand-built instances, which
+    #: have no candle to read and fall back to the zone midpoint.
+    body_high: float | None = None
+    body_low: float | None = None
 
     @property
     def mean(self) -> float:
-        """Mean threshold: the 50% level of the OB range (TTrades/TSG entry)."""
-        return (float(self.top) + float(self.bottom)) / 2.0
+        """Mean threshold: ``(body_high + body_low) / 2`` -- wicks excluded.
+
+        AR-17: this is the body midpoint of the selected candle, explicitly not
+        the CE of the zone (``(top + bottom) / 2``), so the two differ whenever
+        the zone reaches a wick.
+        """
+        body_high = float(self.top if self.body_high is None else self.body_high)
+        body_low = float(self.bottom if self.body_low is None else self.body_low)
+        return (body_high + body_low) / 2.0
 
 
 @dataclass
@@ -548,46 +561,67 @@ def detect_ifvg(fvgs: list[FVG], df: pd.DataFrame) -> list[FVG]:
 
 def detect_order_blocks(df: pd.DataFrame, events: list[StructureEvent], swings: list[Swing],
                         cfg: ICTConfig) -> list[OrderBlock]:
+    """Order blocks selected by recency, not by size (AR-15, AR-17).
+
+    The candidate is ``t* = max{t < e : sign(close[t] - open[t]) = -leg_sign}``
+    -- the **last opposite-close candle** before the displacement leg that ends
+    at the structure event ``e``.  The swing-extreme bar is a different object
+    and is not the candidate (``swings`` is kept for API compatibility only).
+
+    The zone is the repo's declared hybrid (AR-16: wick extreme on the far
+    side, body on the near side), but ``OrderBlock.mean`` is read from the
+    selected candle's body, never from the zone (AR-17).
+    """
     if not cfg.show_ob:
         return []
     highs = df["high"].to_numpy()
     lows = df["low"].to_numpy()
     opens = df["open"].to_numpy()
     closes = df["close"].to_numpy()
+    n = len(df)
+
+    # Last opposite-close bar at or before each index.  Precomputing keeps the
+    # selection O(bars) overall instead of O(events * bars), which matters on
+    # multi-year 15m histories.  A doji (close == open) has sign 0 and is
+    # neither an up-close nor a down-close candle.
+    last_down = np.full(n, -1, dtype=int)
+    last_up = np.full(n, -1, dtype=int)
+    down = up = -1
+    for t in range(n):
+        if closes[t] < opens[t]:
+            down = t
+        elif closes[t] > opens[t]:
+            up = t
+        last_down[t] = down
+        last_up[t] = up
+
     out: list[OrderBlock] = []
     for ev in events:
-        prior = [s for s in swings if s.index < ev.index]
+        e = int(ev.index)
+        if e <= 0 or e >= n:
+            continue
+        # AR-15: the last opposite-close candle strictly before the leg end.
+        t_star = int(last_down[e - 1] if ev.direction == "bull" else last_up[e - 1])
+        if t_star < 0:
+            continue  # no opposite-close candle: refuse rather than fabricate one
+        body_high = float(max(opens[t_star], closes[t_star]))
+        body_low = float(min(opens[t_star], closes[t_star]))
         if ev.direction == "bull":
-            lows_before = [s for s in prior if s.kind == "L"]
-            if not lows_before:
-                continue
-            anchor = lows_before[-1]
-            seg_low = lows[anchor.index: ev.index + 1]
-            if len(seg_low) == 0:
-                continue
-            j = anchor.index + int(np.argmin(seg_low))
-            bottom = float(lows[j])
-            top = float(max(opens[j], closes[j]))
+            top = body_high
+            bottom = float(lows[t_star])
             if top <= bottom:
-                top = float(highs[j])
-            out.append(OrderBlock("bull", top, bottom, j, ev.index, ev.index))
+                top = float(highs[t_star])
+            out.append(OrderBlock("bull", top, bottom, t_star, e, e,
+                                  body_high=body_high, body_low=body_low))
         else:
-            highs_before = [s for s in prior if s.kind == "H"]
-            if not highs_before:
-                continue
-            anchor = highs_before[-1]
-            seg_high = highs[anchor.index: ev.index + 1]
-            if len(seg_high) == 0:
-                continue
-            j = anchor.index + int(np.argmax(seg_high))
-            top = float(highs[j])
-            bottom = float(min(opens[j], closes[j]))
+            top = float(highs[t_star])
+            bottom = body_low
             if top <= bottom:
-                bottom = float(lows[j])
-            out.append(OrderBlock("bear", top, bottom, j, ev.index, ev.index))
+                bottom = float(lows[t_star])
+            out.append(OrderBlock("bear", top, bottom, t_star, e, e,
+                                  body_high=body_high, body_low=body_low))
 
     # mitigation
-    n = len(df)
     for ob in out:
         for t in range(ob.created + 1, n):
             if ob.direction == "bull":
