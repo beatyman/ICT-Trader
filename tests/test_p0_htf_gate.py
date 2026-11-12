@@ -18,8 +18,8 @@ import pytest
 
 from ict_trader.cisd import CISD
 from ict_trader.concepts import build_zigzag, find_pivots
-from ict_trader.context import (BiasState, parse_bias, serialize_bias,
-                                structure_bias)
+from ict_trader.context import (BiasDirection as BiasState, parse_bias,
+                                serialize_bias, structure_bias)
 from ict_trader.realtime.analysis import structure as structure_module
 from ict_trader.realtime.analysis.evidence import htf_bias_evidence
 from ict_trader.realtime.analysis.structure import pivot_bos_bias

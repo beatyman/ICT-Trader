@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 
 from ...concepts import (CHoCH_LABEL, structure_family_spec, structure_label)
-from ...context import BiasState, serialize_bias
+from ...context import BiasDirection, serialize_bias
 
 
 def pivot_bos_bias(frame: pd.DataFrame, *, left: int = 2, right: int = 2,
@@ -36,7 +36,7 @@ def pivot_bos_bias(frame: pd.DataFrame, *, left: int = 2, right: int = 2,
     if mss_family is not None:
         structure_family_spec(mss_family)  # refuse an unknown V07 family
     if frame is None or len(frame) < 20:
-        return {"bias": serialize_bias(BiasState.NEUTRAL), "event": "",
+        return {"bias": serialize_bias(BiasDirection.NEUTRAL), "event": "",
                 "event_time": 0, "swing_high": 0.0, "swing_low": 0.0,
                 "label": "", "confirmed": True, "confirmed_at": 0,
                 "choch": None, "mss_family": mss_family}
@@ -107,8 +107,8 @@ def pivot_bos_bias(frame: pd.DataFrame, *, left: int = 2, right: int = 2,
             trend, last_event = 1, "TREND_UP"
         elif closes[-1] < closes[-20] and highs[-1] <= highs[-20]:
             trend, last_event = -1, "TREND_DOWN"
-    state = (BiasState.BULL if trend > 0
-             else BiasState.BEAR if trend < 0 else BiasState.NEUTRAL)
+    state = (BiasDirection.BULL if trend > 0
+             else BiasDirection.BEAR if trend < 0 else BiasDirection.NEUTRAL)
     confirmed = True
     confirmed_at = 0
     confirmed_time = 0

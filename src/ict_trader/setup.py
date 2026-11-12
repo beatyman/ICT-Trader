@@ -35,10 +35,12 @@ from .concepts import (ICTConfig, PIVOT_LEFT, analyze, detect_fvgs, find_pivots,
                        load_csv)
 from .config import config_hash as _config_hash
 from .variants import VariantConfig
-from .context import (BiasState, DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
-                      SwingIndex, candle2_closure, candle3_closure,
-                      dealing_range, in_session, neutral_blocks, neutral_weight,
-                      ote_from_signal, parse_bias, serialize_bias,
+from .context import (BiasDirection, BiasState, BiasStateStore,
+                      DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
+                      SwingIndex, bias_vocabulary_readings, candle2_closure,
+                      candle3_closure, dealing_range, in_session,
+                      neutral_blocks, neutral_weight, ote_from_signal,
+                      parse_bias, serialize_bias, validate_bias_vocabulary,
                       validate_neutral_handling)
 from .pd_arrays import count_path_liquidity, near_arrays
 from .strategy import (BE_MODES, DEFAULT_COMMISSION_BPS, DEFAULT_ENTRY_MODE,
@@ -166,6 +168,11 @@ class SetupConfig:
     #: allowed to run as an unlabelled default, so the choice (and its repo
     #: provenance) travels with the config and every emitted setup (P0-19).
     bias_primitive: str = DEFAULT_BIAS_PRIMITIVE
+    #: BI-03/V03 declared state vocabulary.  ``+neutral`` is the repo's current
+    #: three-state reading, labelled repo: the corpus attests five vocabularies
+    #: and no single one.  A reading the declared vocabulary cannot express is
+    #: refused at state construction, never downgraded (P1-02).
+    bias_vocabulary: str = "+neutral"
     #: BI-06/BI-07 neutral handling, one declaration for setup/evidence/mtf.
     neutral_handling: str = DEFAULT_NEUTRAL_HANDLING
     require_1d_cloud: bool = True
@@ -323,6 +330,10 @@ class SetupConfig:
             raise ValueError(
                 f"unknown bias_primitive {self.bias_primitive!r}; "
                 f"declare one of {BIAS_PRIMITIVES} (V01)")
+        # P1-02: the state vocabulary is a declared BI-03 fork, not a spelling
+        # convention; an unknown or empty value refuses here.
+        object.__setattr__(self, "bias_vocabulary",
+                           validate_bias_vocabulary(self.bias_vocabulary))
         if self.htf_structure_gate not in HTF_STRUCTURE_GATES:
             raise ValueError(
                 f"unknown htf_structure_gate {self.htf_structure_gate!r}; "
@@ -757,6 +768,12 @@ class _SetupPrecompute:
         self.ema20 = pd.Series(self.close).ewm(span=20, adjust=False).mean().to_numpy()
         self.body = np.abs(self.close - self.open)
         self.vol = df["volume"].to_numpy(float) if "volume" in df else np.zeros(self.n)
+        # P1-02: the declared config/spec and the one-state-per-bar cache.  A
+        # ``BiasState`` is built once per bar and read from here; it is never
+        # rebuilt inside the per-CISD loop.
+        self.cfg = cfg
+        self.spec = spec
+        self._bias_states: dict[int, BiasState] = {}
 
     def bars_ok(self, t: int) -> bool:
         """NaN gate: HTF 1D indicators, 4H indicators and 15m Ichimoku present."""
@@ -772,11 +789,45 @@ class _SetupPrecompute:
         then refuses the setup (BI-06).
         """
         if self.bias_swings is None:
-            return serialize_bias(BiasState.NEUTRAL)
+            return serialize_bias(BiasDirection.NEUTRAL)
         i = int(self.bias_bar_at[int(t)])
         if i < 0:
-            return serialize_bias(BiasState.NEUTRAL)
+            return serialize_bias(BiasDirection.NEUTRAL)
         return self.bias_swings.structure_bias(i)
+
+    def bias_state(self, t: int) -> BiasState:
+        """The one :class:`BiasState` for base bar ``t`` (P1-02).
+
+        The state object is built once per bar and cached, so the per-CISD loop
+        reads a stored state instead of re-deriving a bare string.  ``as_of`` is
+        the bar the reading became known at; ``invalidation``,
+        ``revision_trigger`` and a non-empty ``variant_ids`` are the caller's
+        declarations and are *not* invented here -- ``missing_fields`` reports
+        every one that is absent.  The hold/revision lifecycle is applied by
+        :class:`ict_trader.context.BiasStateStore`; this layer does not hold a
+        bias across sessions because the day boundary is P1-03's object.
+        """
+        t = int(t)
+        cached = self._bias_states.get(t)
+        if cached is not None:
+            return cached
+        reading = parse_bias(self.bias_structure(t))
+        if reading not in bias_vocabulary_readings(self.cfg.bias_vocabulary):
+            # A neutral structure read is not expressible in the declared
+            # ``binary`` vocabulary; record "no reading" (explicitly missing)
+            # instead of coercing it into a direction (BI-03/§1.5).
+            reading = None
+        state = BiasState(
+            scope=self.spec.bias_tf,
+            bias=reading,
+            vocabulary=self.cfg.bias_vocabulary,
+            as_of=t,
+            invalidation=None,
+            revision_trigger=None,
+            variant_ids=self.cfg.variant_config.declared_ids,
+        )
+        self._bias_states[t] = state
+        return state
 
     def htf_checks(self, t: int, direction: str, cfg: "SetupConfig"):
         """The 1D / 4H / 15m indicator checks for one CISD, as bool lists."""
@@ -1029,13 +1080,21 @@ def _record_refusal(refusals: list[dict] | None, **fields) -> None:
 
 def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 daily: pd.DataFrame | None = None,
-                refusals: list[dict] | None = None) -> list[CISD]:
+                refusals: list[dict] | None = None, *,
+                bias_store: BiasStateStore | None = None) -> list[CISD]:
     """Build the admitted setups.  ``refusals`` is an optional audit sink.
 
     When supplied, every setup refused by a named §12 code appends one dict
     (``code`` plus the bars/gate involved) to ``refusals``.  It defaults to
     ``None``, so the signature and return value are unchanged for existing
     callers (P0-13 records ``NT_FILL_OUTSIDE_WINDOW`` here).
+
+    ``bias_store`` is the optional P1-02 pre-session commitment.  When given,
+    the directional gate reads the **held** :class:`BiasState` from the store
+    (one per scope, subject to its declared hold) instead of the per-bar
+    reading, and an absent or expired hold is recorded as ``NT_NO_BIAS``.  The
+    default ``None`` keeps the pre-P1-02 per-bar behaviour until a caller has a
+    day boundary (P1-03) at which to commit.
     """
     cfg = apply_quality_profile(cfg)
     if cfg.origin_filter == "fvg" and cfg.require_sweep:
@@ -1061,17 +1120,40 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 bias_dir is None or parse_bias(bias_dir) is not parse_bias(c.direction)):
             continue
         # P0-09: the HTF gate reads structure on spec.bias_tf, not on the
-        # base/entry frame.  P0-19/BI-06: neutral is resolved by the one
-        # declared handling instead of being a third ad-hoc branch.
-        htf_struct = pre.bias_structure(t)
-        htf_state = parse_bias(htf_struct)
+        # base/entry frame.  P1-02: the reading is a stored BiasState object,
+        # not a per-call boolean; the gate reads its bias field.  When a
+        # pre-session commitment is supplied, it reads the *held* state and its
+        # declared hold, never the per-bar re-derivation.
+        bias_state_source = ("pre_session_store" if bias_store is not None
+                             else "per_bar")
+        if bias_store is not None:
+            bias_state, bias_refusal = bias_store.read(spec.bias_tf, t)
+            if bias_refusal is not None:
+                _record_refusal(
+                    refusals, code=bias_refusal.code.value,
+                    direction=c.direction, signal_bar=int(t),
+                    bias_scope=spec.bias_tf, bias_source=bias_state_source,
+                    detail=bias_refusal.detail,
+                )
+                continue
+        else:
+            bias_state = pre.bias_state(t)
+        htf_struct = ("" if bias_state.bias is None
+                      else serialize_bias(bias_state.bias))
+        htf_state = bias_state.bias
         neutral_factor = 1.0
         if cfg.htf_structure_gate == "aligned":
-            if htf_state is BiasState.NEUTRAL:
+            if htf_state is BiasDirection.NEUTRAL:
                 if neutral_blocks(cfg.neutral_handling):
                     continue
                 neutral_factor = neutral_weight(cfg.neutral_handling)
-            elif htf_state is not parse_bias(c.direction):
+            elif htf_state is BiasDirection.BOTH:
+                # BI-03's "both directions" vocabulary permits either side; it
+                # is not one of BI-06's non-trade states (neutral/unclear/
+                # ambiguous), so it neither vetoes nor scores.
+                pass
+            elif htf_state is None or htf_state is not parse_bias(c.direction):
+                # No reading is a refusal, never a pass (§1.5/A3).
                 continue
         if cfg.session_gate != "none":
             if not in_session(df, t, cfg.market, cfg.session_gate):
@@ -1234,6 +1316,22 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 "daily_bias_filter_label": DAILY_BIAS_FILTER_LABEL,
                 "daily_bias_tf": DAILY_BIAS_FILTER_TF,
                 "htf_structure": htf_struct,
+                # P1-02: the state object's declared fields travel with the
+                # setup, so a consumer reads ``as_of``/``variant_ids`` instead
+                # of inferring them from a bare string.  ``missing_fields``
+                # names every absent field rather than filling it in.
+                "bias_state_scope": bias_state.scope,
+                "bias_state_source": bias_state_source,
+                "bias_state_as_of": int(bias_state.as_of),
+                "bias_state_vocabulary": bias_state.vocabulary,
+                "bias_state_revision_trigger": (
+                    None if bias_state.revision_trigger is None
+                    else bias_state.revision_trigger.value),
+                "bias_state_invalidation": (
+                    None if bias_state.invalidation is None
+                    else bias_state.invalidation.to_public()),
+                "bias_state_variant_ids": list(bias_state.variant_ids),
+                "bias_state_missing_fields": list(bias_state.missing_fields),
                 # The timeframe the gate actually read (P0-09).  It is the
                 # same declared tier the indicators use, and is recorded so a
                 # consumer never has to assume which frame produced the state.

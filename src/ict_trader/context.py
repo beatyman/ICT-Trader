@@ -7,13 +7,15 @@ each can be ablated.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import time as dtime
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Iterable, Literal
 
 import numpy as np
 import pandas as pd
+
+from .variants import Refusal, RefusalCode, read_variant_spec
 
 Market = Literal["cn", "hk", "crypto", "other"]
 SessionGate = Literal["none", "auto", "asian", "asian_dr", "london", "london_close", "ny_am", "ny_pm",
@@ -47,40 +49,52 @@ def atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.Series:
     return tr.rolling(ATR_PERIOD, min_periods=1).mean()
 
 
-class BiasState(str, Enum):
-    """The one declared bias vocabulary (BI-03; SPEC §13.2).
+class BiasDirection(str, Enum):
+    """The one declared bias reading vocabulary (BI-03; SPEC §13.2).
 
     The canonical wire values are ``bullish`` / ``bearish`` / ``neutral``.
     The repo's ``flat`` and the realtime layer's ``neutral`` name the same
-    state; they are aliases into this enum, never separate states.  The
-    corpus's ``+unclear`` / ``+ambiguous`` forks are deliberately absent: they
-    are a declared vocabulary choice (P1-02), not interchangeable spellings.
+    state; they are aliases into this enum, never separate states.
+
+    ``unclear`` / ``ambiguous`` / ``both directions`` are the extra readings
+    the corpus attests for the other BI-03 vocabularies.  They are *not*
+    produced by the HH/HL primitive (:func:`structure_bias`): a run that
+    declares ``+unclear``/``+ambiguous`` may hold them, and a run that
+    declares ``binary`` may not hold ``neutral``.  The vocabulary is a declared
+    fork (V03), never a spelling convention.
     """
     BULL = "bullish"
     BEAR = "bearish"
     NEUTRAL = "neutral"
+    UNCLEAR = "unclear"
+    AMBIGUOUS = "ambiguous"
+    BOTH = "both directions"
 
 
 #: Every repo spelling of a bias/direction token, mapped onto the enum.
-_BIAS_ALIASES: dict[str, BiasState] = {
-    "bull": BiasState.BULL,
-    "bullish": BiasState.BULL,
-    "long": BiasState.BULL,
-    "bear": BiasState.BEAR,
-    "bearish": BiasState.BEAR,
-    "short": BiasState.BEAR,
-    "flat": BiasState.NEUTRAL,
-    "neutral": BiasState.NEUTRAL,
+_BIAS_ALIASES: dict[str, BiasDirection] = {
+    "bull": BiasDirection.BULL,
+    "bullish": BiasDirection.BULL,
+    "long": BiasDirection.BULL,
+    "bear": BiasDirection.BEAR,
+    "bearish": BiasDirection.BEAR,
+    "short": BiasDirection.BEAR,
+    "flat": BiasDirection.NEUTRAL,
+    "neutral": BiasDirection.NEUTRAL,
+    "unclear": BiasDirection.UNCLEAR,
+    "ambiguous": BiasDirection.AMBIGUOUS,
+    "both": BiasDirection.BOTH,
+    "both directions": BiasDirection.BOTH,
 }
 
 
-def parse_bias(value: object) -> BiasState:
-    """Map any repo spelling of a bias state onto :class:`BiasState` (BI-03).
+def parse_bias(value: object) -> BiasDirection:
+    """Map any repo spelling of a bias reading onto :class:`BiasDirection`.
 
     Unknown spellings raise instead of being coerced: a second vocabulary is
     exactly the defect this enum removes.
     """
-    if isinstance(value, BiasState):
+    if isinstance(value, BiasDirection):
         return value
     key = str(value).strip().lower()
     try:
@@ -88,7 +102,7 @@ def parse_bias(value: object) -> BiasState:
     except KeyError:
         raise ValueError(
             f"unknown bias state {value!r}; use one of "
-            f"{[state.value for state in BiasState]}") from None
+            f"{[state.value for state in BiasDirection]}") from None
 
 
 def serialize_bias(value: object) -> str:
@@ -101,6 +115,562 @@ def serialize_bias(value: object) -> str:
     if value is None:
         return ""
     return parse_bias(value).value
+
+
+# --------------------------------------------------------------------------- #
+# P1-02 — BiasState: one object per scope, held, revised only by §3.5
+# --------------------------------------------------------------------------- #
+#: BI-03 / V03: the five attested state vocabularies.  A run declares one; the
+#: declaration is not reversible ("+neutral" is not a superset of "binary" for
+#: a consumer that only knows binary).
+BIAS_VOCABULARIES: tuple[str, ...] = (
+    "binary", "+neutral", "+unclear", "+ambiguous", "both directions")
+
+#: Which readings each vocabulary can express.  ``neutral`` in a binary run is
+#: a state that vocabulary cannot name, so constructing one refuses instead of
+#: silently downgrading it (BI-03).
+_VOCABULARY_READINGS: dict[str, frozenset[BiasDirection]] = {
+    "binary": frozenset({BiasDirection.BULL, BiasDirection.BEAR}),
+    "+neutral": frozenset({BiasDirection.BULL, BiasDirection.BEAR,
+                           BiasDirection.NEUTRAL}),
+    "+unclear": frozenset({BiasDirection.BULL, BiasDirection.BEAR,
+                           BiasDirection.UNCLEAR}),
+    "+ambiguous": frozenset({BiasDirection.BULL, BiasDirection.BEAR,
+                             BiasDirection.AMBIGUOUS}),
+    "both directions": frozenset({BiasDirection.BULL, BiasDirection.BEAR,
+                                  BiasDirection.BOTH}),
+}
+
+
+def validate_bias_vocabulary(vocabulary: str) -> str:
+    """Return the declared BI-03 vocabulary or raise."""
+    value = str(vocabulary).strip()
+    if value not in BIAS_VOCABULARIES:
+        raise ValueError(
+            f"unknown bias vocabulary {vocabulary!r}; declare one of "
+            f"{BIAS_VOCABULARIES} (BI-03)")
+    return value
+
+
+def bias_vocabulary_readings(vocabulary: str) -> frozenset[BiasDirection]:
+    """The readings a vocabulary can express (BI-03)."""
+    return _VOCABULARY_READINGS[validate_bias_vocabulary(vocabulary)]
+
+
+class BiasHold(StrEnum):
+    """§3.5 / `bias_hold`: the four attested holding periods.
+
+    The corpus supplies four incompatible values and nothing adjudicates
+    between them (``htf_bias`` C9), so the run must declare one.  A bar count
+    is *not* part of the corpus value: it is a separate run declaration in
+    :class:`BiasHoldPolicy`.
+    """
+    SESSION = "session"
+    WEEK = "week"
+    MULTIWEEK = "multiweek"
+    OPEN = "open"
+
+
+BIAS_HOLD_PERIODS: tuple[str, ...] = tuple(period.value for period in BiasHold)
+
+
+@dataclass(frozen=True, slots=True)
+class BiasHoldPolicy:
+    """One declared hold period plus its declared horizon in base bars.
+
+    ``session``/``week``/``multiweek`` have **no count in the corpus** (the
+    multi-week count is explicitly `missing`), so ``horizon_bars`` is required
+    for them and is never defaulted.  ``open`` is open-ended and refuses a
+    horizon.  The policy only measures expiry; it never re-derives the bias --
+    a new state requires a pre-session commitment or a §3.5 revision event.
+    """
+
+    hold: BiasHold
+    horizon_bars: int | None = None
+
+    def __post_init__(self) -> None:
+        hold = BiasHold(str(self.hold).strip().lower())
+        object.__setattr__(self, "hold", hold)
+        if hold is BiasHold.OPEN:
+            if self.horizon_bars is not None:
+                raise ValueError(
+                    "bias_hold='open' is open-ended and takes no horizon_bars")
+            return
+        if self.horizon_bars is None:
+            raise ValueError(
+                f"bias_hold={hold.value!r} has no corpus count; declare "
+                "horizon_bars explicitly (no default is supplied)")
+        horizon = int(self.horizon_bars)
+        if horizon < 1:
+            raise ValueError(
+                f"bias_hold={hold.value!r} needs a positive horizon_bars, "
+                f"got {self.horizon_bars!r}")
+        object.__setattr__(self, "horizon_bars", horizon)
+
+    def expiry_bar(self, state: "BiasState") -> int | None:
+        """The first bar at which ``state`` is stale, or ``None`` if open."""
+        if self.hold is BiasHold.OPEN:
+            return None
+        return int(state.as_of) + int(self.horizon_bars)
+
+    def is_expired(self, state: "BiasState", bar: int) -> bool:
+        """Whether the declared hold has ended at ``bar`` (inclusive)."""
+        expiry = self.expiry_bar(state)
+        return expiry is not None and int(bar) >= expiry
+
+    def check(self, state: "BiasState", bar: int) -> Refusal | None:
+        """The fail-closed result of :meth:`is_expired` (A3/A6)."""
+        if not self.is_expired(state, bar):
+            return None
+        return Refusal(
+            RefusalCode.NT_NO_BIAS,
+            detail=(f"bias hold {self.hold.value!r} expired at bar "
+                    f"{self.expiry_bar(state)} (state as_of={state.as_of}); "
+                    "a new pre-session commitment is required"))
+
+    def to_public(self) -> dict[str, object]:
+        return {"hold": self.hold.value, "horizon_bars": self.horizon_bars,
+                "missing_fields": []}
+
+
+class RevisionEvent(StrEnum):
+    """The six §3.5 revision events -- the only way out of ``B1``.
+
+    The event is a *cause*, not a label: the store applies it through
+    :func:`apply_bias_revision` and records it in
+    :attr:`BiasDirection.revision_trigger`.  :attr:`FAILED_SETUP` is the one event
+    that explicitly produces **no** state change.
+    """
+    CONFIRMED_HTF_CHOCH = "confirmed_htf_choch"
+    BARE_HTF_CHOCH = "bare_htf_choch"
+    BOTH_HTF_BROKEN = "both_htf_broken"
+    OBJECTIVE_AND_OPPOSITE_ARRAY = "objective_and_opposite_array"
+    REPEATED_ARRAY_FAILURES = "repeated_array_failures"
+    FAILED_SETUP = "failed_setup"
+
+
+#: The six events in SYSTEM_SPEC §3.5 table order.
+REVISION_EVENTS: tuple[RevisionEvent, ...] = tuple(RevisionEvent)
+
+#: The §3.5 effect of each event.  Every row is quoted from the spec table;
+#: the repeated-failure count is `missing` there and is never invented here.
+REVISION_EVENT_EFFECTS: dict[RevisionEvent, str] = {
+    RevisionEvent.CONFIRMED_HTF_CHOCH: "re-derive bias",
+    RevisionEvent.BARE_HTF_CHOCH: "flip, no confirmation test",
+    RevisionEvent.BOTH_HTF_BROKEN: "flip; retracement becomes reversal",
+    RevisionEvent.OBJECTIVE_AND_OPPOSITE_ARRAY: "re-declare, may flip",
+    RevisionEvent.REPEATED_ARRAY_FAILURES: (
+        "repair bias; the repeated-failure count is missing"),
+    RevisionEvent.FAILED_SETUP: "no state change",
+}
+
+#: Events that must leave the state untouched (§3.5 last row).
+NO_CHANGE_REVISION_EVENTS: tuple[RevisionEvent, ...] = (
+    RevisionEvent.FAILED_SETUP,)
+
+
+@dataclass(frozen=True, slots=True)
+class BiasInvalidation:
+    """The written invalidation condition (daily_bias R3, BI-04).
+
+    The corpus asks for "the exact condition that would prove the bias wrong"
+    and supplies no numeric rule (``htf_bias`` R31: no general invalidation or
+    expiry rule).  A price/bar is therefore optional; when it is absent the
+    field is explicitly ``None`` rather than a fabricated level.
+    """
+
+    condition: str
+    price: float | None = None
+    bar: int | None = None
+
+    def __post_init__(self) -> None:
+        condition = str(self.condition).strip()
+        if not condition:
+            raise ValueError("invalidation.condition must name the falsifier")
+        object.__setattr__(self, "condition", condition)
+        if self.price is not None:
+            object.__setattr__(self, "price", float(self.price))
+        if self.bar is not None:
+            object.__setattr__(self, "bar", int(self.bar))
+
+    @property
+    def missing_fields(self) -> tuple[str, ...]:
+        missing = []
+        if self.price is None:
+            missing.append("price")
+        if self.bar is None:
+            missing.append("bar")
+        return tuple(missing)
+
+    def to_public(self) -> dict[str, object]:
+        return {"condition": self.condition, "price": self.price,
+                "bar": self.bar, "missing_fields": list(self.missing_fields)}
+
+
+@dataclass(frozen=True, slots=True)
+class BiasState:
+    """One stored directional state per scope (SYSTEM_SPEC §1.6/§3.1).
+
+    The seven fields are the declared output contract:
+
+    * ``scope``        - the bias tier/set this state covers (one per scope);
+    * ``bias``         - a :class:`BiasDirection`, or ``None`` for *no reading*
+      (never a fabricated neutral -- §1.5);
+    * ``vocabulary``   - the declared BI-03 vocabulary the reading belongs to;
+    * ``as_of``        - the bar index at which the state became known (a
+      revision bar, or the pre-session anchor for the initial commitment);
+    * ``invalidation`` - the written falsifier, or ``None`` when not written;
+    * ``revision_trigger`` - the §3.5 event that produced this state; ``None``
+      for the initial pre-session commitment;
+    * ``variant_ids``  - the declared ``V##`` ids that produced the state.
+
+    A per-call boolean is not a bias object and is not accepted here.  The
+    object carries **no probability, confidence or score**: the corpus never
+    converts a bias into one (``htf_bias`` R29), and a fabricated number in
+    this type would be read as a calibrated forecast.  Absent fields are
+    reported by :attr:`missing_fields` instead of being filled in.
+    """
+
+    scope: str
+    bias: BiasDirection | None
+    vocabulary: str
+    as_of: int
+    invalidation: BiasInvalidation | None
+    revision_trigger: RevisionEvent | None
+    variant_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        scope = str(self.scope).strip()
+        if not scope:
+            raise ValueError("BiasState.scope must name the bias tier/set")
+        object.__setattr__(self, "scope", scope)
+        vocabulary = validate_bias_vocabulary(self.vocabulary)
+        object.__setattr__(self, "vocabulary", vocabulary)
+        if self.bias is not None:
+            bias = parse_bias(self.bias)
+            if bias not in bias_vocabulary_readings(vocabulary):
+                raise ValueError(
+                    f"bias reading {bias.value!r} is not expressible in the "
+                    f"declared vocabulary {vocabulary!r} (BI-03)")
+            object.__setattr__(self, "bias", bias)
+        as_of = int(self.as_of)
+        if as_of < 0:
+            raise ValueError(f"BiasState.as_of must be a bar index, got {self.as_of!r}")
+        object.__setattr__(self, "as_of", as_of)
+        if self.invalidation is not None and not isinstance(
+                self.invalidation, BiasInvalidation):
+            raise TypeError(
+                "BiasState.invalidation must be BiasInvalidation or None")
+        if self.revision_trigger is not None:
+            object.__setattr__(self, "revision_trigger",
+                               RevisionEvent(self.revision_trigger))
+        ids: list[str] = []
+        raw_ids = ((self.variant_ids,) if isinstance(self.variant_ids, str)
+                   else self.variant_ids)
+        for raw in raw_ids:
+            variant_id = str(raw).strip().upper()
+            read_variant_spec(variant_id)  # refuse an undeclared V## id
+            if variant_id not in ids:
+                ids.append(variant_id)
+        object.__setattr__(self, "variant_ids", tuple(ids))
+
+    @property
+    def missing_fields(self) -> tuple[str, ...]:
+        """Declared fields that are absent, named rather than fabricated.
+
+        ``revision_trigger`` is deliberately excluded: ``None`` there means
+        "this is the initial pre-session state", which is a complete state, not
+        a missing field.
+        """
+        missing = []
+        if self.bias is None:
+            missing.append("bias")
+        if self.invalidation is None:
+            missing.append("invalidation")
+        if not self.variant_ids:
+            missing.append("variant_ids")
+        return tuple(missing)
+
+    def expired(self, policy: BiasHoldPolicy, bar: int) -> bool:
+        """Whether the given declared hold has ended at ``bar``."""
+        return policy.is_expired(self, bar)
+
+    def to_public(self) -> dict[str, object]:
+        """The JSON-safe contract record; no probability/confidence field."""
+        return {
+            "scope": self.scope,
+            "bias": None if self.bias is None else serialize_bias(self.bias),
+            "vocabulary": self.vocabulary,
+            "as_of": int(self.as_of),
+            "invalidation": (None if self.invalidation is None
+                             else self.invalidation.to_public()),
+            "revision_trigger": (None if self.revision_trigger is None
+                                 else self.revision_trigger.value),
+            "variant_ids": list(self.variant_ids),
+            "missing_fields": list(self.missing_fields),
+        }
+
+
+def apply_bias_revision(state: BiasState, event: RevisionEvent | str, *,
+                        bar: int,
+                        bias: object = None,
+                        invalidation: BiasInvalidation | None = None,
+                        variant_ids: Iterable[str] | None = None) -> BiasState:
+    """Apply exactly one §3.5 revision event to ``state``.
+
+    ``FAILED_SETUP`` returns the **same state object**: §3.5's last row says a
+    single failed setup is not a reason to change the bias.  Every other event
+    re-derives the bias at ``bar`` and records itself in
+    ``revision_trigger``; the caller supplies the new reading (the store never
+    infers a direction from the event name).  ``bias=None`` is only meaningful
+    for ``FAILED_SETUP``; the other events must name a reading so a missing
+    input cannot become a silent neutral.
+    """
+    revision = RevisionEvent(event)
+    if revision in NO_CHANGE_REVISION_EVENTS:
+        # §3.5's last row: a failed setup is explicitly *not* a reason to
+        # change the bias.  Asking for a different reading through this event
+        # is a caller bug, not a revision, so it refuses instead of being
+        # ignored.
+        if bias is not None and parse_bias(bias) is not state.bias:
+            raise ValueError(
+                "a single failed setup produces no state change (§3.5); "
+                "declare the confirmed/bare CHoCH or another revision event")
+        return state
+    if bias is None:
+        raise ValueError(
+            f"revision event {revision.value!r} needs the re-derived bias; "
+            "a missing reading is not a neutral state (§1.5)")
+    bar = int(bar)
+    if bar < int(state.as_of):
+        raise ValueError(
+            f"revision at bar {bar} precedes the state's as_of={state.as_of}; "
+            "a state cannot be known before it exists (CB-07)")
+    new_state = replace(
+        state,
+        bias=parse_bias(bias),
+        as_of=bar,
+        invalidation=(state.invalidation if invalidation is None
+                      else invalidation),
+        revision_trigger=revision,
+        variant_ids=(state.variant_ids if variant_ids is None
+                     else tuple(variant_ids)),
+    )
+    return new_state
+
+
+@dataclass(frozen=True, slots=True)
+class PreSessionBias:
+    """The committed pre-session artefact (daily_bias R3, htf_bias R33).
+
+    One object, written **before** the session opens, holding one
+    :class:`BiasState` per scope.  ``anchor`` is the bar the run declares as
+    its write instant; ``session_open`` is the first bar of the session the
+    artefact governs, so ``anchor < session_open`` proves the pre-session
+    property.  ``deadline`` is the declared write deadline; the corpus supplies
+    four incompatible deadlines (``htf_bias`` C9) and no register row
+    adjudicates them, so it is optional and ``None`` is reported explicitly in
+    :attr:`missing_fields` rather than replaced with a chosen clock.
+    """
+
+    session_id: str
+    anchor: int
+    session_open: int
+    states: tuple[BiasState, ...]
+    deadline: int | None = None
+
+    def __post_init__(self) -> None:
+        session_id = str(self.session_id).strip()
+        if not session_id:
+            raise ValueError("session_id must name the session")
+        object.__setattr__(self, "session_id", session_id)
+        states = tuple(self.states)
+        if not states:
+            raise ValueError("a pre-session artefact needs at least one state")
+        scopes: set[str] = set()
+        for state in states:
+            if not isinstance(state, BiasState):
+                raise TypeError("states must be BiasState objects")
+            if state.scope in scopes:
+                raise ValueError(
+                    f"duplicate scope {state.scope!r}; BiasState is one "
+                    "object per scope (§1.6)")
+            scopes.add(state.scope)
+            if int(state.as_of) > int(self.anchor):
+                raise ValueError(
+                    f"state {state.scope!r} was read at bar {state.as_of}, "
+                    f"after the declared commit anchor {self.anchor}")
+        object.__setattr__(self, "states", states)
+        anchor = int(self.anchor)
+        session_open = int(self.session_open)
+        object.__setattr__(self, "anchor", anchor)
+        object.__setattr__(self, "session_open", session_open)
+        if anchor >= session_open:
+            raise ValueError(
+                f"pre-session artefact committed at bar {anchor} must precede "
+                f"the session open at bar {session_open} (daily_bias R3)")
+        if self.deadline is not None:
+            deadline = int(self.deadline)
+            object.__setattr__(self, "deadline", deadline)
+            if deadline < anchor:
+                raise ValueError(
+                    f"state committed at bar {anchor} is after the declared "
+                    f"pre-session deadline {deadline}")
+            if deadline >= session_open:
+                raise ValueError(
+                    f"the pre-session deadline {deadline} must precede the "
+                    f"session open {session_open}")
+
+    @property
+    def variant_ids(self) -> tuple[str, ...]:
+        """The union of the states' declared variant ids, register order."""
+        seen: list[str] = []
+        for state in self.states:
+            for variant_id in state.variant_ids:
+                if variant_id not in seen:
+                    seen.append(variant_id)
+        return tuple(seen)
+
+    @property
+    def missing_fields(self) -> tuple[str, ...]:
+        """Fields absent from the artefact; ``deadline`` is the declared one."""
+        return () if self.deadline is not None else ("deadline",)
+
+    def state(self, scope: str) -> BiasState | None:
+        """The committed state for ``scope``, or ``None`` when not committed."""
+        wanted = str(scope).strip()
+        for state in self.states:
+            if state.scope == wanted:
+                return state
+        return None
+
+    def to_public(self) -> dict[str, object]:
+        """The written artefact as a JSON-safe record."""
+        return {
+            "session_id": self.session_id,
+            "anchor": int(self.anchor),
+            "session_open": int(self.session_open),
+            "deadline": self.deadline,
+            "states": [state.to_public() for state in self.states],
+            "variant_ids": list(self.variant_ids),
+            "missing_fields": list(self.missing_fields),
+        }
+
+    def as_store(self, hold: BiasHoldPolicy) -> "BiasStateStore":
+        """A read/revise store seeded with the committed states."""
+        return BiasStateStore(self.states, hold=hold)
+
+
+def commit_pre_session(states: Iterable[BiasState], *, session_id: str,
+                       anchor: int, session_open: int,
+                       deadline: int | None = None) -> PreSessionBias:
+    """Write the one pre-session artefact, computing nothing at read time.
+
+    This is the P1-02 entry point: a caller computes the readings once, commits
+    them here at its declared ``anchor`` (before ``session_open``), and every
+    later read goes through :class:`BiasStateStore` instead of re-deriving the
+    bias per candidate.
+    """
+    return PreSessionBias(
+        session_id=session_id, anchor=anchor, session_open=session_open,
+        states=tuple(states), deadline=deadline)
+
+
+class BiasStateStore:
+    """One read/revise path over the pre-session :class:`BiasState` objects.
+
+    The store holds exactly one state per scope, reads it only at
+    ``bar >= as_of``, refuses after the declared hold expires, and applies
+    revisions only through the six §3.5 events
+    (:func:`apply_bias_revision`).  It never re-derives a bias from a bar and
+    never fabricates one: a missing scope or an expired hold is a
+    ``NT_NO_BIAS`` refusal.
+    """
+
+    def __init__(self, states: Iterable[BiasState], *,
+                 hold: BiasHoldPolicy) -> None:
+        if not isinstance(hold, BiasHoldPolicy):
+            raise TypeError("a BiasStateStore needs a declared BiasHoldPolicy")
+        self._hold = hold
+        self._states: dict[str, BiasState] = {}
+        for state in states:
+            if not isinstance(state, BiasState):
+                raise TypeError("states must be BiasState objects")
+            if state.scope in self._states:
+                raise ValueError(
+                    f"duplicate scope {state.scope!r}; BiasState is one "
+                    "object per scope (§1.6)")
+            self._states[state.scope] = state
+
+    @property
+    def hold(self) -> BiasHoldPolicy:
+        return self._hold
+
+    @property
+    def states(self) -> tuple[BiasState, ...]:
+        return tuple(self._states.values())
+
+    def state(self, scope: str) -> BiasState | None:
+        return self._states.get(str(scope).strip())
+
+    def read(self, scope: str, bar: int) -> tuple[BiasState | None, Refusal | None]:
+        """Return the held state at ``bar``, or a typed ``NT_NO_BIAS`` refusal."""
+        key = str(scope).strip()
+        state = self._states.get(key)
+        if state is None:
+            return None, Refusal(
+                RefusalCode.NT_NO_BIAS,
+                detail=f"no committed bias state for scope {key!r}")
+        bar = int(bar)
+        if bar < int(state.as_of):
+            return None, Refusal(
+                RefusalCode.NT_NO_BIAS,
+                detail=(f"bias state for scope {key!r} has as_of={state.as_of} "
+                        f"and is not knowable at bar {bar} (CB-07)"))
+        refusal = self._hold.check(state, bar)
+        if refusal is not None:
+            return None, refusal
+        return state, None
+
+    def revise(self, scope: str, event: RevisionEvent | str, *, bar: int,
+               bias: object = None,
+               invalidation: BiasInvalidation | None = None,
+               variant_ids: Iterable[str] | None = None) -> BiasState:
+        """Apply one §3.5 event and store the result.
+
+        A single failed setup returns the current state unchanged (§3.5).  The
+        caller must name the re-derived reading for every other event; the
+        store never infers a direction from the event name.
+        """
+        key = str(scope).strip()
+        try:
+            state = self._states[key]
+        except KeyError:
+            raise KeyError(
+                f"no committed bias state for scope {key!r}; commit the "
+                "pre-session artefact before revising") from None
+        revised = apply_bias_revision(
+            state, event, bar=bar, bias=bias,
+            invalidation=invalidation, variant_ids=variant_ids)
+        self._states[key] = revised
+        return revised
+
+    def to_public(self, bar: int) -> dict[str, object]:
+        """The held states at ``bar`` with refusals, for audit output."""
+        records = []
+        for scope in self._states:
+            state, refusal = self.read(scope, bar)
+            records.append({
+                "scope": scope,
+                "state": None if state is None else state.to_public(),
+                "refusal": None if refusal is None else {
+                    "code": refusal.code.value, "detail": refusal.detail},
+            })
+        return {
+            "hold": self._hold.to_public(),
+            "bar": int(bar),
+            "scopes": records,
+        }
 
 
 #: BI-06/BI-07: the one declared neutral handling read by every bias consumer.
@@ -482,10 +1052,10 @@ class SwingIndex:
             lh = hp[nh - 1] < hp[nh - lookback]
             ll = lp[nl - 1] < lp[nl - lookback]
             if hh and hl:
-                return serialize_bias(BiasState.BULL)
+                return serialize_bias(BiasDirection.BULL)
             if lh and ll:
-                return serialize_bias(BiasState.BEAR)
-        return serialize_bias(BiasState.NEUTRAL)
+                return serialize_bias(BiasDirection.BEAR)
+        return serialize_bias(BiasDirection.NEUTRAL)
 
     def dealing_range_state(self, t: int,
                             lookback_bars: int = RANGE_STALENESS_BARS
@@ -626,7 +1196,7 @@ def structure_bias(swings: Iterable, t: int, lookback: int = 2) -> str:
         lh = float(h2.price) < float(h1.price)
         ll = float(l2.price) < float(l1.price)
         if hh and hl:
-            return serialize_bias(BiasState.BULL)
+            return serialize_bias(BiasDirection.BULL)
         if lh and ll:
-            return serialize_bias(BiasState.BEAR)
-    return serialize_bias(BiasState.NEUTRAL)
+            return serialize_bias(BiasDirection.BEAR)
+    return serialize_bias(BiasDirection.NEUTRAL)

@@ -16,10 +16,11 @@ P1-07 adds two objects to this boundary:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
-from ...context import (BiasState, DEFAULT_NEUTRAL_HANDLING, parse_bias,
-                        validate_neutral_handling)
+from ...context import (BiasDirection, BiasInvalidation, BiasState,
+                        DEFAULT_NEUTRAL_HANDLING, RevisionEvent, parse_bias,
+                        serialize_bias, validate_neutral_handling)
 from ...variants import RefusalCode, VariantConfig, VariantUndeclared
 
 #: §12 refusal codes used by this boundary.  They are read from the one typed
@@ -74,7 +75,8 @@ def _bias_gate(direction: str, bias: object, *, mode: str,
     if mode == "oppose_bias":
         # A neutral bias neither opposes nor matches, so it never satisfies
         # "must oppose": the reading fails closed (BI-06 no_trade).
-        opposing = BiasState.BEAR if side is BiasState.BULL else BiasState.BULL
+        opposing = (BiasDirection.BEAR if side is BiasDirection.BULL
+                    else BiasDirection.BULL)
         return state is opposing
     return state is side
 
@@ -741,25 +743,30 @@ def rvol_evidence(frame: Any, end_idx: int, *, window: int = 20) -> float | None
 _HTF_PIVOT_LEFT = 5
 
 
-def htf_bias_evidence(frame: Any, end_idx: int, *,
-                      neutral_handling: str = DEFAULT_NEUTRAL_HANDLING) -> dict | None:
-    """HH/HL bias for the 4H and 1D tiers, from **closed** buckets only.
+def htf_bias_states(frame: Any, end_idx: int, *, vocabulary: str,
+                    variant_ids: Iterable[str] = (),
+                    invalidation: BiasInvalidation | None = None,
+                    revision_trigger: RevisionEvent | None = None,
+                    neutral_handling: str = DEFAULT_NEUTRAL_HANDLING
+                    ) -> dict[str, BiasState | None] | None:
+    """One :class:`BiasState` per closed HTF tier (P1-02, §1.6).
 
-    The bias primitive is :func:`ict_trader.context.structure_bias` (BI-01:
-    HH/HL ⇒ bullish, LH/LL ⇒ bearish).  The realtime pivot/BOS read is a
-    different, repo rule and is deliberately not used here (P0-09); it is
-    named ``pivot_bos_bias`` in :mod:`.structure`.
+    The reading rule is the HH/HL primitive (:func:`ict_trader.context.
+    structure_bias`, BI-01), exactly as :func:`htf_bias_evidence` uses it.  The
+    difference is the output type: a stored object with ``scope``/``as_of``/
+    ``vocabulary``/``invalidation``/``revision_trigger``/``variant_ids`` rather
+    than an ad-hoc dict, so one pre-session artefact can hold it and a later
+    read cannot silently re-derive it.
 
-    ``neutral_handling`` is the one declared BI-06/BI-07 choice; it is accepted
-    here so the boundary validates it, while the returned bias stays the raw
-    reading (a consumer applies the handling through
-    :func:`ict_trader.context.neutral_blocks` / ``neutral_weight``).  The two
-    alternative handlings are therefore no longer decided independently by
-    setup, this module and ``mtf``.
+    ``vocabulary`` is required: BI-03 makes the state vocabulary a declared
+    fork (V03), and a reading the vocabulary cannot express refuses instead of
+    being downgraded.  ``end_idx`` is the knowledge bar (``as_of``); the
+    still-forming resample bucket is dropped before the swings are built, so
+    an incomplete bucket never enters the state (CB-01/CB-07).
 
-    A left-labelled resample bucket is knowable only at its close, so the
-    still-forming bucket is dropped before the swings are built: its partial
-    OHLC must never reach the bias attached to a signal (P0-01, CB-01/CB-07).
+    ``invalidation``/``revision_trigger``/``variant_ids`` are the caller's
+    declarations.  They are not inferred here; a ``BiasState`` reports every
+    absent one through ``missing_fields``.
     """
     validate_neutral_handling(neutral_handling)
     import pandas as pd
@@ -772,7 +779,7 @@ def htf_bias_evidence(frame: Any, end_idx: int, *,
     sub["date"] = pd.to_datetime(sub["date"], utc=True)
     last_base = pd.Timestamp(sub["date"].iloc[-1])
     sub = sub.set_index("date")
-    out = {}
+    out: dict[str, BiasState | None] = {}
     for rule in ("4h", "1D"):
         x = sub.resample(rule).agg({
             "open": "first", "high": "max", "low": "min",
@@ -790,5 +797,49 @@ def htf_bias_evidence(frame: Any, end_idx: int, *,
             out[rule] = None
             continue
         swings = find_pivots(x, _HTF_PIVOT_LEFT, 1)
-        out[rule] = {"bias": structure_bias(swings, len(x) - 1)}
+        out[rule] = BiasState(
+            scope=rule,
+            bias=parse_bias(structure_bias(swings, len(x) - 1)),
+            vocabulary=vocabulary,
+            as_of=int(end_idx),
+            invalidation=invalidation,
+            revision_trigger=revision_trigger,
+            variant_ids=tuple(variant_ids),
+        )
     return out
+
+
+def htf_bias_evidence(frame: Any, end_idx: int, *,
+                      neutral_handling: str = DEFAULT_NEUTRAL_HANDLING,
+                      vocabulary: str = "+neutral") -> dict | None:
+    """HH/HL bias for the 4H and 1D tiers, from **closed** buckets only.
+
+    The bias primitive is :func:`ict_trader.context.structure_bias` (BI-01:
+    HH/HL ⇒ bullish, LH/LL ⇒ bearish).  The realtime pivot/BOS read is a
+    different, repo rule and is deliberately not used here (P0-09); it is
+    named ``pivot_bos_bias`` in :mod:`.structure`.
+
+    ``neutral_handling`` is the one declared BI-06/BI-07 choice; it is accepted
+    here so the boundary validates it, while the returned bias stays the raw
+    reading (a consumer applies the handling through
+    :func:`ict_trader.context.neutral_blocks` / ``neutral_weight``).  The two
+    alternative handlings are therefore no longer decided independently by
+    setup, this module and ``mtf``.
+
+    ``vocabulary`` is the declared BI-03/V03 choice; the default ``+neutral``
+    is the repo's current three-state reading and is labelled as such.
+
+    A left-labelled resample bucket is knowable only at its close, so the
+    still-forming bucket is dropped before the swings are built: its partial
+    OHLC must never reach the bias attached to a signal (P0-01, CB-01/CB-07).
+    """
+    states = htf_bias_states(
+        frame, end_idx, vocabulary=vocabulary,
+        neutral_handling=neutral_handling)
+    if states is None:
+        return None
+    return {
+        rule: (None if state is None
+               else {"bias": serialize_bias(state.bias)})
+        for rule, state in states.items()
+    }
