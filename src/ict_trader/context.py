@@ -2866,6 +2866,688 @@ def tuesday_profile_ok(**conditions: object) -> tuple[bool, tuple[str, ...]]:
     return (not missing, missing)
 
 
+# --------------------------------------------------------------------------- #
+# P1-06 -- daily-bias families B-G (DB-04..DB-07): one declaration, no averaging
+# --------------------------------------------------------------------------- #
+class DailyBiasFamily(StrEnum):
+    """The four daily-bias families this checkout can compute (DB-04..DB-07).
+
+    ``daily_bias`` sec.2 lists ten derivation families and sec.6 C4 states that
+    they can point opposite ways on the same bar and that they must not be
+    averaged into a composite.  A run therefore declares **exactly one** of
+    these choices; the B-G families that cannot be computed here are recorded
+    with their blocking object in :data:`DAILY_BIAS_FAMILY_STATUS` instead of
+    being approximated.
+    """
+
+    PRIOR_CLOSE = "prior_close"                 # family B, DB-04
+    OUTSIDE_DAY = "outside_day"                 # family B, DB-05
+    STRUCTURE_LOCATION = "structure_location"   # family C, DB-06
+    LAST_1D_MSS = "last_1d_mss"                 # family G, DB-07
+
+
+#: The implemented choices, in declaration order.  This is the complete set a
+#: run may select; there is deliberately no default and no composite choice.
+DAILY_BIAS_FAMILIES: tuple[str, ...] = tuple(f.value for f in DailyBiasFamily)
+
+#: The daily_bias concept's families B-G, in concept order.  Every one is
+#: accounted for below -- implemented or explicitly blocked -- so the range is
+#: never silently reduced to the four this checkout can compute.
+DAILY_BIAS_FAMILY_ORDER: tuple[str, ...] = ("B", "C", "D", "E", "F", "G")
+
+#: The daily_bias concept's families B-G and what this wave does with each one.
+#:
+#: ``status`` is ``implemented`` or ``blocked``; a blocked family is never
+#: silently omitted -- selecting it refuses and names the object it lacks.
+DAILY_BIAS_FAMILY_STATUS: dict[str, dict[str, str]] = {
+    "B": {
+        "family": "previous-day OHLC mapping",
+        "rule": "DB-04, DB-05",
+        "status": "implemented",
+        "source": "daily_bias R15 (batch 050:87; batch 074:301)",
+    },
+    "C": {
+        "family": "structure x location",
+        "rule": "DB-06",
+        "status": "implemented",
+        "source": "daily_bias R16 (doc_0518, batch 065:277)",
+    },
+    "D": {
+        "family": "DOL first, bias as its output",
+        "rule": "R17",
+        "status": "blocked",
+        "source": ("daily_bias R17 derives the bias from the draw on liquidity; "
+                   "the draw object and the narrative order are P1-11, so no "
+                   "code path here derives a daily bias from a draw"),
+    },
+    "E": {
+        "family": "weekly-to-daily checklists",
+        "rule": "R18",
+        "status": "blocked",
+        "source": ("daily_bias R18 needs the economic-calendar input (I7) and "
+                   "the weekly ERL read; neither object exists in this checkout, "
+                   "so the checklist cannot be completed honestly"),
+    },
+    "F": {
+        "family": "weekly expansion",
+        "rule": "R19",
+        "status": "blocked",
+        "source": ("daily_bias R19 rejects a daily call ('Every day bias is "
+                   "unrealistic', batch 128:136) and supplies no daily-bias "
+                   "formula to implement"),
+    },
+    "G": {
+        "family": "lock the most recent daily MSS",
+        "rule": "DB-07",
+        "status": "implemented",
+        "source": "daily_bias R20 (doc_0488, batch 100:122)",
+    },
+}
+
+#: Concept family letter, DB rule, name and citation for each implemented choice.
+DAILY_BIAS_FAMILY_SPECS: dict[str, dict[str, str]] = {
+    "prior_close": {
+        "family": "B", "rule": "DB-04",
+        "name": "prior-day close position",
+        "source": ("DB-04 [SN-D04]: prior close above the prior range midpoint "
+                   "=> bullish; below => bearish"),
+    },
+    "outside_day": {
+        "family": "B", "rule": "DB-05",
+        "name": "outside day",
+        "source": ("DB-05 [SN-D05]: PDH and PDL both violated => downgrade to "
+                   "caution (no trade)"),
+    },
+    "structure_location": {
+        "family": "C", "rule": "DB-06",
+        "name": "structure x location",
+        "source": ("DB-06 [SN-D06]: shift_down and premium => bearish; "
+                   "shift_up and discount => bullish; else no bias, wait"),
+    },
+    "last_1d_mss": {
+        "family": "G", "rule": "DB-07",
+        "name": "last 1D MSS lock",
+        "source": ("DB-07 [SN-D07]: bias = direction of the most recent 1D MSS, "
+                   "locked until an opposite 1D MSS prints"),
+    },
+}
+
+
+def parse_daily_bias_family(value: object) -> str:
+    """Return the one declared daily-bias family or raise.
+
+    Selecting a *blocked* family (D/E/F) is refused with the object it lacks,
+    not reported as an unknown string: the family exists in the concept and its
+    refusal is the honest status this checkout can give it.
+    """
+    if isinstance(value, DailyBiasFamily):
+        return value.value
+    key = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if key in DAILY_BIAS_FAMILIES:
+        return key
+    letter = key.upper()
+    if letter in DAILY_BIAS_FAMILY_STATUS:
+        record = DAILY_BIAS_FAMILY_STATUS[letter]
+        raise ValueError(
+            f"daily-bias family {letter} ({record['family']}) is "
+            f"{record['status']}: {record['source']}.  Declare exactly one of "
+            f"{DAILY_BIAS_FAMILIES} (DB-04..DB-07)")
+    raise ValueError(
+        f"unknown daily_bias_family {value!r}; declare exactly one of "
+        f"{DAILY_BIAS_FAMILIES} (DB-04..DB-07)")
+
+
+def daily_bias_family_spec(value: object) -> dict[str, str]:
+    """The one implemented family's concept letter, rule, name and citation."""
+    return dict(DAILY_BIAS_FAMILY_SPECS[parse_daily_bias_family(value)])
+
+
+def _reading_inputs(inputs: dict[str, object] | None
+                    ) -> tuple[tuple[str, object], ...]:
+    """Freeze the evaluated inputs in order; numbers must be finite."""
+    frozen: list[tuple[str, object]] = []
+    for name, value in (inputs or {}).items():
+        if isinstance(value, bool):
+            frozen.append((str(name), bool(value)))
+        elif isinstance(value, (int, float, np.integer, np.floating)):
+            number = float(value)
+            if not np.isfinite(number):
+                raise ValueError(
+                    f"daily-bias input {name!r} must be finite, got {value!r}")
+            frozen.append((str(name), number))
+        else:
+            frozen.append((str(name), str(value)))
+    return tuple(frozen)
+
+
+@dataclass(frozen=True, slots=True)
+class DailyBiasReading:
+    """One daily-bias family's evaluated reading (P1-06).
+
+    The reading records **which** declared family produced it, its DB rule, the
+    direction (or ``None`` for the corpus's "no bias, wait" cells), the bar it
+    was known at, whether it is the outside-day caution downgrade, and the
+    exact inputs that were compared.  It carries **no score, probability or
+    confidence**: the corpus states none for a daily bias (``daily_bias`` R24)
+    and averaging the families is forbidden (C4), so a numeric field here would
+    invite exactly the composite the corpus rejects.
+    """
+
+    family: str
+    rule: str
+    bias: BiasDirection | None
+    as_of: int
+    inputs: tuple[tuple[str, object], ...] = ()
+    caution: bool = False
+    timeframe: str = "1D"
+    variant_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        family = parse_daily_bias_family(self.family)
+        object.__setattr__(self, "family", family)
+        expected_rule = DAILY_BIAS_FAMILY_SPECS[family]["rule"]
+        rule = str(self.rule).strip()
+        if rule != expected_rule:
+            raise ValueError(
+                f"daily-bias family {family!r} is {expected_rule}, not {rule!r}; "
+                "a reading may not be relabelled as another family's rule")
+        object.__setattr__(self, "rule", rule)
+        if self.bias is not None:
+            bias = parse_bias(self.bias)
+            if bias not in (BiasDirection.BULL, BiasDirection.BEAR):
+                raise ValueError(
+                    "a daily-bias reading is bullish, bearish, or no reading; "
+                    f"got {bias.value!r} (BI-06: neutral is not a direction)")
+            object.__setattr__(self, "bias", bias)
+        as_of = int(self.as_of)
+        if as_of < 0:
+            raise ValueError(
+                f"DailyBiasReading.as_of must be a bar index, got {self.as_of!r}")
+        object.__setattr__(self, "as_of", as_of)
+        caution = bool(self.caution)
+        if caution and self.bias is not None:
+            raise ValueError(
+                "an outside-day caution carries no direction (DB-05 downgrades "
+                "to 'no trade')")
+        object.__setattr__(self, "caution", caution)
+        timeframe = str(self.timeframe).strip().upper()
+        if timeframe != "1D":
+            raise ValueError(
+                "the daily-bias families are day-scoped; a reading is 1D, got "
+                f"{self.timeframe!r}")
+        object.__setattr__(self, "timeframe", timeframe)
+        frozen: list[tuple[str, object]] = []
+        for name, value in self.inputs:
+            frozen.extend(_reading_inputs({str(name): value}))
+        object.__setattr__(self, "inputs", tuple(frozen))
+        ids: list[str] = []
+        raw_ids = ((self.variant_ids,) if isinstance(self.variant_ids, str)
+                   else self.variant_ids)
+        for raw in raw_ids:
+            variant_id = str(raw).strip().upper()
+            read_variant_spec(variant_id)  # refuse an undeclared V## id
+            if variant_id not in ids:
+                ids.append(variant_id)
+        object.__setattr__(self, "variant_ids", tuple(ids))
+
+    @property
+    def source(self) -> str:
+        """The DB citation this family's reading travels with."""
+        return DAILY_BIAS_FAMILY_SPECS[self.family]["source"]
+
+    @property
+    def missing_fields(self) -> tuple[str, ...]:
+        """``bias`` is named as absent rather than filled with a neutral."""
+        return () if self.bias is not None else ("bias",)
+
+    def to_public(self) -> dict[str, object]:
+        """The JSON-safe record; no score/probability/confidence key exists."""
+        return {
+            "family": self.family,
+            "concept_family": DAILY_BIAS_FAMILY_SPECS[self.family]["family"],
+            "rule": self.rule,
+            "bias": "" if self.bias is None else serialize_bias(self.bias),
+            "as_of": int(self.as_of),
+            "timeframe": self.timeframe,
+            "caution": bool(self.caution),
+            "inputs": {name: value for name, value in self.inputs},
+            "source": self.source,
+            "variant_ids": list(self.variant_ids),
+            "missing_fields": list(self.missing_fields),
+        }
+
+
+# --------------------------------------------------------------------------- #
+# P1-06 family B -- previous-day OHLC mapping: DB-04 prior close, DB-05 outside
+# --------------------------------------------------------------------------- #
+def prior_close_bias(prior_close: object, prior_high: object, prior_low: object,
+                     *, bar: int, variant_ids: Iterable[str] = ()
+                     ) -> tuple[DailyBiasReading, Refusal | None]:
+    """DB-04: the prior close's position inside the prior day's range.
+
+    A close in the upper half (above the midpoint) is a bullish signal for
+    today; a close in the lower half is bearish (``doc_0227``, batch 050:87).
+    The corpus declares ``above`` and ``below`` only, so an exact midpoint
+    returns the evaluated reading with ``bias=None`` and a typed
+    ``NT_NO_BIAS`` refusal -- no tolerance band is invented.
+    """
+    close = float(prior_close)
+    high = float(prior_high)
+    low = float(prior_low)
+    for name, value in (("prior_close", close), ("prior_high", high),
+                        ("prior_low", low)):
+        if not np.isfinite(value):
+            raise ValueError(
+                f"the prior day's {name} must be finite, got {value!r}")
+    if high <= low:
+        raise ValueError(
+            f"the prior day's range is degenerate (high {high!r} <= low "
+            f"{low!r}); DB-04 has no midpoint to compare against")
+    midpoint = (high + low) / 2.0
+    inputs = {
+        "prior_close": close,
+        "prior_high": high,
+        "prior_low": low,
+        "prior_range_midpoint": midpoint,
+    }
+    if close == midpoint:
+        reading = DailyBiasReading(
+            "prior_close", "DB-04", None, bar, _reading_inputs(inputs),
+            variant_ids=variant_ids)
+        return reading, Refusal(
+            RefusalCode.NT_NO_BIAS,
+            detail=(f"the prior close {close!r} equals the prior range midpoint "
+                    f"{midpoint!r}; DB-04 declares only above/below, so there "
+                    "is no equality reading (no tolerance is invented)"))
+    bias = BiasDirection.BULL if close > midpoint else BiasDirection.BEAR
+    return DailyBiasReading("prior_close", "DB-04", bias, bar,
+                            _reading_inputs(inputs),
+                            variant_ids=variant_ids), None
+
+
+def outside_day_bias(prior_high: object, prior_low: object,
+                     current_high: object, current_low: object, *,
+                     bar: int, variant_ids: Iterable[str] = ()
+                     ) -> tuple[DailyBiasReading, Refusal | None]:
+    """DB-05: PDH **and** PDL both violated downgrades the day to caution.
+
+    "Violated" is read as the current day's range trading **through** the prior
+    extreme (``current_high > PDH`` / ``current_low < PDL``), which is the
+    outside-day geometry the concept names; the corpus states no close
+    requirement, so equality does not violate and no body/wick convention is
+    added here.  When both are violated the result is the caution state with
+    ``NT_OUTSIDE_DAY``; otherwise the family reports that DB-05 supplies **no**
+    direction (it is a downgrade rule, not a directional derivation).
+    """
+    high = float(prior_high)
+    low = float(prior_low)
+    cur_high = float(current_high)
+    cur_low = float(current_low)
+    for name, value in (("prior_high", high), ("prior_low", low),
+                        ("current_high", cur_high), ("current_low", cur_low)):
+        if not np.isfinite(value):
+            raise ValueError(
+                f"the outside-day input {name} must be finite, got {value!r}")
+    if high <= low:
+        raise ValueError(
+            f"the prior day's range is degenerate (high {high!r} <= low "
+            f"{low!r}); DB-05 has no extremes to violate")
+    if cur_high < cur_low:
+        raise ValueError(
+            f"the current day's range is invalid (high {cur_high!r} < low "
+            f"{cur_low!r})")
+    pdh_violated = cur_high > high
+    pdl_violated = cur_low < low
+    inputs = {
+        "prior_high": high,
+        "prior_low": low,
+        "current_high": cur_high,
+        "current_low": cur_low,
+        "pdh_violated": pdh_violated,
+        "pdl_violated": pdl_violated,
+    }
+    if pdh_violated and pdl_violated:
+        reading = DailyBiasReading(
+            "outside_day", "DB-05", None, bar, _reading_inputs(inputs),
+            caution=True, variant_ids=variant_ids)
+        return reading, Refusal(
+            RefusalCode.NT_OUTSIDE_DAY,
+            detail=(f"PDH {high!r} and PDL {low!r} are both violated by "
+                    f"[{cur_low!r}, {cur_high!r}]; DB-05 downgrades the day to "
+                    "caution (no trade) and supplies no direction"))
+    reading = DailyBiasReading(
+        "outside_day", "DB-05", None, bar, _reading_inputs(inputs),
+        caution=False, variant_ids=variant_ids)
+    return reading, Refusal(
+        RefusalCode.NT_NO_BIAS,
+        detail=("PDH and PDL are not both violated, so DB-05's downgrade does "
+                "not fire; the outside-day family carries no directional "
+                "reading of its own"))
+
+
+# --------------------------------------------------------------------------- #
+# P1-06 family C -- structure x location: DB-06's four-cell matrix
+# --------------------------------------------------------------------------- #
+def location_in_range(dr: DealingRange, price: object
+                      ) -> tuple[str | None, Refusal | None]:
+    """Whether ``price`` sits in the premium or discount half of ``dr``.
+
+    The divider is the dealing-range EQ.  ``premium_discount`` gives the two
+    halves and no equality state, and the at-EQ predicate is a separate declared
+    fork (§14.3 ``at-EQ``), so equality returns ``NT_AT_EQ`` and never a side.
+    """
+    if not isinstance(dr, DealingRange):
+        raise TypeError(
+            "DB-06 locates the current price in a DealingRange, got "
+            f"{type(dr).__name__}")
+    value = float(price)
+    if not np.isfinite(value):
+        raise ValueError(f"the located price must be finite, got {price!r}")
+    if dr.span <= 0:
+        raise ValueError(
+            "a degenerate dealing range has no premium/discount halves "
+            f"(high {dr.high!r} <= low {dr.low!r})")
+    if value == dr.eq:
+        return None, Refusal(
+            RefusalCode.NT_AT_EQ,
+            detail=(f"price {value!r} equals the dealing-range EQ {dr.eq!r}; "
+                    "DB-06 admits only premium/discount and the at-EQ predicate "
+                    "is a separate declared fork (no side is picked)"))
+    return ("premium" if value > dr.eq else "discount"), None
+
+
+def structure_location_bias(shift: object, location: str, *, bar: int,
+                            price: object | None = None,
+                            dealing_range: DealingRange | None = None,
+                            variant_ids: Iterable[str] = ()
+                            ) -> tuple[DailyBiasReading, Refusal | None]:
+    """DB-06: ``shift_down AND premium => bearish``; ``shift_up AND discount =>
+    bullish``; every other cell is "no bias, wait".
+
+    ``shift`` is the most recent confirmed structural shift of the daily tier:
+    ``BiasDirection.BEAR`` is shift_down and ``BiasDirection.BULL`` is shift_up;
+    ``None`` means no confirmed shift is known yet.  The shift *detector* is
+    P1-07's (MSS family V07, ST-06 label); this family consumes its direction
+    and never re-derives a shift from a base-timeframe swing.
+    """
+    if shift is None:
+        shift_direction = None
+    else:
+        shift_direction = parse_bias(shift)
+        if shift_direction not in (BiasDirection.BULL, BiasDirection.BEAR):
+            raise ValueError(
+                "a structural shift is up or down, not "
+                f"{shift_direction.value!r} (DB-06)")
+    side = str(location).strip().lower()
+    if side not in ("premium", "discount"):
+        raise ValueError(
+            f"DB-06 locates price in premium or discount, got {location!r}")
+    inputs: dict[str, object] = {
+        "shift": ("none" if shift_direction is None
+                  else "up" if shift_direction is BiasDirection.BULL else "down"),
+        "location": side,
+    }
+    if price is not None:
+        inputs["price"] = float(price)
+    if dealing_range is not None:
+        if not isinstance(dealing_range, DealingRange):
+            raise TypeError("dealing_range must be a DealingRange")
+        inputs["dealing_range_high"] = dealing_range.high
+        inputs["dealing_range_low"] = dealing_range.low
+        inputs["dealing_range_eq"] = dealing_range.eq
+    reading = DailyBiasReading(
+        "structure_location", "DB-06", None, bar, _reading_inputs(inputs),
+        variant_ids=variant_ids)
+    if shift_direction is None:
+        return reading, Refusal(
+            RefusalCode.NT_NO_BIAS,
+            detail=("no confirmed structural shift is known at the daily tier; "
+                    "DB-06 has no bias, wait"))
+    bearish = (shift_direction is BiasDirection.BEAR and side == "premium")
+    bullish = (shift_direction is BiasDirection.BULL and side == "discount")
+    if not (bearish or bullish):
+        return reading, Refusal(
+            RefusalCode.NT_NO_BIAS,
+            detail=(f"shift_{'down' if shift_direction is BiasDirection.BEAR else 'up'} "
+                    f"with price in {side} is not one of DB-06's two tradable "
+                    "cells; no bias, wait"))
+    bias = BiasDirection.BEAR if bearish else BiasDirection.BULL
+    return replace(reading, bias=bias), None
+
+
+def structure_location_from_range(shift: object, dr: DealingRange,
+                                  price: object, *, bar: int,
+                                  variant_ids: Iterable[str] = ()
+                                  ) -> tuple[DailyBiasReading | None,
+                                             Refusal | None]:
+    """DB-06 over a :class:`DealingRange`: locate the price, then read the cell.
+
+    A missing range is the caller's to report (it comes with a
+    :class:`RangeDiagnostic`); this function only refuses the at-EQ case, where
+    the range exists but has no premium/discount reading.
+    """
+    location, refusal = location_in_range(dr, price)
+    if location is None:
+        return None, refusal
+    return structure_location_bias(
+        shift, location, bar=bar, price=price, dealing_range=dr,
+        variant_ids=variant_ids)
+
+
+# --------------------------------------------------------------------------- #
+# P1-06 family G -- DB-07 last 1D MSS lock
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class DailyMSSEvent:
+    """One declared **1D MSS** event consumed by the DB-07 lock.
+
+    Only an MSS on the daily timeframe may move the lock: a BOS is a
+    continuation, a CHoCH is a different label (ST-08), and a lower-timeframe
+    break is explicitly not a daily-bias revision (``daily_bias`` R28: "a
+    1-minute bearish MSS does not automatically mean the daily trend is now
+    bearish").  The detector is P1-07's; this type carries its output.
+    """
+
+    direction: BiasDirection
+    bar: int
+    kind: str = "MSS"
+    timeframe: str = "1D"
+    source: str = ""
+
+    def __post_init__(self) -> None:
+        direction = parse_bias(self.direction)
+        if direction not in (BiasDirection.BULL, BiasDirection.BEAR):
+            raise ValueError(
+                "a 1D MSS is bullish or bearish, not "
+                f"{direction.value!r} (DB-07)")
+        object.__setattr__(self, "direction", direction)
+        bar = int(self.bar)
+        if bar < 0:
+            raise ValueError(
+                f"a 1D MSS event needs a bar index >= 0, got {self.bar!r}")
+        object.__setattr__(self, "bar", bar)
+        kind = str(self.kind).strip().upper()
+        if kind != "MSS":
+            raise ValueError(
+                f"DB-07 locks on an MSS, not {self.kind!r}; a BOS continues the "
+                "trend and a CHoCH is a separate label (ST-08)")
+        object.__setattr__(self, "kind", kind)
+        timeframe = str(self.timeframe).strip().upper()
+        if timeframe != "1D":
+            raise ValueError(
+                "DB-07 is the **1D** MSS lock; a lower-timeframe MSS cannot "
+                f"revision the daily bias (got {self.timeframe!r})")
+        object.__setattr__(self, "timeframe", timeframe)
+        object.__setattr__(self, "source", str(self.source).strip())
+
+
+class LastDailyMSSLock:
+    """DB-07: bias = the most recent 1D MSS direction, locked until it flips.
+
+    The lock is a small state machine, not a recomputation: each MSS either
+    leaves the held direction unchanged (a same-direction print) or flips it (an
+    opposite print), and an event that arrives before the held one is refused
+    (CB-07: a state cannot be revised by something already known earlier).  It
+    never infers a direction from a price, a wick or a lower-timeframe break.
+    """
+
+    __slots__ = ("_events",)
+
+    def __init__(self, events: Iterable[DailyMSSEvent] = ()) -> None:
+        held: tuple[DailyMSSEvent, ...] = ()
+        for event in events:
+            if not isinstance(event, DailyMSSEvent):
+                raise TypeError(
+                    "a daily MSS lock holds DailyMSSEvent objects, got "
+                    f"{type(event).__name__}")
+            held = self._apply(held, event)
+        self._events = held
+
+    @staticmethod
+    def _apply(held: tuple[DailyMSSEvent, ...],
+               event: DailyMSSEvent) -> tuple[DailyMSSEvent, ...]:
+        if held:
+            last = held[-1]
+            if int(event.bar) < int(last.bar):
+                raise ValueError(
+                    f"a 1D MSS at daily bar {event.bar} cannot follow one at "
+                    f"{last.bar}; the lock moves forward only (CB-07)")
+            if int(event.bar) == int(last.bar):
+                if event.direction is not last.direction:
+                    raise ValueError(
+                        f"two opposite 1D MSS events at daily bar {event.bar}; "
+                        "the lock cannot hold both (event identity)")
+                return held
+        return held + (event,)
+
+    @property
+    def events(self) -> tuple[DailyMSSEvent, ...]:
+        return tuple(self._events)
+
+    @property
+    def direction(self) -> BiasDirection | None:
+        """The held direction, or ``None`` before the first 1D MSS."""
+        return None if not self._events else self._events[-1].direction
+
+    def advance(self, event: DailyMSSEvent) -> "LastDailyMSSLock":
+        """Return a new lock with ``event`` applied (never mutates ``self``)."""
+        if not isinstance(event, DailyMSSEvent):
+            raise TypeError("a daily MSS lock advances by DailyMSSEvent")
+        return LastDailyMSSLock(self._events + (event,))
+
+    def read(self, bar: int, *, as_of: int | None = None,
+             variant_ids: Iterable[str] = ()
+             ) -> tuple[DailyBiasReading | None, Refusal | None]:
+        """The held direction at daily bar ``bar``, or ``NT_NO_BIAS``.
+
+        Only events at or before ``bar`` are visible, so a lock built from a
+        full event history still cannot read an MSS that has not printed
+        (CB-07).  ``as_of`` stamps the reading with the base bar it is known at;
+        it defaults to ``bar`` for a daily-frame caller.
+        """
+        moment = int(bar)
+        if moment < 0:
+            raise ValueError(f"a daily MSS read needs a bar index >= 0, got {bar!r}")
+        visible = [event for event in self._events if int(event.bar) <= moment]
+        if not visible:
+            return None, Refusal(
+                RefusalCode.NT_NO_BIAS,
+                detail=(f"no 1D MSS has printed at or before daily bar "
+                        f"{moment}; DB-07 has no reading until one prints"))
+        event = visible[-1]
+        known_at = moment if as_of is None else int(as_of)
+        reading = DailyBiasReading(
+            "last_1d_mss", "DB-07", event.direction, known_at,
+            _reading_inputs({
+                "mss_bar": event.bar,
+                "mss_direction": ("bullish"
+                                  if event.direction is BiasDirection.BULL
+                                  else "bearish"),
+                "mss_timeframe": event.timeframe,
+            }),
+            variant_ids=variant_ids)
+        return reading, None
+
+    def to_public(self) -> dict[str, object]:
+        """The lock's event history and held direction (audit record)."""
+        return {
+            "rule": "DB-07",
+            "direction": ("" if self.direction is None
+                          else serialize_bias(self.direction)),
+            "events": [
+                {"direction": serialize_bias(event.direction),
+                 "bar": int(event.bar), "kind": event.kind,
+                 "timeframe": event.timeframe, "source": event.source}
+                for event in self._events
+            ],
+        }
+
+
+def last_1d_mss_bias(events: Iterable[DailyMSSEvent], bar: int, *,
+                     as_of: int | None = None,
+                     variant_ids: Iterable[str] = ()
+                     ) -> tuple[DailyBiasReading | None, Refusal | None]:
+    """DB-07 for one bar, built from the declared 1D MSS event history."""
+    return LastDailyMSSLock(events).read(
+        bar, as_of=as_of, variant_ids=variant_ids)
+
+
+# --------------------------------------------------------------------------- #
+# P1-06 -- the no-averaging guard across families
+# --------------------------------------------------------------------------- #
+def reconcile_daily_bias(readings: Iterable[DailyBiasReading],
+                         *, bar: int | None = None
+                         ) -> tuple[DailyBiasReading | None, Refusal | None]:
+    """Accept exactly one family's reading; refuse any multi-family composite.
+
+    ``daily_bias`` C4: the families use different inputs, can point opposite
+    ways on the same bar, and "do not average into a composite".  A run
+    declares one family, so more than one evaluated family is a
+    ``NT_BIAS_CONFLICT`` whether the directions agree or not -- returning an
+    agreed-on value would still hide a second declaration.  No score, vote or
+    probability is produced; the only accepted result is one family's reading.
+    """
+    collected: dict[str, DailyBiasReading] = {}
+    for reading in readings:
+        if reading is None:
+            continue
+        if not isinstance(reading, DailyBiasReading):
+            raise TypeError(
+                "reconcile_daily_bias accepts DailyBiasReading objects, got "
+                f"{type(reading).__name__}")
+        if reading.family in collected:
+            raise ValueError(
+                f"duplicate daily-bias family {reading.family!r}; one reading "
+                "per family is expected")
+        collected[reading.family] = reading
+    if not collected:
+        return None, Refusal(
+            RefusalCode.NT_NO_BIAS,
+            detail="no daily-bias family produced a reading")
+    if len(collected) == 1:
+        return next(iter(collected.values())), None
+    families = sorted(collected)
+    directions = {
+        reading.bias for reading in collected.values()
+        if reading.bias is not None}
+    if len(directions) == 1:
+        agreement = (f"they agree on {serialize_bias(next(iter(directions)))}"
+                     if directions else "neither states a direction")
+        detail = (
+            f"families {families} were evaluated and {agreement}; a run "
+            "declares exactly one daily-bias family and the corpus forbids "
+            "averaging them (daily_bias C4), so no composite is produced")
+    else:
+        pairs = ", ".join(
+            f"{name}={serialize_bias(reading.bias) if reading.bias is not None else 'none'}"
+            for name, reading in sorted(collected.items()))
+        detail = (
+            f"families {families} disagree ({pairs}); a run declares exactly "
+            "one daily-bias family and the corpus forbids averaging them "
+            "(daily_bias C4)")
+    return None, Refusal(RefusalCode.NT_BIAS_CONFLICT, detail=detail)
+
+
 def dealing_range_state(swings: Iterable, idx: int,
                         lookback_bars: int = RANGE_STALENESS_BARS
                         ) -> tuple[DealingRange | None, RangeDiagnostic | None]:

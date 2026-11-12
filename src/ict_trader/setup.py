@@ -31,13 +31,15 @@ import numpy as np
 import pandas as pd
 
 from .cisd import CISD
-from .concepts import (ICTConfig, PIVOT_LEFT, analyze, detect_fvgs, find_pivots,
-                       load_csv)
+from .concepts import (ICTConfig, PIVOT_LEFT, analyze, detect_fvgs,
+                       detect_structure, find_pivots, load_csv)
 from .config import config_hash as _config_hash
 from .variants import Refusal, RefusalCode, VariantConfig, VariantUndeclared
 from .context import (BiasDirection, BiasState, BiasStateStore,
+                      DAILY_BIAS_FAMILIES, DAILY_BIAS_FAMILY_SPECS,
                       DAILY_POLARITY_SOURCES,
-                      DAY_BOUNDARY_OPTIONS, DayBoundary,
+                      DAY_BOUNDARY_OPTIONS, DailyBiasReading, DailyMSSEvent,
+                      DayBoundary, LastDailyMSSLock,
                       DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
                       MidnightOpen, SwingIndex, WEEK_OPEN_OPTIONS,
                       WEEKLY_ANCHOR_OPTIONS, WEEKLY_ANCHOR_SOURCES,
@@ -47,12 +49,13 @@ from .context import (BiasDirection, BiasState, BiasStateStore,
                       candle2_closure, candle3_closure, daily_open_polarity,
                       dealing_range, declare_week_open, in_session,
                       midnight_open_from_anchor, neutral_blocks, neutral_weight,
-                      open_vs_daily_ce, ote_from_signal, parse_bias,
-                      parse_day_clock, resolve_daily_polarity,
+                      open_vs_daily_ce, ote_from_signal, outside_day_bias,
+                      parse_bias, parse_daily_bias_family, parse_day_clock,
+                      prior_close_bias, resolve_daily_polarity,
                       resolve_day_boundary, resolve_weekly_anchor,
-                      serialize_bias, validate_bias_vocabulary,
-                      validate_neutral_handling, weekly_anchor_bias,
-                      weekly_bias_gate)
+                      serialize_bias, structure_location_from_range,
+                      validate_bias_vocabulary, validate_neutral_handling,
+                      weekly_anchor_bias, weekly_bias_gate)
 from .pd_arrays import count_path_liquidity, near_arrays
 from .strategy import (BE_MODES, DEFAULT_COMMISSION_BPS, DEFAULT_ENTRY_MODE,
                        DEFAULT_FIXED_R, DEFAULT_MAX_TRADES_PER_DAY,
@@ -324,6 +327,15 @@ class SetupConfig:
     #: refuses with ``NT_VARIANT_UNDECLARED`` / ``ValueError`` rather than
     #: picking a weekly anchor or a week boundary for the run.
     weekly_gate: bool = False
+    #: P1-06: the one declared daily-bias family (DB-04..DB-07).  §14.2 has no
+    #: V## row for the family, so it is a declared run input with no default:
+    #: the families use different inputs, disagree on the same bar, and may not
+    #: be averaged (daily_bias C4).  ``None`` means no family is computed.
+    daily_bias_family: str | None = None
+    #: P1-06: gate directional setups on the declared family's reading.  ``True``
+    #: requires :attr:`daily_bias_family` and a declared V04 day boundary (every
+    #: DB-04..DB-07 family is day-scoped; GW-01 refuses an implicit day).
+    daily_bias_gate: bool = False
 
     def read_variant(self, variant_id: str) -> str:
         """Read one declared fork through the single register (A7).
@@ -377,6 +389,10 @@ class SetupConfig:
             extra["week_open_clock"] = self.week_open_clock
         if self.weekly_gate:
             extra["weekly_gate"] = True
+        if self.daily_bias_family is not None:
+            extra["daily_bias_family"] = self.daily_bias_family
+        if self.daily_bias_gate:
+            extra["daily_bias_gate"] = True
         return _config_hash(
             self.variant_config,
             bias_primitive=self.bias_primitive,
@@ -447,6 +463,24 @@ class SetupConfig:
         # read, and it is never silently replaced by a default week.
         if self.week_open_clock is not None:
             declare_week_open(self.week_open_clock)
+        # P1-06: exactly one daily-bias family may be declared.  It is never
+        # combined with the repo Candle-2/3 filter: the corpus's families
+        # disagree on the same bar and may not be averaged (daily_bias C4).
+        if self.daily_bias_family is not None:
+            object.__setattr__(
+                self, "daily_bias_family",
+                parse_daily_bias_family(self.daily_bias_family))
+        if self.daily_bias_gate and self.daily_bias_family is None:
+            raise ValueError(
+                "daily_bias_gate requires a declared daily_bias_family; declare "
+                f"one of {DAILY_BIAS_FAMILIES}")
+        if (self.daily_bias_family is not None
+                and self.daily_bias_filter != "none"):
+            raise ValueError(
+                "two daily-bias rules are declared: daily_bias_family="
+                f"{self.daily_bias_family!r} and daily_bias_filter="
+                f"{self.daily_bias_filter!r}.  The corpus's daily-bias families "
+                "may not be combined or averaged (daily_bias C4); declare one")
         resolve_ladder_mode(self.t1_at_r, self.t1_at_eq)
         resolve_be_mode(self.breakeven_at_r, self.t1_move_be,
                         self.ladder_mode_of() != "off")
@@ -919,6 +953,20 @@ class _SetupPrecompute:
         self.week_open = week_open
         self.weekly = (None if week_open is None
                        else WeeklyIndex(df, week_open, market=cfg.market))
+        # P1-06: the day-scoped families (DB-04..DB-07) read one 1D frame, one
+        # 1D swing index and one 1D MSS event history.  They are built only when
+        # a family is declared, so an undeclared run pays nothing.  The 1D frame
+        # is the declared V04 day when one exists; without V04 the legacy 1D
+        # aggregation is used and every emitted setup already labels the
+        # boundary as undeclared (P1-03).
+        self.daily_family_frame: pd.DataFrame | None = None
+        self.daily_family_swings: SwingIndex | None = None
+        self.daily_family_events: list = []
+        self.daily_family_bar_at = np.full(self.n, -1, dtype=np.int64)
+        self.daily_family_starts = np.zeros(self.n, dtype=np.int64)
+        self.daily_mss_lock = LastDailyMSSLock()
+        if cfg.daily_bias_family is not None:
+            self._build_daily_family(df, daily, cfg, day_boundary)
 
     def bars_ok(self, t: int) -> bool:
         """NaN gate: HTF 1D indicators, 4H indicators and 15m Ichimoku present."""
@@ -999,6 +1047,160 @@ class _SetupPrecompute:
                         f"undeclared (declare one of {WEEK_OPEN_OPTIONS})"))
         return self.weekly.state(
             int(t), variant_ids=self.cfg.variant_config.declared_ids)
+
+    # -- P1-06: the declared daily-bias family -------------------------- #
+    def _build_daily_family(self, df: pd.DataFrame, daily,
+                            cfg: "SetupConfig",
+                            day_boundary: DayBoundary | None) -> None:
+        """Build the one 1D frame/swing/event history the families read.
+
+        The frame is the same completed-1D-bucket source the rest of the setup
+        uses (``_bias_structure_frame`` for the 1D tier), so the daily-bias
+        family, the indicator tier and the day boundary can never disagree on
+        what a day is (GW-01).  MSS/BOS labels come from P1-07's
+        :func:`ict_trader.concepts.detect_structure`; the ST-06 label is used
+        because V07 is a BLOCK fork and this layer must not choose a family.
+        """
+        frame = _bias_structure_frame(
+            df, daily, DAILY_BIAS_FILTER_TF, cfg.market, day_boundary)
+        if frame is None or len(frame) < 2:
+            return
+        frame = frame.reset_index(drop=True)
+        daily_ns = _time_ns(frame["date"])
+        order = np.argsort(daily_ns, kind="stable")
+        if not np.array_equal(order, np.arange(len(order))):
+            frame = frame.iloc[order].reset_index(drop=True)
+            daily_ns = daily_ns[order]
+        base_ns = _time_ns(df["date"])
+        pivots = find_pivots(frame, _BIAS_PIVOT_LEFT, 1)
+        events, _ = detect_structure(frame, pivots)
+        self.daily_family_frame = frame
+        self.daily_family_swings = SwingIndex(pivots)
+        self.daily_family_events = list(events)
+        self.daily_family_bar_at = np.searchsorted(
+            daily_ns, base_ns, side="right") - 1
+        # The first base bar of the day each base bar belongs to.  The last
+        # *closed* daily bar's label is the current day's start; with a declared
+        # V04 boundary the authoritative anchor bars are used instead.
+        starts = np.zeros(self.n, dtype=np.int64)
+        indices = self.daily_family_bar_at
+        valid = indices >= 0
+        if valid.any():
+            labels = np.where(valid, daily_ns[np.clip(indices, 0, None)],
+                              base_ns[0])
+            starts = np.searchsorted(base_ns, labels, side="left")
+        if self.day_anchor_bar is not None:
+            starts = np.asarray(self.day_anchor_bar, dtype=np.int64)
+        self.daily_family_starts = starts
+        mss_events: list[DailyMSSEvent] = []
+        for event in events:
+            if str(getattr(event, "kind", "")) != "MSS":
+                continue  # BOS is a continuation; CHoCH is a different label
+            if not bool(getattr(event, "confirmed", True)):
+                continue
+            mss_events.append(DailyMSSEvent(
+                direction=parse_bias(event.direction), bar=int(event.index),
+                kind="MSS", timeframe="1D",
+                source=f"ST-06 {str(event.direction)} MSS"))
+        self.daily_mss_lock = LastDailyMSSLock(mss_events)
+
+    def _daily_shift(self, daily_bar: int):
+        """The most recent confirmed 1D shift direction (MSS or CHoCH).
+
+        A BOS is a continuation, not a shift, and an unconfirmed CHoCH is not
+        admitted (ST-08).  Scanning stops at ``daily_bar`` so a future event can
+        never set the current reading (CB-07).
+        """
+        limit = int(daily_bar)
+        for event in reversed(self.daily_family_events):
+            if int(event.index) > limit:
+                continue
+            if str(getattr(event, "kind", "")) == "BOS":
+                continue
+            checker = getattr(event, "is_confirmed", None)
+            if callable(checker) and not checker(limit):
+                continue
+            return parse_bias(event.direction)
+        return None
+
+    def daily_bias(self, t: int
+                   ) -> tuple[DailyBiasReading | None, Refusal | None]:
+        """The declared daily-bias family's reading at base bar ``t`` (P1-06).
+
+        One family is evaluated, never a blend: DB-04/DB-05 read the last
+        completed daily bar, DB-06 combines the 1D shift with the current
+        price's premium/discount location in the 1D dealing range, and DB-07
+        reads the 1D MSS lock.  Every path is look-ahead safe: only daily bars
+        and events known at ``t`` are visible (CB-07).
+        """
+        family = self.cfg.daily_bias_family
+        if family is None:
+            return None, None
+        t = int(t)
+        if t < 0 or t >= self.n:
+            return None, Refusal(
+                RefusalCode.NT_DATA_MISSING,
+                detail=f"bar {t} is outside the {self.n}-bar frame")
+        if self.daily_family_frame is None:
+            return None, Refusal(
+                RefusalCode.NT_DATA_MISSING,
+                detail=("no completed daily bar is available for the declared "
+                        f"daily-bias family {family!r} (DB-04..DB-07 are "
+                        "day-scoped)"))
+        daily_bar = int(self.daily_family_bar_at[t])
+        if daily_bar < 0 or daily_bar >= len(self.daily_family_frame):
+            return None, Refusal(
+                RefusalCode.NT_DATA_MISSING,
+                detail=(f"no completed daily bar is known at base bar {t}; the "
+                        "prior day required by the declared family is absent"))
+        variant_ids = self.cfg.variant_config.declared_ids
+        prior = self.daily_family_frame.iloc[daily_bar]
+        if family in {"prior_close", "outside_day"}:
+            # A flat day has no midpoint and no extremes to violate.  That is a
+            # data condition, not an undeclared rule: refuse with a code rather
+            # than raising out of the whole setup run.
+            if float(prior["high"]) <= float(prior["low"]):
+                return None, Refusal(
+                    RefusalCode.NT_DATA_MISSING,
+                    detail=(f"the prior daily bar at {daily_bar} is degenerate "
+                            f"(high {float(prior['high'])!r} <= low "
+                            f"{float(prior['low'])!r}); the declared family "
+                            f"{family!r} has no range to read"))
+        if family == "prior_close":
+            return prior_close_bias(
+                float(prior["close"]), float(prior["high"]),
+                float(prior["low"]), bar=t, variant_ids=variant_ids)
+        if family == "outside_day":
+            start = min(max(int(self.daily_family_starts[t]), 0), t)
+            current_high = float(np.max(self.high[start:t + 1]))
+            current_low = float(np.min(self.low[start:t + 1]))
+            return outside_day_bias(
+                float(prior["high"]), float(prior["low"]), current_high,
+                current_low, bar=t, variant_ids=variant_ids)
+        if family == "structure_location":
+            if self.daily_family_swings is None:
+                return None, Refusal(
+                    RefusalCode.NT_DATA_MISSING,
+                    detail="no 1D swing index is available for DB-06")
+            dealing_range_value, diagnostic = (
+                self.daily_family_swings.dealing_range_state(daily_bar))
+            if dealing_range_value is None:
+                code = RefusalCode.NT_DATA_MISSING
+                reason = "no structural dealing range on the 1D frame"
+                if diagnostic is not None:
+                    try:
+                        code = RefusalCode(str(diagnostic.code))
+                    except ValueError:
+                        pass
+                    reason = diagnostic.reason
+                return None, Refusal(code, detail=reason)
+            return structure_location_from_range(
+                self._daily_shift(daily_bar), dealing_range_value,
+                float(self.close[t]), bar=t, variant_ids=variant_ids)
+        # DB-07: the 1D MSS lock.  ``daily_bar`` is the 1D index; ``as_of`` is
+        # the base bar the reading is known at.
+        return self.daily_mss_lock.read(
+            daily_bar, as_of=t, variant_ids=variant_ids)
 
     def bias_state(self, t: int) -> BiasState:
         """The one :class:`BiasState` for base bar ``t`` (P1-02).
@@ -1354,6 +1556,15 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     than derived from a ``price > ce`` boolean (C5).  ``midnight_open_gate``
     turns the declared polarity into a directional gate and refuses an
     undeclared V04 or V05.
+
+    P1-06: ``cfg.daily_bias_family`` declares exactly one of the four
+    computable daily-bias families (DB-04 prior close, DB-05 outside day,
+    DB-06 structure x location, DB-07 last 1D MSS lock).  The reading is
+    recorded as evidence on every emitted setup; ``daily_bias_gate`` turns it
+    into a directional gate and refuses a no-reading day with the family's own
+    §12 code (``NT_NO_BIAS`` / ``NT_OUTSIDE_DAY`` / ``NT_AT_EQ`` /
+    ``NT_DATA_MISSING``), never with a fabricated direction.  The families are
+    not blended or scored (daily_bias C4).
     """
     cfg = apply_quality_profile(cfg)
     # P1-03: resolve the one declared day boundary before any bar is read.  V04
@@ -1421,6 +1632,21 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
         raise ValueError(
             "weekly_gate requires the declared week-open clock; declare one of "
             f"{WEEK_OPEN_OPTIONS} (SN-W11/WB-06)")
+    # P1-06: exactly one daily-bias family (DB-04..DB-07).  The family is
+    # day-scoped, so the gate requires the declared V04 boundary rather than
+    # reading the legacy 1D aggregation as if it were the model's day (GW-01).
+    daily_family_value: str | None = (
+        None if cfg.daily_bias_family is None
+        else parse_daily_bias_family(cfg.daily_bias_family))
+    if cfg.daily_bias_gate and daily_family_value is None:
+        raise ValueError(
+            "daily_bias_gate requires a declared daily_bias_family; declare one "
+            f"of {DAILY_BIAS_FAMILIES}")
+    if cfg.daily_bias_gate and day_boundary is None:
+        raise VariantUndeclared(
+            "V04",
+            "daily_bias_gate reads a day-scoped family (prior day / 1D MSS), "
+            "so it requires the declared day boundary (GW-01); V04 is unset")
     if cfg.origin_filter == "fvg" and cfg.require_sweep:
         cfg = replace(cfg, require_sweep=False)
     spec = _stack_spec(cfg)
@@ -1445,6 +1671,40 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
         if cfg.daily_bias_filter in DAILY_BIAS_FILTERS[1:] and (
                 bias_dir is None or parse_bias(bias_dir) is not parse_bias(c.direction)):
             continue
+        # P1-06: one declared daily-bias family is evaluated per bar; there is
+        # no composite score and no second family to average with (C4).  With
+        # the gate off the reading is evidence only, and a no-reading refusal is
+        # recorded rather than silently treated as agreement.
+        daily_family_reading: DailyBiasReading | None = None
+        daily_family_refusal: Refusal | None = None
+        if daily_family_value is not None:
+            daily_family_reading, daily_family_refusal = pre.daily_bias(t)
+        if cfg.daily_bias_gate:
+            if daily_family_reading is None or daily_family_reading.bias is None:
+                refusal = daily_family_refusal
+                _record_refusal(
+                    refusals,
+                    code=(RefusalCode.NT_NO_BIAS.value if refusal is None
+                          else refusal.code.value),
+                    direction=c.direction, signal_bar=int(t),
+                    gate="daily_bias_family",
+                    daily_bias_family=daily_family_value,
+                    detail=("" if refusal is None else refusal.detail),
+                )
+                continue
+            if daily_family_reading.bias is not parse_bias(c.direction):
+                _record_refusal(
+                    refusals, code=RefusalCode.NT_BIAS_GATE.value,
+                    direction=c.direction, signal_bar=int(t),
+                    gate="daily_bias_family",
+                    daily_bias_family=daily_family_value,
+                    daily_bias_family_rule=daily_family_reading.rule,
+                    daily_bias_family_bias=serialize_bias(
+                        daily_family_reading.bias),
+                    detail=("the declared daily-bias family's reading does not "
+                            "match the setup direction"),
+                )
+                continue
         # P1-04: the midnight open is a price object; DB-01/DB-02 (V05) and
         # DB-03 are two different comparisons.  The gate compares this bar's
         # close -- the price known at ``t`` -- with the opening price, and the
@@ -1766,6 +2026,28 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 "daily_bias_filter": cfg.daily_bias_filter,
                 "daily_bias_filter_label": DAILY_BIAS_FILTER_LABEL,
                 "daily_bias_tf": DAILY_BIAS_FILTER_TF,
+                # P1-06: the one declared daily-bias family (DB-04..DB-07), its
+                # evaluated reading and any no-reading refusal.  ``None``/empty
+                # means no family was declared; a second family can never be
+                # present -- the corpus forbids averaging them (C4).
+                "daily_bias_family": daily_family_value,
+                "daily_bias_family_declared": daily_family_value is not None,
+                "daily_bias_family_gate_enabled": bool(cfg.daily_bias_gate),
+                "daily_bias_family_timeframe": "1D",
+                "daily_bias_family_day_boundary_declared": day_boundary is not None,
+                "daily_bias_family_source": (
+                    None if daily_family_value is None
+                    else DAILY_BIAS_FAMILY_SPECS[daily_family_value]["source"]),
+                "daily_bias_family_rule": (
+                    None if daily_family_reading is None
+                    else daily_family_reading.rule),
+                "daily_bias_family_reading": (
+                    None if daily_family_reading is None
+                    else daily_family_reading.to_public()),
+                "daily_bias_family_refusal": (
+                    None if daily_family_refusal is None
+                    else {"code": daily_family_refusal.code.value,
+                          "detail": daily_family_refusal.detail}),
                 "htf_structure": htf_struct,
                 # P1-02: the state object's declared fields travel with the
                 # setup, so a consumer reads ``as_of``/``variant_ids`` instead
