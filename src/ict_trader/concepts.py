@@ -194,6 +194,30 @@ class Gap:
 
 
 @dataclass
+class DealingRange:
+    """The canonical dealing-range object (one construction, one type).
+
+    ``known_at`` is the bar where the range becomes knowable: both structural
+    anchors must have confirmed, so it is the later confirmation (CB-07).  A
+    fixed-count fallback is still built for the current overlay path and is
+    flagged by ``fallback``; separating that object type from a structural
+    range is P0-16, which can now change this one constructor.
+    """
+
+    top: float
+    bottom: float
+    known_at: int
+    left: int
+    right: int
+    fallback: bool = False
+
+    @property
+    def ce(self) -> float:
+        """Equilibrium: the 50% of the range (range CE, not a gap CE)."""
+        return (float(self.top) + float(self.bottom)) / 2.0
+
+
+@dataclass
 class FibLevel:
     ratio: float
     price: float
@@ -214,6 +238,7 @@ class ICTResult:
     trend: pd.Series | None = None
     cisds: list[CISD] = field(default_factory=list)
     htf_cisds: list[CISD] = field(default_factory=list)
+    dealing_range: DealingRange | None = None
     sessions: list[SessionLevel] = field(default_factory=list)
     smts: list[SMT] = field(default_factory=list)
     key_levels: list[KeyLevel] = field(default_factory=list)
@@ -339,6 +364,63 @@ def detect_structure(df: pd.DataFrame, swings: list[Swing]) -> tuple[list[Struct
             last_broken_high = None
         trend_series[t] = trend
     return events, pd.Series(trend_series, index=df.index, name="trend")
+
+
+def detect_dealing_range(df: pd.DataFrame, swings: list[Swing] | None = None,
+                         *, swing_len: int = 5,
+                         fallback_bars: int = 40) -> DealingRange | None:
+    """Build the canonical dealing range from the last structural swing pair.
+
+    This is the **only** range constructor.  ``known_at`` is the later
+    confirmation of the two anchors (CB-07), never the earlier one.  When the
+    frame has no usable structural pair the fixed-count fallback is returned
+    with ``fallback=True``, so the caller can tell the two objects apart
+    (DR-00; splitting them is P0-16).
+    """
+    n = len(df)
+    if n < 20:
+        return None
+    if swings is None:
+        swings = build_zigzag(find_pivots(df, swing_len, 1))
+    last_t = n - 1
+    highs = [s for s in swings
+             if s.kind == "H" and int(getattr(s, "confirmed_at", s.index)) <= last_t]
+    lows = [s for s in swings
+            if s.kind == "L" and int(getattr(s, "confirmed_at", s.index)) <= last_t]
+    if highs and lows:
+        h, l = highs[-1], lows[-1]
+        known_at = max(int(getattr(h, "confirmed_at", h.index)),
+                       int(getattr(l, "confirmed_at", l.index)))
+        return DealingRange(max(float(h.price), float(l.price)),
+                            min(float(h.price), float(l.price)), known_at,
+                            min(int(h.index), int(l.index)), last_t, False)
+
+    low = df["low"].to_numpy(float)
+    high = df["high"].to_numpy(float)
+    lo = int(min(range(max(0, n - fallback_bars), n), key=lambda i: low[i]))
+    hi = int(max(range(max(0, n - fallback_bars), n), key=lambda i: high[i]))
+    return DealingRange(float(high[hi]), float(low[lo]), min(lo, hi),
+                        min(lo, hi), last_t, True)
+
+
+def cisd_config(cfg: ICTConfig) -> CISDConfig:
+    """Map the one ``ICTConfig`` onto the canonical CISD configuration.
+
+    Both ``analyze`` and the realtime array lifecycle read this function, so a
+    CISD parameter is never copied into a second module (A7).
+    """
+    return CISDConfig(
+        enabled=cfg.show_cisd,
+        min_grade=cfg.cisd_min_grade,
+        max_per_side=(100000 if cfg.cisd_all else cfg.cisd_max),
+        extend_bars=cfg.cisd_extend,
+        require_origin=cfg.cisd_require_origin,
+        min_displacement_atr=cfg.cisd_min_displacement_atr,
+        sweep_window=cfg.sweep_window,
+        sweep_reclaim_bars=cfg.sweep_reclaim_bars,
+        lookback=500,
+        hide_invalid=not cfg.cisd_all,
+    )
 
 
 def detect_fvgs(df: pd.DataFrame, cfg: ICTConfig) -> list[FVG]:
@@ -688,22 +770,13 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
 
     cisds: list[CISD] = []
     if cfg.show_cisd:
-        cisd_cfg = CISDConfig(
-            enabled=True,
-            min_grade=cfg.cisd_min_grade,
-            max_per_side=(100000 if cfg.cisd_all else cfg.cisd_max),
-            extend_bars=cfg.cisd_extend,
-            require_origin=cfg.cisd_require_origin,
-            min_displacement_atr=cfg.cisd_min_displacement_atr,
-            sweep_window=cfg.sweep_window,
-            sweep_reclaim_bars=cfg.sweep_reclaim_bars,
-            lookback=500,
-            hide_invalid=not cfg.cisd_all,
-        )
+        cisd_cfg = cisd_config(cfg)
         cisd_levels = [(s.price, s.kind, s.confirmed_at) for s in swings]
         cisd_zones = [(f.top, f.bottom, f.created, f.direction) for f in fvgs]
         cisd_sessions = [(s.price, s.kind, s.end) for s in sessions]
         cisds = detect_cisd(df, cisd_cfg, cisd_levels, cisd_zones, cisd_sessions, smt_bars, sweep_bars)
+
+    dealing = detect_dealing_range(df, swings, swing_len=cfg.swing_len)
 
     # Pine "Present" mode: old structures are not drawn/emitted.
     if cfg.mode == "present":
@@ -724,7 +797,8 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
         bars=df, swings=swings, events=events, fvgs=fvgs, order_blocks=obs,
         pd_arrays=pd_arrays,
         liquidity=liq, gaps=gaps, killzones=kz, fib=fib, trend=trend,
-        cisds=cisds, htf_cisds=htf_cisds, sessions=sessions, smts=smts,
+        cisds=cisds, htf_cisds=htf_cisds, dealing_range=dealing,
+        sessions=sessions, smts=smts,
         key_levels=key_levels, sweeps=sweeps, config=cfg,
     )
 

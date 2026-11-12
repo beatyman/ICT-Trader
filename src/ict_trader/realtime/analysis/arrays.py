@@ -1,18 +1,40 @@
 """Persistent ICT array lifecycle (FVG/IFVG/OB/CISD/Dealing Range).
 
-This layer is intentionally independent of chart colors.  It records the
-anchor, formed/swept/invalidated times and active flag so arrays can be
-replayed and audited long after the chart window moved on.
+This module is a **lifecycle wrapper** over the canonical detectors in
+:mod:`ict_trader.concepts`.  It owns identity, symbol/interval, anchor,
+formed/swept/invalidated times and the active flag so arrays can be replayed
+and audited long after the chart window moved on.  It deliberately contains no
+FVG/IFVG/OB/CISD/range arithmetic of its own: those bounds come from
+``find_pivots``/``build_zigzag``, ``detect_structure``, ``detect_fvgs``,
+``detect_ifvg``, ``detect_order_blocks``, ``detect_cisd`` and
+``detect_dealing_range`` (P0-10, A7/X8, §7.1).
+
+A zero-height "zone" is a **line**, not an array.  Rather than invent a height
+for it, the lifecycle records it as an invalid array (``is_active=False`` and
+``invalidated_at == formed_at``).  CISD lines therefore use one symmetric type
+id (``CISD``) in both directions; direction is carried by ``direction``.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
 
-from ...concepts import build_zigzag, find_pivots
+from ...concepts import (
+    ICTConfig,
+    build_zigzag,
+    cisd_config,
+    detect_cisd,
+    detect_dealing_range,
+    detect_fvgs,
+    detect_ifvg,
+    detect_order_blocks,
+    detect_structure,
+    find_pivots,
+)
 from ..models import dt_to_ms
 
 
@@ -54,19 +76,35 @@ class ICTArray:
         }
 
 
+def _direction(value: str) -> str:
+    return "bullish" if value == "bull" else "bearish"
+
+
 def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str,
                      max_inactive: int = 3) -> list[ICTArray]:
     if frame is None or len(frame) < 8:
         return []
     df = frame.reset_index(drop=True).copy()
     ms = [dt_to_ms(pd.Timestamp(x).to_pydatetime()) for x in df["date"]]
-    high = df["high"].astype(float).to_numpy()
-    low = df["low"].astype(float).to_numpy()
-    close = df["close"].astype(float).to_numpy()
-    open_ = df["open"].astype(float).to_numpy()
-    n = len(df)
-    atr = sum(float(high[i] - low[i]) for i in range(max(0, n - 14), n)) / max(1, min(14, n))
-    min_gap = max(atr * 0.035, abs(float(close[-1])) * 0.00005)
+    cfg = ICTConfig()
+
+    pivots = find_pivots(df, cfg.swing_len, 1)
+    swings = build_zigzag(pivots)
+    events, _ = detect_structure(df, swings)
+
+    fvgs = detect_fvgs(df, cfg)
+    ifvgs = detect_ifvg(list(fvgs), df) if cfg.show_ifvg else []
+    order_blocks = detect_order_blocks(df, events, swings, cfg)
+
+    cisds = []
+    if cfg.show_cisd:
+        cisd_levels = [(s.price, s.kind, s.confirmed_at) for s in swings]
+        cisd_zones = [(f.top, f.bottom, f.created, f.direction)
+                      for f in list(fvgs) + list(ifvgs)]
+        cisds = detect_cisd(df, cisd_config(cfg), cisd_levels, cisd_zones)
+
+    dealing = detect_dealing_range(df, swings, swing_len=cfg.swing_len)
+
     arrays: list[ICTArray] = []
     serial = 0
 
@@ -75,107 +113,47 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str,
             invalidated: int | None = None, anchor: float | None = None) -> None:
         nonlocal serial
         serial += 1
+        upper, lower = float(upper), float(lower)
+        if lower > upper:
+            upper, lower = lower, upper
+        # A zero-height object is a line/invalid array, never a tradable zone.
+        if not upper > lower and invalidated is None:
+            invalidated = formed
         stable = f"{symbol}|{interval}|{kind}|{formed}|{serial}"
-        import hashlib
         aid = "ARR-" + hashlib.sha1(stable.encode()).hexdigest()[:20]
         arrays.append(ICTArray(
             aid, symbol.upper(), interval, kind, direction,
-            max(upper, lower), min(upper, lower), anchor, formed,
+            upper, lower, anchor, int(formed),
             swept, invalidated, invalidated is None,
         ))
 
-    for i in range(2, n - 1):
-        a, c = i - 2, i
-        bull = low[c] - high[a]
-        bear = low[a] - high[c]
-        if bull > min_gap:
-            failed = next((j for j in range(i + 1, n) if close[j] < high[a]), None)
-            add("FVG", "bullish", high[a], low[c], ms[a],
-                swept=ms[failed] if failed is not None else None,
-                invalidated=ms[failed] if failed is not None else None)
-            if failed is not None:
-                add("IFVG", "bearish", high[a], low[c], ms[failed],
-                    swept=None, invalidated=None)
-        elif bear > min_gap:
-            failed = next((j for j in range(i + 1, n) if close[j] > low[a]), None)
-            add("FVG", "bearish", low[a], high[c], ms[a],
-                swept=ms[failed] if failed is not None else None,
-                invalidated=ms[failed] if failed is not None else None)
-            if failed is not None:
-                add("IFVG", "bullish", low[a], high[c], ms[failed],
-                    swept=None, invalidated=None)
+    for f in fvgs:
+        invalidated = None if f.active else ms[f.right]
+        add("FVG", _direction(f.direction), f.top, f.bottom, ms[f.created],
+            swept=invalidated, invalidated=invalidated)
 
-    for i in range(1, n):
-        body = abs(close[i] - open_[i])
-        if body < atr * 0.95:
-            continue
-        bullish = close[i] > open_[i]
-        prev_bear = close[i - 1] < open_[i - 1]
-        if bullish != prev_bear:
-            continue
-        upper = max(open_[i - 1], close[i - 1], high[i - 1])
-        lower = min(open_[i - 1], close[i - 1], low[i - 1])
-        failed = next((j for j in range(i + 1, n)
-                       if (close[j] < lower if bullish else close[j] > upper)), None)
-        add("OB", "bullish" if bullish else "bearish", upper, lower, ms[i - 1],
-            invalidated=ms[failed] if failed is not None else None)
+    for f in ifvgs:
+        add("IFVG", _direction(f.direction), f.top, f.bottom, ms[f.created])
 
-    # CISD line: anchor the start of a same-direction run.
-    bear_run = bull_run = 0
-    bear_first = bull_first = 0.0
-    for i in range(n):
-        if close[i] < open_[i]:
-            if bull_run >= 2 and close[i] < bull_first:
-                add("CISD_BEARISH", "bearish", bull_first, bull_first,
-                    ms[i], anchor=bull_first)
-            if bear_run == 0:
-                bear_first = open_[i]
-            bear_run += 1
-            bull_run = 0
-        elif close[i] > open_[i]:
-            if bear_run >= 2 and close[i] > bear_first:
-                add("CISD", "bullish", bear_first, bear_first,
-                    ms[i], anchor=bear_first)
-            if bull_run == 0:
-                bull_first = open_[i]
-            bull_run += 1
-            bear_run = 0
+    for ob in order_blocks:
+        invalidated = None if ob.active else ms[ob.right]
+        add("OB", _direction(ob.direction), ob.top, ob.bottom, ms[ob.created],
+            invalidated=invalidated)
 
-    # A dealing range from the last confirmed structural swing pair.
-    # Doc 601 L56: the range is defined by "structural swing points - not by
-    # arbitrary time periods or fixed candle counts"; doc 631 L56 says the same.
-    # The 40-bar fallback only runs when the zigzag produced no usable pair.
-    if n >= 20:
-        swings = []
-        try:
-            swings = build_zigzag(find_pivots(df, 5, 1))
-        except Exception:  # pragma: no cover - defensive, keeps the overlay alive
-            swings = []
-        last_t = n - 1
-        hs = [s for s in swings
-              if s.kind == "H" and int(getattr(s, "confirmed_at", s.index)) <= last_t]
-        ls = [s for s in swings
-              if s.kind == "L" and int(getattr(s, "confirmed_at", s.index)) <= last_t]
-        if hs and ls:
-            h, l = hs[-1], ls[-1]
-            # CB-07: the range is knowable only once *both* anchors have
-            # confirmed, so its knowledge time is the later confirmation.
-            known_at = max(int(getattr(h, "confirmed_at", h.index)),
-                           int(getattr(l, "confirmed_at", l.index)))
-            add("DEALING_RANGE", "neutral", float(h.price), float(l.price),
-                ms[known_at],
-                anchor=(float(h.price) + float(l.price)) / 2.0)
-        else:
-            lo = int(min(range(max(0, n - 40), n), key=lambda i: low[i]))
-            hi = int(max(range(max(0, n - 40), n), key=lambda i: high[i]))
-            add("DEALING_RANGE", "neutral", high[hi], low[lo], ms[min(lo, hi)],
-                anchor=(high[hi] + low[lo]) / 2.0)
+    # A CISD is a close-through level (a line), so it is emitted as an invalid
+    # array rather than a zero-height zone.  Both directions share one type id.
+    for c in cisds:
+        add("CISD", _direction(c.direction), c.level, c.level, ms[c.end],
+            anchor=float(c.level))
+
+    if dealing is not None:
+        add("DEALING_RANGE", "neutral", dealing.top, dealing.bottom,
+            ms[dealing.known_at], anchor=dealing.ce)
 
     active = [a for a in arrays if a.is_active]
     inactive = [a for a in arrays if not a.is_active][-max_inactive:]
     limits = {
-        "FVG": 8, "IFVG": 8, "OB": 8, "CISD": 5,
-        "CISD_BEARISH": 5, "DEALING_RANGE": 1,
+        "FVG": 8, "IFVG": 8, "OB": 8, "CISD": 5, "DEALING_RANGE": 1,
     }
     selected: list[ICTArray] = []
     for kind, limit in limits.items():
