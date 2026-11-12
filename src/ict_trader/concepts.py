@@ -58,6 +58,75 @@ from .sweeps import KeyLevel, LiquiditySweep, detect_key_levels, detect_sweeps, 
 
 Direction = Literal["bull", "bear"]
 
+#: LQ-06 / SW-11: **one** state vocabulary for every level and array.  Only an
+#: ``intact`` object may serve as an active IRL/ERL; ``swept`` means the
+#: liquidity was taken without a body close through; ``broken`` means the far
+#: edge was closed through (the object is retired and is no longer a raid
+#: reference).  ``ICTArray`` carries the same vocabulary in the realtime layer.
+ArrayState = Literal["intact", "swept", "broken"]
+ARRAY_STATES: tuple[ArrayState, ...] = ("intact", "swept", "broken")
+
+
+def validate_array_state(value: str) -> ArrayState:
+    """Refuse an undeclared array state instead of guessing one (LQ-06)."""
+    if value not in ARRAY_STATES:
+        raise ValueError(
+            f"unknown array state {value!r}; declare one of {ARRAY_STATES} "
+            f"(LQ-06)")
+    return value  # type: ignore[return-value]
+
+
+def knowledge_state(known_at: int, at: int, *,
+                    swept_at: int | None = None,
+                    broken_at: int | None = None) -> ArrayState | None:
+    """The LQ-06 state of an object at bar ``at``.
+
+    ``None`` means the object may **not** be consumed: either it did not exist
+    yet (CB-07) or its first observation postdates its sweep (I5/SW-11 -- "a
+    level whose first observation postdates its sweep is unusable").  A
+    ``broken`` bar outranks a ``swept`` bar, and neither may precede
+    ``known_at``.
+    """
+    known, at = int(known_at), int(at)
+    if at < known:
+        return None
+    if swept_at is not None and int(swept_at) < known:
+        return None
+    if broken_at is not None and int(broken_at) < known:
+        return None
+    if broken_at is not None and int(broken_at) <= at:
+        return "broken"
+    if swept_at is not None and int(swept_at) <= at:
+        return "swept"
+    return "intact"
+
+
+def known_at_of(obj: object) -> int:
+    """The knowledge bar of a P1-08 object; refuses an unstamped object."""
+    value = getattr(obj, "known_at", None)
+    if value is None:
+        raise TypeError(
+            f"{type(obj).__name__} carries no known_at; the CB-07 knowledge "
+            "gate cannot be evaluated")
+    return int(value)
+
+
+def accepts_knowledge_at(obj: object, at: int, *,
+                         require_intact: bool = False) -> bool:
+    """CB-07 gate: may ``obj`` be consumed at bar ``at``?
+
+    ``require_intact`` additionally applies LQ-06 (only ``intact`` may serve as
+    an active IRL/ERL); the state is read at ``at`` when the object exposes a
+    ``state_at`` history, never from its final (repainted) state.
+    """
+    if known_at_of(obj) > int(at):
+        return False
+    if not require_intact:
+        return True
+    state_at = getattr(obj, "state_at", None)
+    state = state_at(at) if callable(state_at) else getattr(obj, "state", "intact")
+    return state == "intact"
+
 
 # ---------------------------------------------------------------------------
 # Declared constants (P0-20): one name, one value, one provenance.
@@ -207,6 +276,38 @@ class FVG:
         return (float(self.top) + float(self.bottom)) / 2.0
 
     @property
+    def known_at(self) -> int:
+        """CB-02/CB-07: the gap exists only at the close of ``C3``.
+
+        An FVG/IFVG/BPR is built from closed bars, so its confirmation bar is
+        its creation bar; no consumer may read it before this bar closes.
+        """
+        return int(self.created)
+
+    def state_at(self, at: int) -> ArrayState | None:
+        """LQ-06 state at bar ``at``; ``None`` before ``known_at`` (CB-07)."""
+        return knowledge_state(
+            self.known_at, at,
+            swept_at=self.touched_at,
+            broken_at=None if self.active else int(self.right),
+        )
+
+    @property
+    def state(self) -> ArrayState:
+        """Current LQ-06 state: ``intact`` / ``swept`` / ``broken``.
+
+        A wick inside the gap is a *test* -- AR-10(a) keeps the gap valid, so
+        the boolean ``active`` stays true while the LQ-06 state becomes
+        ``swept``.  Only a body close through the far edge is ``broken``.
+        """
+        return self.state_at(int(self.right)) or "intact"
+
+    @property
+    def is_active(self) -> bool:
+        """Compatibility view of the boolean ``active`` lifecycle flag."""
+        return bool(self.active)
+
+    @property
     def fresh(self) -> bool:
         """True only while no later wick has traded inside the gap."""
         return bool(self.active and self.touched_at is None)
@@ -229,6 +330,39 @@ class OrderBlock:
     #: have no candle to read and fall back to the zone midpoint.
     body_high: float | None = None
     body_low: float | None = None
+    #: AR-24 ``entered(t)``: the first bar after creation whose wick traded into
+    #: the zone from the near edge.  That is the LQ-06 ``swept`` state of an
+    #: order block (a mitigation block); a body close beyond the far edge is
+    #: ``broken`` (the breaker condition).  ``None`` while never entered.
+    swept_at: int | None = None
+
+    @property
+    def known_at(self) -> int:
+        """CB-07: the block is known only at the close of its event bar.
+
+        The OB candidate ``t*`` is *before* the displacement leg end ``e``; the
+        block is constructed at ``e`` (``created``) and needs ``e``'s close, so
+        no earlier bar may consume it.
+        """
+        return int(self.created)
+
+    def state_at(self, at: int) -> ArrayState | None:
+        """LQ-06 state at bar ``at``; ``None`` before ``known_at`` (CB-07)."""
+        return knowledge_state(
+            self.known_at, at,
+            swept_at=self.swept_at,
+            broken_at=None if self.active else int(self.right),
+        )
+
+    @property
+    def state(self) -> ArrayState:
+        """Current LQ-06 state: ``intact`` / ``swept`` / ``broken``."""
+        return self.state_at(int(self.right)) or "intact"
+
+    @property
+    def is_active(self) -> bool:
+        """Compatibility view of the boolean ``active`` lifecycle flag."""
+        return bool(self.active)
 
     @property
     def mean(self) -> float:
@@ -270,6 +404,64 @@ class Gap:
     left: int
     right: int
 
+    @property
+    def known_at(self) -> int:
+        """CB-07: an opening gap is known at the open of its first new bar."""
+        return int(self.right)
+
+
+#: §1.6 ``LevelMap``: the pre-session level inventory.  An entry is one level
+#: with the declared fields ``class``, ``price``, ``known_at``, ``state``,
+#: ``tf`` plus the producer name for provenance (§15).
+LevelClass = Literal["pool", "extreme", "gap", "array", "range"]
+
+
+@dataclass(frozen=True, slots=True)
+class LevelMapEntry:
+    """One pre-committed level.  ``known_at`` is a bar index (CB-07)."""
+
+    level_class: LevelClass
+    name: str
+    price: float
+    known_at: int
+    state: ArrayState
+    tf: str = ""
+    source: str = ""
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "class": self.level_class, "name": self.name,
+            "price": float(self.price), "known_at": int(self.known_at),
+            "state": self.state, "tf": self.tf, "source": self.source,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LevelMap:
+    """The level inventory as it stood before a session opened (I5).
+
+    ``as_of`` is the last closed bar before the session; every entry satisfies
+    ``known_at <= as_of`` and carries its state **at that bar**, so a level
+    that is broken later is still ``intact`` in this snapshot (append-only
+    knowledge times, CB-09/§1.6).
+    """
+
+    as_of: int
+    entries: tuple[LevelMapEntry, ...] = ()
+    tf: str = ""
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "as_of": int(self.as_of), "tf": self.tf,
+            "entries": [entry.to_public() for entry in self.entries],
+        }
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __iter__(self):
+        return iter(self.entries)
+
 
 @dataclass
 class DealingRange:
@@ -290,6 +482,26 @@ class DealingRange:
     known_at: int
     left: int
     right: int
+    #: LQ-06 state of the level map object.  A structural range is emitted
+    #: ``intact``; range validity/redraw (``RangeState {valid, redraw_reason}``)
+    #: is a separate object owned by P1-12, so no producer sets ``swept`` or
+    #: ``broken`` here yet.
+    state: ArrayState = "intact"
+
+    def __post_init__(self) -> None:
+        validate_array_state(self.state)
+
+    @property
+    def is_active(self) -> bool:
+        """Compatibility view: only an ``intact`` range is an active level."""
+        return self.state == "intact"
+
+    def state_at(self, at: int) -> ArrayState | None:
+        """LQ-06 state at bar ``at``; ``None`` before ``known_at`` (CB-07)."""
+        known, at = int(self.known_at), int(at)
+        if at < known:
+            return None
+        return self.state
 
     @property
     def ce(self) -> float:
@@ -395,6 +607,100 @@ class ICTResult:
     key_levels: list[KeyLevel] = field(default_factory=list)
     sweeps: list[LiquiditySweep] = field(default_factory=list)
     config: ICTConfig = field(default_factory=ICTConfig)
+
+    def pre_session_inventory(self, session_start: int, *,
+                              tf: str = "") -> LevelMap:
+        """I5/§1.6: the level map as it stood **before** a session opened.
+
+        ``session_start`` is a bar index.  An object is included only when it
+        was knowable on a closed bar before that bar (``known_at <
+        session_start``), and its state is evaluated at ``session_start - 1``
+        so the snapshot cannot use anything learned during the session
+        (CB-07/CB-09).  A level whose first observation postdates its sweep is
+        dropped as unusable (I5/SW-11) rather than silently reported.
+        """
+        start = int(session_start)
+        as_of = start - 1
+        entries: list[LevelMapEntry] = []
+
+        def push(level_class: LevelClass, name: str, price: float,
+                 known_at: int, *, swept_at: int | None = None,
+                 broken_at: int | None = None, source: str = "") -> None:
+            if int(known_at) >= start:
+                return  # created at/after the open: not pre-session knowledge
+            state = knowledge_state(known_at, as_of, swept_at=swept_at,
+                                    broken_at=broken_at)
+            if state is None:
+                return  # I5/SW-11: swept before observable => unusable
+            entries.append(LevelMapEntry(
+                level_class, name, float(price), int(known_at), state, tf,
+                source))
+
+        # Liquidity pools: swing / session / pool key levels (already carry
+        # both ``known_at`` and the sweep/break bars).
+        for level in self.key_levels:
+            push("pool", level.name, level.price, level.known_at,
+                 swept_at=level.sweep_bar, broken_at=level.broken_at,
+                 source=level.source)
+        # Prior-period and session extremes.
+        for level in self.sessions:
+            push("extreme", level.name, level.price, level.end,
+                 swept_at=(level.end if level.swept else None),
+                 source="session")
+        # Gaps and arrays: FVG / IFVG / BPR share the ``FVG`` type.
+        for gap in self.fvgs:
+            push("gap", gap.label, gap.ce, gap.known_at,
+                 swept_at=gap.touched_at,
+                 broken_at=None if gap.active else int(gap.right),
+                 source=gap.label)
+        # Opening gaps (NWOG/NDOG) are gaps in the LevelMap vocabulary too.
+        for gap in self.gaps:
+            push("gap", gap.kind, (float(gap.top) + float(gap.bottom)) / 2.0,
+                 gap.known_at, source=gap.kind)
+        for ob in self.order_blocks:
+            push("array", "OB", ob.mean, ob.known_at,
+                 swept_at=ob.swept_at,
+                 broken_at=None if ob.active else int(ob.right),
+                 source="order_block")
+        # Breakers / mitigations / rejections are produced outside this module;
+        # ``stamp_knowledge_times`` gives them the ``known_at`` stamp.
+        for array in self.pd_arrays:
+            push("array", array.kind, (float(array.top) + float(array.bottom)) / 2.0,
+                 int(getattr(array, "known_at", array.confirmed_at)),
+                 source=getattr(array, "source", array.kind))
+        if self.dealing_range is not None:
+            dr = self.dealing_range
+            if int(dr.known_at) < start:
+                entries.append(LevelMapEntry(
+                    "range", "DEALING_RANGE", float(dr.ce), int(dr.known_at),
+                    dr.state, tf, "structural"))
+
+        entries.sort(key=lambda e: (e.known_at, e.level_class, e.name))
+        return LevelMap(as_of=as_of, entries=tuple(entries), tf=tf)
+
+
+def stamp_knowledge_times(result: ICTResult) -> ICTResult:
+    """Attach the derived knowledge stamp to producer objects.
+
+    ``sweeps.LiquiditySweep`` (a sweep event) and ``pd_arrays.PDAArray``
+    (breaker / mitigation / rejection) are constructed by modules outside
+    P1-08's owner set, so the stamp is derived here from the confirmation bar
+    they already store (``reclaim_bar`` / ``confirmed_at``).  The assignment is
+    idempotent and never earlier than that bar (CB-07 / SW-11).  A sweep event
+    leaves the swept level in the LQ-06 ``swept`` state; a PDA array is a fresh
+    ``intact`` object (its breaker retest gate is P1-09).
+    """
+    for sweep in result.sweeps:
+        if getattr(sweep, "known_at", None) is None:
+            sweep.known_at = int(sweep.reclaim_bar)
+        if getattr(sweep, "state", None) is None:
+            sweep.state = "swept"
+    for array in result.pd_arrays:
+        if getattr(array, "known_at", None) is None:
+            array.known_at = int(array.confirmed_at)
+        if getattr(array, "state", None) is None:
+            array.state = "intact"
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -936,6 +1242,11 @@ def detect_order_blocks(df: pd.DataFrame, events: list[StructureEvent], swings: 
                     break
                 if closes[t] > ob.top:
                     ob.right = t
+                # AR-24 ``entered``: a wick into the zone from the near edge is
+                # the ``swept`` state; AR-25 says a wick beyond the far edge
+                # that closes back inside is not a further state change.
+                if ob.swept_at is None and lows[t] <= ob.top:
+                    ob.swept_at = t
             else:
                 if closes[t] > ob.top:
                     ob.active = False
@@ -944,6 +1255,8 @@ def detect_order_blocks(df: pd.DataFrame, events: list[StructureEvent], swings: 
                     break
                 if closes[t] < ob.bottom:
                     ob.right = t
+                if ob.swept_at is None and highs[t] >= ob.bottom:
+                    ob.swept_at = t
         if ob.active:
             ob.right = n - 1
     return out
@@ -1170,7 +1483,7 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
     # selection, target selection and the array lifecycle must be able to see
     # an eligible array or sweep older than the visible window (P0-14, A1,
     # §7.3).  ``presentation_view`` applies the cut for chart/CSV output.
-    return ICTResult(
+    result = ICTResult(
         bars=df, swings=swings, events=events, fvgs=fvgs, order_blocks=obs,
         pd_arrays=pd_arrays,
         liquidity=liq, gaps=gaps, killzones=kz, fib=fib, trend=trend,
@@ -1179,6 +1492,9 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
         sessions=sessions, smts=smts,
         key_levels=key_levels, sweeps=sweeps, config=cfg,
     )
+    # P1-08 knowledge layer: producer objects from modules outside this one get
+    # their ``known_at``/``state`` stamp before the result leaves ``analyze``.
+    return stamp_knowledge_times(result)
 
 
 def signals_frame(result: ICTResult) -> pd.DataFrame:

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -33,6 +33,8 @@ import pandas as pd
 from .cisd import CISD
 from .concepts import (ICTConfig, PIVOT_LEFT, analyze, detect_fvgs, find_pivots,
                        load_csv)
+from .config import config_hash as _config_hash
+from .variants import VariantConfig
 from .context import (BiasState, DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
                       SwingIndex, candle2_closure, candle3_closure,
                       dealing_range, in_session, neutral_blocks, neutral_weight,
@@ -272,6 +274,32 @@ class SetupConfig:
     # Declared admission strength (V11, P0-17).  ``hard_veto`` is the §8.1
     # conjunction; ``score`` is the legacy repo count and must be explicit.
     gate_strength: str = DEFAULT_GATE_STRENGTH
+    #: The run's declared variants (P1-01, §14.1-3/A7).  Empty by design: every
+    #: fork stays undeclared until the run declares it, and every read then
+    #: refuses with ``NT_VARIANT_UNDECLARED`` instead of choosing a default.
+    variant_config: VariantConfig = field(default_factory=VariantConfig)
+
+    def read_variant(self, variant_id: str) -> str:
+        """Read one declared fork through the single register (A7).
+
+        This is a thin delegate: it owns no option table and performs no
+        fallback.  An undeclared or unknown variant raises
+        :class:`~ict_trader.variants.VariantUndeclared` carrying
+        ``NT_VARIANT_UNDECLARED`` (P1-01).
+        """
+        return self.variant_config.read(variant_id)
+
+    @property
+    def config_hash(self) -> str:
+        """The declared-variant configuration hash (SYSTEM_SPEC A2)."""
+        return _config_hash(
+            self.variant_config,
+            bias_primitive=self.bias_primitive,
+            entry_mode=self.entry_mode,
+            gate_strength=self.gate_strength,
+            stack=self.stack,
+            target_mode=self.target_mode,
+        )
 
     def __post_init__(self) -> None:
         if self.target_mode not in TARGET_MODES:
@@ -1312,7 +1340,10 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
                         # against the same declared window, so retest-family
                         # entries cannot fill after the window closes either.
                         session_gate=cfg.session_gate,
-                        market=cfg.market)
+                        market=cfg.market,
+                        # P1-01: the simulator reads the same declared register
+                        # as the setup surface; no private variant copy (A7).
+                        variant_config=cfg.variant_config)
     r = simulate_cisd(df, res2, sc, Path(path).stem)
     return r.trades, {"signals": len(sigs), **r.metrics}
 

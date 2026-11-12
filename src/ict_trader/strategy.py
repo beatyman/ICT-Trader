@@ -34,8 +34,10 @@ import numpy as np
 import pandas as pd
 
 from .concepts import ICTConfig, ICTResult, analyze, fetch_futu, load_csv
+from .config import config_hash as _config_hash
 from .context import in_session
 from .stats import mean_interval, n_for_margin, wilson_interval
+from .variants import VariantConfig
 
 
 #: §12 refusal codes recorded by the plan gate (A3).  A plan without a target
@@ -436,6 +438,24 @@ class StrategyConfig:
     # caller can declare it too.  ``none`` always passes and is the default.
     session_gate: str = "none"
     market: str = "other"
+    #: The run's declared variants (P1-01, §14.1-3/A7).  Empty by design: an
+    #: undeclared fork is never guessed by the simulator; a read refuses.
+    variant_config: VariantConfig = field(default_factory=VariantConfig)
+
+    def read_variant(self, variant_id: str) -> str:
+        """Read one declared fork through the single register (A7)."""
+        return self.variant_config.read(variant_id)
+
+    @property
+    def config_hash(self) -> str:
+        """The declared-variant configuration hash (SYSTEM_SPEC A2)."""
+        return _config_hash(
+            self.variant_config,
+            be_mode=self.declared_be_mode(),
+            entry_mode=self.entry_mode,
+            ladder_mode=self.declared_ladder_mode(),
+            rr_mode=self.rr_mode,
+        )
 
     def __post_init__(self) -> None:
         if self.rr_mode not in RR_MODE_FLOORS:

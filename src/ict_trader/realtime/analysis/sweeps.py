@@ -34,13 +34,34 @@ class SweepEvent:
     sweep_price: float = 0.0
     source_name: str = ""
 
+    @property
+    def known_at(self) -> int:
+        """P1-08/CB-07: the bar whose close confirms the sweep.
+
+        It is the reclaim bar (``bar_index``), never the penetration bar --
+        SW-02 says the event is unknowable at the penetration candle.
+        """
+        return int(self.bar_index)
+
+    @property
+    def known_at_ms(self) -> int:
+        """The knowledge bar's wall-clock time (same value as ``time``)."""
+        return int(self.time)
+
+    @property
+    def is_active(self) -> bool:
+        """Compatibility view of the declared TTL flag ``active``."""
+        return bool(self.active)
+
     def to_public(self) -> dict[str, Any]:
         return {
             "sweep_type": self.sweep_type, "direction": self.direction,
             "time": self.time, "level": self.level, "close": self.close,
             "reclaim_strength": round(self.reclaim_strength, 4),
             "expires_at": self.expires_at, "bar_index": self.bar_index,
-            "active": self.active, "sweep_price": round(self.sweep_price, 8),
+            "known_at": self.known_at, "known_at_ms": self.known_at_ms,
+            "active": self.active, "is_active": self.is_active,
+            "sweep_price": round(self.sweep_price, 8),
         }
 
 
@@ -87,11 +108,13 @@ def build_sweep_events(frame: pd.DataFrame, *, ttl_bars: int = 8,
         r = max(0, min(int(s.reclaim_bar), len(times) - 1))
         t = times[r]
         ev = SweepEvent(
-            "SSL" if s.direction == "bull" else "BSL",
-            "bullish" if s.direction == "bull" else "bearish",
-            t, float(s.level), float(s.reclaim_close),
-            float(s.penetration_atr), t + max(1, int(ttl_bars)) * step,
-            r, False, float(s.sweep_price), str(s.name),
+            sweep_type="SSL" if s.direction == "bull" else "BSL",
+            direction="bullish" if s.direction == "bull" else "bearish",
+            time=t, level=float(s.level), close=float(s.reclaim_close),
+            reclaim_strength=float(s.penetration_atr),
+            expires_at=t + max(1, int(ttl_bars)) * step,
+            bar_index=r, active=False,
+            sweep_price=float(s.sweep_price), source_name=str(s.name),
         )
         ev.active = now <= ev.expires_at
         out.append(ev)

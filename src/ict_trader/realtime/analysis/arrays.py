@@ -2,17 +2,20 @@
 
 This module is a **lifecycle wrapper** over the canonical detectors in
 :mod:`ict_trader.concepts`.  It owns identity, symbol/interval, anchor,
-formed/swept/invalidated times and the active flag so arrays can be replayed
-and audited long after the chart window moved on.  It deliberately contains no
+formed/swept/invalidated times, the ``known_at`` knowledge time (CB-07) and the
+LQ-06 ``{intact, swept, broken}`` state so arrays can be replayed and audited
+long after the chart window moved on.  It deliberately contains no
 FVG/IFVG/OB/CISD/range arithmetic of its own: those bounds come from
 ``find_pivots``/``build_zigzag``, ``detect_structure``, ``detect_fvgs``,
 ``detect_ifvg``, ``detect_order_blocks``, ``detect_cisd`` and
 ``detect_dealing_range`` (P0-10, A7/X8, §7.1).
 
 A zero-height "zone" is a **line**, not an array.  Rather than invent a height
-for it, the lifecycle records it as an invalid array (``is_active=False`` and
-``invalidated_at == formed_at``).  CISD lines therefore use one symmetric type
-id (``CISD``) in both directions; direction is carried by ``direction``.
+for it, the lifecycle records it as a broken array (``state="broken"`` and
+``invalidated_at == formed_at``); the historical ``is_active`` flag is kept as a
+compatibility property (``state != "broken"``).  CISD lines therefore use one
+symmetric type id (``CISD``) in both directions; direction is carried by
+``direction``.
 
 Object identity (P0-16, DR-00/X8/§7.1): ``anchor_price`` is the structural
 anchor of an array (a swing, candle or level) and **never** a derived 50%.
@@ -42,20 +45,28 @@ from typing import Any
 import pandas as pd
 
 from ...concepts import (
+    ArrayState,
     ICTConfig,
     GapConsequentEncroachment,
     OrderBlockBodyMean,
     RangeEquilibrium,
     build_zigzag,
     cisd_config,
+    detect_bpr,
     detect_cisd,
     detect_dealing_range_state,
     detect_fvgs,
     detect_ifvg,
+    detect_liquidity,
     detect_order_blocks,
     detect_structure,
     find_pivots,
+    knowledge_state,
+    validate_array_state,
 )
+from ...enhancements import detect_session_levels
+from ...pd_arrays import detect_breakers
+from ...sweeps import detect_key_levels, detect_sweeps
 from ..models import dt_to_ms
 
 
@@ -73,7 +84,12 @@ class ICTArray:
     formed_at: int
     swept_at: int | None
     invalidated_at: int | None
-    is_active: bool
+    #: CB-07 knowledge time (epoch ms, same domain as ``formed_at``): the
+    #: confirmation bar of the producer object, never before it.
+    known_at: int
+    #: LQ-06 state: ``intact`` / ``swept`` / ``broken``.  The old ``is_active``
+    #: boolean is kept as a compatibility property (``state != "broken"``).
+    state: ArrayState
     #: The three "50%" objects are separate, typed fields; at most one is set
     #: on an array and its class names the producing object (§7.1, X8).
     range_equilibrium: RangeEquilibrium | None = None
@@ -81,6 +97,34 @@ class ICTArray:
     ob_body_mean: OrderBlockBodyMean | None = None
     htf_range_id: str = ""
     engine_version: str = "ict-arrays-1.0.0"
+
+    def __post_init__(self) -> None:
+        validate_array_state(self.state)
+
+    @property
+    def is_active(self) -> bool:
+        """Compatibility view of the retired ``is_active`` field.
+
+        It keeps the historical meaning -- the array has not been invalidated
+        (``state != "broken"``) -- so existing readers do not change behaviour.
+        LQ-06 gates that need *only* an ``intact`` level must read ``state``
+        (or :meth:`state_at`), not this flag.
+        """
+        return self.state != "broken"
+
+    @property
+    def active(self) -> bool:
+        """Alias for :attr:`is_active` for callers written against concepts."""
+        return self.is_active
+
+    def state_at(self, at: int) -> ArrayState | None:
+        """LQ-06 state at epoch-ms ``at``; ``None`` before ``known_at``."""
+        return knowledge_state(self.known_at, at, swept_at=self.swept_at,
+                               broken_at=self.invalidated_at)
+
+    def is_known_at(self, at: int) -> bool:
+        """CB-07: true only when the array was already knowable at ``at``."""
+        return int(self.known_at) <= int(at)
 
     def row(self) -> tuple:
         dt = lambda ms: datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc) if ms else None
@@ -102,7 +146,8 @@ class ICTArray:
             "gap_ce": _midpoint(self.gap_ce),
             "ob_body_mean": _midpoint(self.ob_body_mean),
             "formed_at": self.formed_at, "swept_at": self.swept_at,
-            "invalidated_at": self.invalidated_at, "is_active": self.is_active,
+            "invalidated_at": self.invalidated_at, "known_at": self.known_at,
+            "state": self.state, "is_active": self.is_active,
         }
 
 
@@ -137,7 +182,16 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
 
     fvgs = detect_fvgs(df, cfg)
     ifvgs = detect_ifvg(list(fvgs), df) if cfg.show_ifvg else []
+    bprs = detect_bpr(list(fvgs)) if cfg.show_bpr else []
     order_blocks = detect_order_blocks(df, events, swings, cfg)
+    # A breaker is a failed order block (PP:C9/R4); the declared tier needs the
+    # sweep inventory at detection time (P0-20).  P1-09 owns its retest gate.
+    liquidity = detect_liquidity(df, pivots, cfg)
+    sessions = detect_session_levels(df)
+    key_levels = detect_key_levels(df, swings, sessions, liquidity)
+    sweeps = (detect_sweeps(df, key_levels, reclaim_window=cfg.sweep_reclaim_bars)
+              if cfg.show_sweeps else [])
+    breakers = detect_breakers(order_blocks, sweeps, tier=cfg.breaker_tier)
 
     cisds = []
     if cfg.show_cisd:
@@ -153,8 +207,10 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
     serial = 0
 
     def add(kind: str, direction: str, upper: float, lower: float,
-            formed: int, swept: int | None = None,
+            formed: int, *, known_at: int | None = None,
+            swept: int | None = None,
             invalidated: int | None = None, anchor: float | None = None,
+            state: ArrayState | None = None,
             range_equilibrium: RangeEquilibrium | None = None,
             gap_ce: GapConsequentEncroachment | None = None,
             ob_body_mean: OrderBlockBodyMean | None = None) -> None:
@@ -163,39 +219,73 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
         upper, lower = float(upper), float(lower)
         if lower > upper:
             upper, lower = lower, upper
+        formed = int(formed)
+        # CB-07: the knowledge time is derived from the confirmation bar and can
+        # never precede the bar that created the object.
+        known = formed if known_at is None else int(known_at)
+        if known < formed:
+            raise ValueError(
+                f"{kind} known_at={known} precedes its confirmation bar "
+                f"formed_at={formed} (CB-07)")
         # A zero-height object is a line/invalid array, never a tradable zone.
         if not upper > lower and invalidated is None:
             invalidated = formed
+        if state is None:
+            if invalidated is not None:
+                state = "broken"
+            elif swept is not None:
+                state = "swept"
+            else:
+                state = "intact"
+        else:
+            validate_array_state(state)
         stable = f"{symbol}|{interval}|{kind}|{formed}|{serial}"
         aid = "ARR-" + hashlib.sha1(stable.encode()).hexdigest()[:20]
         arrays.append(ICTArray(
             aid, symbol.upper(), interval, kind, direction,
-            upper, lower, anchor, int(formed),
-            swept, invalidated, invalidated is None,
+            upper, lower, anchor, formed,
+            swept, invalidated, known, state,
             range_equilibrium=range_equilibrium, gap_ce=gap_ce,
             ob_body_mean=ob_body_mean,
         ))
 
     for f in fvgs:
         invalidated = None if f.active else ms[f.right]
+        # AR-10(a): a wick test is the LQ-06 ``swept`` state, not a break.
+        swept = ms[f.touched_at] if f.touched_at is not None else None
         add("FVG", _direction(f.direction), f.top, f.bottom, ms[f.created],
-            swept=invalidated, invalidated=invalidated,
+            known_at=ms[f.known_at], swept=swept, invalidated=invalidated,
             gap_ce=GapConsequentEncroachment(f.ce))
 
     for f in ifvgs:
         add("IFVG", _direction(f.direction), f.top, f.bottom, ms[f.created],
+            known_at=ms[f.known_at],
+            gap_ce=GapConsequentEncroachment(f.ce))
+
+    for f in bprs:
+        add("BPR", _direction(f.direction), f.top, f.bottom, ms[f.created],
+            known_at=ms[f.known_at],
             gap_ce=GapConsequentEncroachment(f.ce))
 
     for ob in order_blocks:
         invalidated = None if ob.active else ms[ob.right]
+        swept = ms[ob.swept_at] if ob.swept_at is not None else None
         add("OB", _direction(ob.direction), ob.top, ob.bottom, ms[ob.created],
-            invalidated=invalidated, ob_body_mean=OrderBlockBodyMean(ob.mean))
+            known_at=ms[ob.known_at], swept=swept, invalidated=invalidated,
+            ob_body_mean=OrderBlockBodyMean(ob.mean))
+
+    # A breaker is a zone; its knowledge time is the flip/confirmation bar.
+    for br in breakers:
+        confirmed = int(br.confirmed_at)
+        add("BREAKER", _direction(br.direction), br.top, br.bottom,
+            ms[confirmed], known_at=ms[confirmed],
+            anchor=float((br.top + br.bottom) / 2.0))
 
     # A CISD is a close-through level (a line), so it is emitted as an invalid
     # array rather than a zero-height zone.  Both directions share one type id.
     for c in cisds:
         add("CISD", _direction(c.direction), c.level, c.level, ms[c.end],
-            anchor=float(c.level))
+            known_at=ms[c.end], anchor=float(c.level))
 
     # DR-00/SN-R07: only a structural swing pair may be a dealing range.  The
     # old fixed-count 40-bar high/low fallback is gone -- no structural pair
@@ -204,7 +294,8 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
     # ``anchor_price`` (X8).
     if dealing is not None:
         add("DEALING_RANGE", "neutral", dealing.top, dealing.bottom,
-            ms[dealing.known_at],
+            ms[dealing.known_at], known_at=ms[dealing.known_at],
+            state=dealing.state,
             range_equilibrium=RangeEquilibrium(dealing.ce))
 
     return arrays
@@ -214,7 +305,8 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
 #: may draw.  They are deliberately not used by :func:`build_ict_arrays`
 #: (P0-14): a cap is a display decision, not a selection decision.
 PRESENTATION_CAPS: dict[str, int] = {
-    "FVG": 8, "IFVG": 8, "OB": 8, "CISD": 5, "DEALING_RANGE": 1,
+    "FVG": 8, "IFVG": 8, "BPR": 8, "OB": 8, "BREAKER": 8, "CISD": 5,
+    "DEALING_RANGE": 1,
 }
 
 
