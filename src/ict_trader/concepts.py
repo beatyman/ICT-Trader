@@ -41,7 +41,15 @@ import pandas as pd
 from matplotlib.patches import Rectangle
 
 from .cisd import CISD, CISDConfig, detect_cisd
-from .context import in_session_at
+from .context import (
+    ATR_PERIOD,
+    NT_DATA_MISSING,
+    NT_RANGE_INVALID,
+    RANGE_STALENESS_BARS,
+    RangeDiagnostic,
+    atr,
+    in_session_at,
+)
 from .enhancements import SMT, SessionLevel, detect_htf_cisds, detect_session_levels, detect_smt
 from .pd_arrays import PDAArray, detect_breakers, detect_mitigations, detect_rejections
 from .sweeps import KeyLevel, LiquiditySweep, detect_key_levels, detect_sweeps, nearest_key_target, score_key_levels
@@ -208,13 +216,16 @@ class Gap:
 
 @dataclass
 class DealingRange:
-    """The canonical dealing-range object (one construction, one type).
+    """A **structural** dealing range -- one construction, one type (DR-00).
 
     ``known_at`` is the bar where the range becomes knowable: both structural
-    anchors must have confirmed, so it is the later confirmation (CB-07).  A
-    fixed-count fallback is still built for the current overlay path and is
-    flagged by ``fallback``; separating that object type from a structural
-    range is P0-16, which can now change this one constructor.
+    anchors must have confirmed, so it is the later confirmation (CB-07).
+
+    P0-16: a fixed-count high/low object is **not** this type and is never
+    emitted as ``DEALING_RANGE`` (DR-00/SN-R07).  The former 40-bar fallback is
+    gone; when no confirmed structural pair exists the constructor returns
+    ``None`` together with a :class:`~ict_trader.context.RangeDiagnostic`.  An
+    IPDA window is the separate :class:`IPDAWindow` type.
     """
 
     top: float
@@ -222,12 +233,79 @@ class DealingRange:
     known_at: int
     left: int
     right: int
-    fallback: bool = False
 
     @property
     def ce(self) -> float:
-        """Equilibrium: the 50% of the range (range CE, not a gap CE)."""
+        """Equilibrium: the 50% of the range (range CE, not a gap CE) -- DR-03."""
         return (float(self.top) + float(self.bottom)) / 2.0
+
+    @property
+    def fallback(self) -> bool:
+        """Always ``False`` (kept for callers written before P0-16).
+
+        A structural range can no longer be constructed from a fixed count, so
+        there is no fallback branch that could set this flag.
+        """
+        return False
+
+
+#: The declared IPDA window classes (IP-01/DR-00).  A fixed count is legal
+#: **only** for this object, never for a structural dealing range.
+IPDA_WINDOWS: tuple[int, ...] = (20, 40, 60)
+
+
+@dataclass(frozen=True, slots=True)
+class IPDAWindow:
+    """A fixed-count IPDA window -- deliberately not a :class:`DealingRange`.
+
+    ``H_N = max(high)`` / ``L_N = min(low)`` over the last ``window`` closed
+    candles of the window's own timeframe, with ``CE_N = (H_N + L_N)/2`` (IP-01).
+    DR-00: merging this object with the structural range makes one of the two
+    anchoring prohibitions unenforceable, so the two are separate types.
+    """
+
+    window: int
+    high: float
+    low: float
+    known_at: int
+    right: int
+    timeframe: str = "1d"
+
+    @property
+    def ce(self) -> float:
+        """``EQ_N`` -- one midpoint per window (IP-01), not a structural EQ."""
+        return (float(self.high) + float(self.low)) / 2.0
+
+    @property
+    def span(self) -> float:
+        return float(self.high) - float(self.low)
+
+
+#: §7.1: the "50%" formula is shared but the object is not.  Each producer
+#: carries its own type so a downstream reader cannot mistake a gap CE or an OB
+#: body mean for the equilibrium of a dealing range (X8).
+@dataclass(frozen=True, slots=True)
+class RangeEquilibrium:
+    """``(top + bottom)/2`` of a structural dealing range (DR-03)."""
+
+    value: float
+    kind: str = "range_equilibrium"
+
+
+@dataclass(frozen=True, slots=True)
+class GapConsequentEncroachment:
+    """``(top + bottom)/2`` of an FVG/IFVG (AR-07)."""
+
+    value: float
+    kind: str = "gap_ce"
+
+
+@dataclass(frozen=True, slots=True)
+class OrderBlockBodyMean:
+    """``(body_high + body_low)/2`` of the selected OB candle (AR-17)."""
+
+    value: float
+    kind: str = "ob_body_mean"
 
 
 @dataclass
@@ -252,6 +330,9 @@ class ICTResult:
     cisds: list[CISD] = field(default_factory=list)
     htf_cisds: list[CISD] = field(default_factory=list)
     dealing_range: DealingRange | None = None
+    #: Why ``dealing_range`` is absent (``NT_RANGE_INVALID`` / ``NT_DATA_MISSING``).
+    #: P0-16: absence carries a reason instead of vanishing silently.
+    dealing_range_diagnostic: RangeDiagnostic | None = None
     sessions: list[SessionLevel] = field(default_factory=list)
     smts: list[SMT] = field(default_factory=list)
     key_levels: list[KeyLevel] = field(default_factory=list)
@@ -283,13 +364,6 @@ def load_csv(path: str | Path) -> pd.DataFrame:
     else:
         df["volume"] = 0.0
     return df.dropna(subset=cols).reset_index(drop=True)
-
-
-def atr(df: pd.DataFrame, n: int = 10) -> pd.Series:
-    h, l, c = df["high"], df["low"], df["close"]
-    prev = c.shift(1)
-    tr = pd.concat([(h - l), (h - prev).abs(), (l - prev).abs()], axis=1).max(axis=1)
-    return tr.rolling(n, min_periods=1).mean()
 
 
 def find_pivots(df: pd.DataFrame, left: int, right: int = 1) -> list[Swing]:
@@ -379,41 +453,109 @@ def detect_structure(df: pd.DataFrame, swings: list[Swing]) -> tuple[list[Struct
     return events, pd.Series(trend_series, index=df.index, name="trend")
 
 
-def detect_dealing_range(df: pd.DataFrame, swings: list[Swing] | None = None,
-                         *, swing_len: int = 5,
-                         fallback_bars: int = 40) -> DealingRange | None:
-    """Build the canonical dealing range from the last structural swing pair.
+def detect_ipda_window(frame: pd.DataFrame, window: int = 40, *,
+                       timeframe: str = "1d",
+                       last_closed: int | None = None) -> IPDAWindow | None:
+    """The last ``window`` **closed** candles as a separate IPDA window (DR-00).
 
-    This is the **only** range constructor.  ``known_at`` is the later
-    confirmation of the two anchors (CB-07), never the earlier one.  When the
-    frame has no usable structural pair the fixed-count fallback is returned
-    with ``fallback=True``, so the caller can tell the two objects apart
-    (DR-00; splitting them is P0-16).
+    ``frame`` must already be the window's own timeframe (daily for the
+    ``20/40/60`` set); ``last_closed`` is the index of the last bar whose close
+    is known.  A fixed count is legal here and nowhere else, so this object is
+    an :class:`IPDAWindow`, never a :class:`DealingRange`.  Wiring the window
+    into ``analyze``/section 7.3 is P1-12; the P0 subset is the distinct type
+    and the refusal to anchor a structural range with it.
+    """
+    if int(window) not in IPDA_WINDOWS:
+        raise ValueError(
+            f"IPDA windows are {IPDA_WINDOWS}; got {window!r} (IP-01/DR-00)")
+    n = len(frame)
+    if n == 0:
+        return None
+    end = n - 1 if last_closed is None else int(last_closed)
+    start = end - int(window) + 1
+    if end < 0 or end >= n or start < 0:
+        return None
+    high = float(frame["high"].iloc[start:end + 1].max())
+    low = float(frame["low"].iloc[start:end + 1].min())
+    if not high > low:
+        return None
+    return IPDAWindow(int(window), high, low, end, end, timeframe)
+
+
+def detect_dealing_range_state(df: pd.DataFrame,
+                               swings: list[Swing] | None = None, *,
+                               swing_len: int = 5
+                               ) -> tuple[DealingRange | None, RangeDiagnostic | None]:
+    """Structural dealing range **and** the reason when there is none.
+
+    This is the **only** structural range constructor.  ``known_at`` is the
+    later confirmation of the two anchors (CB-07), never the earlier one.  A
+    fixed count may not anchor it (DR-00/SN-R07), so there is no fallback
+    branch: without a confirmed swing pair the result is ``(None,
+    diagnostic)`` and no ``DEALING_RANGE`` can be emitted (P0-16).  The same
+    ``RANGE_STALENESS_BARS`` (120) repo cap as the context read applies, so a
+    stale pair is a diagnosed absence, not a silent ``None``.  The value-only
+    twin is :func:`detect_dealing_range`.
     """
     n = len(df)
+    last_t = n - 1
     if n < 20:
-        return None
+        return None, RangeDiagnostic(
+            NT_DATA_MISSING,
+            f"only {n} bars available; the structural range needs enough closed "
+            f"bars for a confirmed swing pair (got < 20) "
+            f"(NT_RANGE_TIME_ANCHORED names the prohibited fixed-count "
+            f"fallback, which is not constructed).",
+            bar=last_t,
+        )
     if swings is None:
         swings = build_zigzag(find_pivots(df, swing_len, 1))
-    last_t = n - 1
     highs = [s for s in swings
              if s.kind == "H" and int(getattr(s, "confirmed_at", s.index)) <= last_t]
     lows = [s for s in swings
             if s.kind == "L" and int(getattr(s, "confirmed_at", s.index)) <= last_t]
-    if highs and lows:
-        h, l = highs[-1], lows[-1]
-        known_at = max(int(getattr(h, "confirmed_at", h.index)),
-                       int(getattr(l, "confirmed_at", l.index)))
-        return DealingRange(max(float(h.price), float(l.price)),
-                            min(float(h.price), float(l.price)), known_at,
-                            min(int(h.index), int(l.index)), last_t, False)
+    if not highs or not lows:
+        missing = ("high or low" if not highs and not lows
+                   else "high" if not highs else "low")
+        return None, RangeDiagnostic(
+            NT_DATA_MISSING,
+            f"no confirmed swing {missing} at or before bar {last_t}: a "
+            "structural dealing range needs one confirmed high and one "
+            "confirmed low.  The fixed-count 40-bar high/low fallback is "
+            "refused (DR-00/SN-R07), so no DEALING_RANGE is emitted "
+            "(NT_RANGE_TIME_ANCHORED would name that prohibited object).",
+            bar=last_t,
+        )
+    h, l = highs[-1], lows[-1]
+    known_at = max(int(getattr(h, "confirmed_at", h.index)),
+                   int(getattr(l, "confirmed_at", l.index)))
+    age = last_t - known_at
+    if age > RANGE_STALENESS_BARS:
+        return None, RangeDiagnostic(
+            NT_RANGE_INVALID,
+            f"dealing-range anchors are stale: the later anchor confirmed at "
+            f"bar {known_at}, {age} bars before bar {last_t} > "
+            f"{RANGE_STALENESS_BARS}-bar repo staleness cap (§13.3).  Redraw "
+            "on the DR-06 triggers; the range is not usable as-is.",
+            bar=last_t, age_bars=age, lookback_bars=RANGE_STALENESS_BARS,
+        )
+    top = max(float(h.price), float(l.price))
+    bottom = min(float(h.price), float(l.price))
+    if top <= bottom:
+        return None, RangeDiagnostic(
+            NT_RANGE_INVALID,
+            f"dealing-range anchors are degenerate: top <= bottom at bar "
+            f"{last_t}, so no range can be measured (DR-01).",
+            bar=last_t, age_bars=age,
+        )
+    return DealingRange(top, bottom, known_at,
+                        min(int(h.index), int(l.index)), last_t), None
 
-    low = df["low"].to_numpy(float)
-    high = df["high"].to_numpy(float)
-    lo = int(min(range(max(0, n - fallback_bars), n), key=lambda i: low[i]))
-    hi = int(max(range(max(0, n - fallback_bars), n), key=lambda i: high[i]))
-    return DealingRange(float(high[hi]), float(low[lo]), min(lo, hi),
-                        min(lo, hi), last_t, True)
+
+def detect_dealing_range(df: pd.DataFrame, swings: list[Swing] | None = None,
+                         *, swing_len: int = 5) -> DealingRange | None:
+    """Value-only twin of :func:`detect_dealing_range_state` (P0-16)."""
+    return detect_dealing_range_state(df, swings, swing_len=swing_len)[0]
 
 
 def cisd_config(cfg: ICTConfig) -> CISDConfig:
@@ -445,7 +587,7 @@ def detect_fvgs(df: pd.DataFrame, cfg: ICTConfig) -> list[FVG]:
     close = df["close"].to_numpy()
     body = np.abs(close - open_)
     mean_body = pd.Series(body).rolling(cfg.swing_len, min_periods=1).mean().to_numpy()
-    atr14 = atr(df, 14).to_numpy()
+    atr14 = atr(df).to_numpy()
     vol = df["volume"].to_numpy(float) if "volume" in df else np.zeros(len(df))
     vol_avg = pd.Series(vol).rolling(20, min_periods=1).mean().to_numpy()
     out: list[FVG] = []
@@ -648,7 +790,7 @@ def detect_order_blocks(df: pd.DataFrame, events: list[StructureEvent], swings: 
 def detect_liquidity(df: pd.DataFrame, pivots: list[Swing], cfg: ICTConfig) -> list[Liquidity]:
     if not cfg.show_liquidity:
         return []
-    atr_series = atr(df, 10).to_numpy()
+    atr_series = atr(df).to_numpy()
     tol = max(float(np.nanmedian(atr_series)) / max(cfg.liq_margin_atr, 0.1), 1e-9)
     out: list[Liquidity] = []
     n = len(df)
@@ -854,7 +996,8 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
         cisd_sessions = [(s.price, s.kind, s.end) for s in sessions]
         cisds = detect_cisd(df, cisd_cfg, cisd_levels, cisd_zones, cisd_sessions, smt_bars, sweep_bars)
 
-    dealing = detect_dealing_range(df, swings, swing_len=cfg.swing_len)
+    dealing, dealing_diagnostic = detect_dealing_range_state(
+        df, swings, swing_len=cfg.swing_len)
 
     # The 500-bar "present" cut is a *presentation* window (repo §13.6), not a
     # selection rule.  ``analyze`` therefore returns the full inventory: setup
@@ -866,6 +1009,7 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
         pd_arrays=pd_arrays,
         liquidity=liq, gaps=gaps, killzones=kz, fib=fib, trend=trend,
         cisds=cisds, htf_cisds=htf_cisds, dealing_range=dealing,
+        dealing_range_diagnostic=dealing_diagnostic,
         sessions=sessions, smts=smts,
         key_levels=key_levels, sweeps=sweeps, config=cfg,
     )

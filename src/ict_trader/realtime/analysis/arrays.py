@@ -14,6 +14,18 @@ for it, the lifecycle records it as an invalid array (``is_active=False`` and
 ``invalidated_at == formed_at``).  CISD lines therefore use one symmetric type
 id (``CISD``) in both directions; direction is carried by ``direction``.
 
+Object identity (P0-16, DR-00/X8/§7.1): ``anchor_price`` is the structural
+anchor of an array (a swing, candle or level) and **never** a derived 50%.
+Each "50%" has its own typed field produced by its own object:
+
+* ``range_equilibrium`` -- the equilibrium of a structural dealing range (DR-03);
+* ``gap_ce`` -- the consequent encroachment of an FVG/IFVG (AR-07);
+* ``ob_body_mean`` -- the body mean threshold of an order block (AR-17).
+
+A fixed-count high/low object is never emitted as ``DEALING_RANGE``: when the
+structural pair is absent the range is ``None`` and the reason lives in the
+``RangeDiagnostic`` returned by ``detect_dealing_range_state`` (DR-00/SN-R07).
+
 ``build_ict_arrays`` returns the **full inventory**.  A per-kind cap is a
 presentation rule (a chart can only draw so many boxes), never a selection
 rule: silently dropping the ninth active FVG would remove an eligible entry
@@ -31,10 +43,13 @@ import pandas as pd
 
 from ...concepts import (
     ICTConfig,
+    GapConsequentEncroachment,
+    OrderBlockBodyMean,
+    RangeEquilibrium,
     build_zigzag,
     cisd_config,
     detect_cisd,
-    detect_dealing_range,
+    detect_dealing_range_state,
     detect_fvgs,
     detect_ifvg,
     detect_order_blocks,
@@ -53,11 +68,17 @@ class ICTArray:
     direction: str
     price_upper: float
     price_lower: float
+    #: Structural anchor only (swing/candle/level).  Never a derived 50%.
     anchor_price: float | None
     formed_at: int
     swept_at: int | None
     invalidated_at: int | None
     is_active: bool
+    #: The three "50%" objects are separate, typed fields; at most one is set
+    #: on an array and its class names the producing object (§7.1, X8).
+    range_equilibrium: RangeEquilibrium | None = None
+    gap_ce: GapConsequentEncroachment | None = None
+    ob_body_mean: OrderBlockBodyMean | None = None
     htf_range_id: str = ""
     engine_version: str = "ict-arrays-1.0.0"
 
@@ -77,9 +98,20 @@ class ICTArray:
             "interval": self.interval, "array_type": self.array_type,
             "direction": self.direction, "price_upper": self.price_upper,
             "price_lower": self.price_lower, "anchor_price": self.anchor_price,
+            "range_equilibrium": _midpoint(self.range_equilibrium),
+            "gap_ce": _midpoint(self.gap_ce),
+            "ob_body_mean": _midpoint(self.ob_body_mean),
             "formed_at": self.formed_at, "swept_at": self.swept_at,
             "invalidated_at": self.invalidated_at, "is_active": self.is_active,
         }
+
+
+def _midpoint(value: RangeEquilibrium | GapConsequentEncroachment
+              | OrderBlockBodyMean | None) -> dict[str, Any] | None:
+    """Serialize a typed "50%" without collapsing its kind into a bare float."""
+    if value is None:
+        return None
+    return {"kind": value.kind, "value": float(value.value)}
 
 
 def _direction(value: str) -> str:
@@ -114,14 +146,18 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
                       for f in list(fvgs) + list(ifvgs)]
         cisds = detect_cisd(df, cisd_config(cfg), cisd_levels, cisd_zones)
 
-    dealing = detect_dealing_range(df, swings, swing_len=cfg.swing_len)
+    dealing, _dealing_diagnostic = detect_dealing_range_state(
+        df, swings, swing_len=cfg.swing_len)
 
     arrays: list[ICTArray] = []
     serial = 0
 
     def add(kind: str, direction: str, upper: float, lower: float,
             formed: int, swept: int | None = None,
-            invalidated: int | None = None, anchor: float | None = None) -> None:
+            invalidated: int | None = None, anchor: float | None = None,
+            range_equilibrium: RangeEquilibrium | None = None,
+            gap_ce: GapConsequentEncroachment | None = None,
+            ob_body_mean: OrderBlockBodyMean | None = None) -> None:
         nonlocal serial
         serial += 1
         upper, lower = float(upper), float(lower)
@@ -136,20 +172,24 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
             aid, symbol.upper(), interval, kind, direction,
             upper, lower, anchor, int(formed),
             swept, invalidated, invalidated is None,
+            range_equilibrium=range_equilibrium, gap_ce=gap_ce,
+            ob_body_mean=ob_body_mean,
         ))
 
     for f in fvgs:
         invalidated = None if f.active else ms[f.right]
         add("FVG", _direction(f.direction), f.top, f.bottom, ms[f.created],
-            swept=invalidated, invalidated=invalidated)
+            swept=invalidated, invalidated=invalidated,
+            gap_ce=GapConsequentEncroachment(f.ce))
 
     for f in ifvgs:
-        add("IFVG", _direction(f.direction), f.top, f.bottom, ms[f.created])
+        add("IFVG", _direction(f.direction), f.top, f.bottom, ms[f.created],
+            gap_ce=GapConsequentEncroachment(f.ce))
 
     for ob in order_blocks:
         invalidated = None if ob.active else ms[ob.right]
         add("OB", _direction(ob.direction), ob.top, ob.bottom, ms[ob.created],
-            invalidated=invalidated)
+            invalidated=invalidated, ob_body_mean=OrderBlockBodyMean(ob.mean))
 
     # A CISD is a close-through level (a line), so it is emitted as an invalid
     # array rather than a zero-height zone.  Both directions share one type id.
@@ -157,9 +197,15 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
         add("CISD", _direction(c.direction), c.level, c.level, ms[c.end],
             anchor=float(c.level))
 
+    # DR-00/SN-R07: only a structural swing pair may be a dealing range.  The
+    # old fixed-count 40-bar high/low fallback is gone -- no structural pair
+    # means no DEALING_RANGE array (the diagnostic explains the absence where a
+    # caller needs it, P0-16).  The range CE is a typed field, never
+    # ``anchor_price`` (X8).
     if dealing is not None:
         add("DEALING_RANGE", "neutral", dealing.top, dealing.bottom,
-            ms[dealing.known_at], anchor=dealing.ce)
+            ms[dealing.known_at],
+            range_equilibrium=RangeEquilibrium(dealing.ce))
 
     return arrays
 

@@ -21,6 +21,11 @@ from typing import Iterable, Literal
 import numpy as np
 import pandas as pd
 
+#: One ATR (``context.atr``, repo period 14) is shared by the sweep gates, the
+#: key-level tolerance and the FVG/OB layers; the former private 14-period copy
+#: lived here (P0-16, §2.3, A7).
+from .context import atr
+
 Direction = Literal["bull", "bear"]
 Kind = Literal["H", "L"]
 
@@ -66,8 +71,8 @@ def detect_key_levels(
     tol_atr: float = 0.15,
 ) -> list[KeyLevel]:
     """Collect swing, session and liquidity-pool levels with dedupe."""
-    atr = _atr(df)
-    tol = max(float(np.nanmedian(atr)) * tol_atr, 1e-9)
+    atr_arr = atr(df).to_numpy(float)
+    tol = max(float(np.nanmedian(atr_arr)) * tol_atr, 1e-9)
     levels: list[KeyLevel] = []
 
     for s in swings:
@@ -116,14 +121,6 @@ def detect_key_levels(
     return merged
 
 
-def _atr(df: pd.DataFrame, n: int = 14) -> np.ndarray:
-    close = df["close"].to_numpy(float)
-    h = df["high"].to_numpy(float)
-    l = df["low"].to_numpy(float)
-    tr = np.maximum.reduce([h - l, np.abs(h - np.r_[np.nan, close[:-1]]), np.abs(l - np.r_[np.nan, close[:-1]])])
-    return pd.Series(tr).rolling(n, min_periods=1).mean().to_numpy()
-
-
 def detect_sweeps(
     df: pd.DataFrame,
     levels: Iterable[KeyLevel],
@@ -142,7 +139,7 @@ def detect_sweeps(
     therefore known at ``reclaim_bar`` and cannot leak future prices into a
     backtest.
     """
-    atr = _atr(df)
+    atr_arr = atr(df).to_numpy(float)
     volume = df["volume"].to_numpy(float) if "volume" in df else np.zeros(len(df))
     vol_sma = pd.Series(volume).rolling(20, min_periods=1).mean().to_numpy()
     high = df["high"].to_numpy(float)
@@ -155,7 +152,7 @@ def detect_sweeps(
     for lv in levels:
         t = max(lv.known_at, 1)
         while t < n and not lv.swept and not lv.broken:
-            a = atr[t] if not np.isnan(atr[t]) and atr[t] > 0 else 1e-9
+            a = atr_arr[t] if not np.isnan(atr_arr[t]) and atr_arr[t] > 0 else 1e-9
             if lv.kind == "H" and high[t] > lv.price:
                 if close[t] < lv.price:
                     reclaim = t
@@ -261,7 +258,7 @@ def score_key_levels(levels: Iterable[KeyLevel], sessions: Iterable,
     A lone swing high/low scores ~1; a swept EQH platform that overlaps a
     session level scores ~10.  Callers can then rank and keep only the top.
     """
-    atr_arr = _atr(df)
+    atr_arr = atr(df).to_numpy(float)
     tol = max(float(np.nanmedian(atr_arr)) * 0.3, 1e-9) if len(atr_arr) else 1e-9
     atr_med = float(np.nanmedian(atr_arr)) if len(atr_arr) else 1.0
     session_prices = [float(s.price) for s in sessions]

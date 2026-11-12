@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from ....concepts import ICTConfig, analyze
-from ....context import dealing_range as ctx_dealing_range
+from ....context import dealing_range_state as ctx_dealing_range_state
 from ....setup import SetupConfig, build_setup
 from ...overlays import build_ict_overlays
 from ...models import dt_to_ms
@@ -72,6 +72,10 @@ class ICTEngine:
     #: (``{"code", "direction", "end", "data_gaps"}``).  An empty signal list
     #: alone is not a passing refusal (A3); this is where the §12 code lives.
     refusals: list[dict[str, Any]] = field(default_factory=list)
+    #: Why the last scan has no structural dealing range, or ``None`` when it
+    #: has one.  P0-16: a stale (120-bar) range is a diagnosis, not a silent
+    #: ``None``; it survives even when the scan emits no signal.
+    range_diagnostic: dict[str, Any] | None = None
 
     def analyze(self, window: pd.DataFrame,
                 context: AnalysisContext) -> list[EngineSignal]:
@@ -86,6 +90,7 @@ class ICTEngine:
     def _scan(self, window: pd.DataFrame, *, actionable_only: bool,
               context: AnalysisContext | None) -> list[EngineSignal]:
         self.refusals = []
+        self.range_diagnostic = None
         if not isinstance(window, pd.DataFrame):
             raise TypeError("ICTEngine expects a pandas DataFrame")
         if len(window) < 100:
@@ -109,7 +114,9 @@ class ICTEngine:
         symbol = (context.symbol if context else frame.attrs.get("symbol", ""))
         interval = (context.interval if context else frame.attrs.get("interval", "15m"))
         # corpus context, computed once per scan rather than per setup
-        dr_ctx = ctx_dealing_range(result.swings, n - 1)
+        dr_ctx, dr_diagnostic = ctx_dealing_range_state(result.swings, n - 1)
+        self.range_diagnostic = (dr_diagnostic.to_public()
+                                 if dr_diagnostic is not None else None)
         dr_analysis = (AnalysisDealingRange(float(dr_ctx.high), float(dr_ctx.low))
                        if dr_ctx is not None else None)
         hidden_obs = hidden_ob_evidence(frame, n - 1)
@@ -215,6 +222,12 @@ class ICTEngine:
                     {"high": float(dr_analysis.high), "low": float(dr_analysis.low),
                      "ce": float(dr_analysis.ce), "zone": dr_analysis.zone(entry)}
                     if dr_analysis is not None else None
+                ),
+                # P0-16: an absent/stale range carries its §12-style reason
+                # (NT_RANGE_INVALID) instead of being an unexplained None.
+                "dealing_range_diagnostic": (
+                    dict(self.range_diagnostic)
+                    if self.range_diagnostic is not None else None
                 ),
                 "ob": pd_arrays["ob"],
                 "pd_array": pd_arrays["pd_array"],

@@ -19,6 +19,33 @@ Market = Literal["cn", "hk", "crypto", "other"]
 SessionGate = Literal["none", "auto", "asian", "asian_dr", "london", "london_close", "ny_am", "ny_pm",
                       "silver_bullet", "macro_0950", "venom", "cn", "hk"]
 
+#: Repo choice (§2.3): ATR is not defined by the corpus; the repository uses
+#: ``ATR14``.  One function and one period serve every ATR-relative number
+#: (FVG size, liquidity tolerance, sweep penetration, array gates).
+ATR_PERIOD = 14
+
+
+def atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.Series:
+    """The one ATR series: true range, ``ATR_PERIOD`` = 14 (repo, §2.3).
+
+    P0-16: this replaces the three co-existing definitions (a 10-period TR mean
+    in :mod:`ict_trader.concepts`, a 14-period private copy in
+    :mod:`ict_trader.sweeps`, and a high-low mean in the array layer).  A
+    caller may repeat the declared period but may not select another one: a
+    second period is exactly the defect this function removes, so it fails
+    closed instead of silently computing a different quantity (A7/X8).
+    """
+    if int(period) != ATR_PERIOD:
+        raise ValueError(
+            f"one ATR period is declared ({ATR_PERIOD}); got {period!r} "
+            "(SYSTEM_SPEC §2.3, P0-16)")
+    high, low, close = df["high"], df["low"], df["close"]
+    prev = close.shift(1)
+    tr = pd.concat(
+        [(high - low), (high - prev).abs(), (low - prev).abs()], axis=1,
+    ).max(axis=1)
+    return tr.rolling(ATR_PERIOD, min_periods=1).mean()
+
 
 class BiasState(str, Enum):
     """The one declared bias vocabulary (BI-03; SPEC §13.2).
@@ -93,6 +120,79 @@ class DealingRange:
         if self.span <= 0:
             return 0.5
         return min(max((price - self.low) / self.span, 0.0), 1.0)
+
+
+#: §12 codes named by the range diagnostic.  ``NT_RANGE_INVALID`` covers a
+#: structural range that cannot be used (stale anchors or a degenerate pair);
+#: ``NT_DATA_MISSING`` covers "no confirmed high/low pair at all".  The
+#: prohibited fixed-count fallback keeps its declared name
+#: ``NT_RANGE_TIME_ANCHORED`` so a caller can tell it apart from a missing feed.
+NT_RANGE_INVALID = "NT_RANGE_INVALID"
+NT_RANGE_TIME_ANCHORED = "NT_RANGE_TIME_ANCHORED"
+NT_DATA_MISSING = "NT_DATA_MISSING"
+
+#: Repo staleness expiry for the two structural anchors (§13.3 repo constant;
+#: DR-06 says a range is redrawn, not expired silently).
+RANGE_STALENESS_BARS = 120
+
+
+@dataclass(frozen=True, slots=True)
+class RangeDiagnostic:
+    """Why a structural dealing range is absent -- never a silent ``None``.
+
+    P0-16: a 120-bar staleness (or a missing structural pair) used to make the
+    range vanish with no explanation.  The diagnostic names the cause and the
+    declared lookback so a caller can record ``NT_RANGE_INVALID`` instead of
+    treating an absent range as "no opinion".  P1-12 will promote this into the
+    full ``RangeState {valid, redraw_reason}``; the P0 subset is the reason
+    itself, not the redraw policy.
+    """
+
+    code: str
+    reason: str
+    bar: int | None = None
+    age_bars: int | None = None
+    lookback_bars: int | None = None
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "code": self.code, "reason": self.reason, "bar": self.bar,
+            "age_bars": self.age_bars, "lookback_bars": self.lookback_bars,
+        }
+
+
+def _no_pair_diagnostic(t: int, missing: str, lookback_bars: int) -> RangeDiagnostic:
+    return RangeDiagnostic(
+        NT_DATA_MISSING,
+        f"no confirmed swing {missing} at or before bar {t}: a structural "
+        "dealing range needs one confirmed high and one confirmed low.  The "
+        "fixed-count high/low fallback is refused (DR-00/SN-R07), so no "
+        "DEALING_RANGE is emitted "
+        f"(NT_RANGE_TIME_ANCHORED would name that prohibited object).",
+        bar=t, lookback_bars=int(lookback_bars),
+    )
+
+
+def _stale_diagnostic(t: int, later_conf: int, age: int,
+                      lookback_bars: int) -> RangeDiagnostic:
+    return RangeDiagnostic(
+        NT_RANGE_INVALID,
+        f"dealing-range anchors are stale: the later anchor confirmed at bar "
+        f"{later_conf}, {age} bars before bar {t} > {int(lookback_bars)}-bar "
+        "repo staleness cap (§13.3).  Redraw on the DR-06 triggers; the range "
+        "is not usable as-is.",
+        bar=t, age_bars=age, lookback_bars=int(lookback_bars),
+    )
+
+
+def _degenerate_diagnostic(t: int, age: int | None,
+                           lookback_bars: int) -> RangeDiagnostic:
+    return RangeDiagnostic(
+        NT_RANGE_INVALID,
+        f"dealing-range anchors are degenerate: high <= low at bar {t}, so no "
+        "range can be measured (DR-01).",
+        bar=t, age_bars=age, lookback_bars=int(lookback_bars),
+    )
 
 
 _MARKET_TZ: dict[str, str] = {
@@ -260,21 +360,49 @@ def in_session(df: pd.DataFrame, idx: int, market: str, gate: SessionGate) -> bo
     return any(_in_window(t, start, end) for start, end in windows)
 
 
-def dealing_range(swings: Iterable, idx: int, lookback_bars: int = 120) -> DealingRange | None:
-    """Last confirmed swing high/low pair, with both sides recent enough."""
-    highs = [s for s in swings if getattr(s, "kind", "") == "H" and getattr(s, "confirmed_at", 0) <= idx]
-    lows = [s for s in swings if getattr(s, "kind", "") == "L" and getattr(s, "confirmed_at", 0) <= idx]
+def dealing_range_state(swings: Iterable, idx: int,
+                        lookback_bars: int = RANGE_STALENESS_BARS
+                        ) -> tuple[DealingRange | None, RangeDiagnostic | None]:
+    """The last confirmed swing high/low pair **and** why it is absent.
+
+    Returns ``(range, None)`` when the pair is usable, else ``(None,
+    diagnostic)``.  P0-16: the 120-bar staleness is a repo expiry (§13.3), so
+    an absent range is always accompanied by a reason; a caller that only wants
+    the value calls :func:`dealing_range`.
+    """
+    t = int(idx)
+    highs = [s for s in swings if getattr(s, "kind", "") == "H"
+             and int(getattr(s, "confirmed_at", 0)) <= t]
+    lows = [s for s in swings if getattr(s, "kind", "") == "L"
+            and int(getattr(s, "confirmed_at", 0)) <= t]
     if not highs or not lows:
-        return None
-    h = highs[-1]
-    l = lows[-1]
-    if idx - int(h.confirmed_at) > lookback_bars or idx - int(l.confirmed_at) > lookback_bars:
-        return None
+        missing = ("high or low" if not highs and not lows
+                   else "high" if not highs else "low")
+        return None, _no_pair_diagnostic(t, missing, lookback_bars)
+    h, l = highs[-1], lows[-1]
+    h_conf = int(getattr(h, "confirmed_at", h.index))
+    l_conf = int(getattr(l, "confirmed_at", l.index))
+    age = max(t - h_conf, t - l_conf)
+    if age > int(lookback_bars):
+        return None, _stale_diagnostic(t, max(h_conf, l_conf), age,
+                                       lookback_bars)
     high = max(float(h.price), float(l.price))
     low = min(float(h.price), float(l.price))
     if high <= low:
-        return None
-    return DealingRange(high, low, (high + low) / 2, int(h.index), int(l.index))
+        return None, _degenerate_diagnostic(t, age, lookback_bars)
+    return DealingRange(high, low, (high + low) / 2,
+                        int(h.index), int(l.index)), None
+
+
+def dealing_range(swings: Iterable, idx: int,
+                  lookback_bars: int = RANGE_STALENESS_BARS) -> DealingRange | None:
+    """Last confirmed swing high/low pair, with both sides recent enough.
+
+    This is the value-only twin of :func:`dealing_range_state`; an absent
+    range has a reason there (``NT_RANGE_INVALID`` / ``NT_DATA_MISSING``), so a
+    staleness can no longer be mistaken for "no range" with no cause (P0-16).
+    """
+    return dealing_range_state(swings, idx, lookback_bars)[0]
 
 
 class SwingIndex:
@@ -321,20 +449,32 @@ class SwingIndex:
                 return serialize_bias(BiasState.BEAR)
         return serialize_bias(BiasState.NEUTRAL)
 
-    def dealing_range(self, t: int, lookback_bars: int = 120) -> DealingRange | None:
+    def dealing_range_state(self, t: int,
+                            lookback_bars: int = RANGE_STALENESS_BARS
+                            ) -> tuple[DealingRange | None, RangeDiagnostic | None]:
+        """Binary-search twin of :func:`dealing_range_state` (same reasons)."""
+        t = int(t)
         nh, nl = self._n("h", t), self._n("l", t)
         if nh == 0 or nl == 0:
-            return None
+            missing = ("high or low" if nh == 0 and nl == 0
+                       else "high" if nh == 0 else "low")
+            return None, _no_pair_diagnostic(t, missing, lookback_bars)
         hi, li = nh - 1, nl - 1
-        if (int(t) - int(self.h_conf[hi]) > lookback_bars
-                or int(t) - int(self.l_conf[li]) > lookback_bars):
-            return None
+        h_conf, l_conf = int(self.h_conf[hi]), int(self.l_conf[li])
+        age = max(t - h_conf, t - l_conf)
+        if age > int(lookback_bars):
+            return None, _stale_diagnostic(t, max(h_conf, l_conf), age,
+                                           lookback_bars)
         high = max(float(self.h_price[hi]), float(self.l_price[li]))
         low = min(float(self.h_price[hi]), float(self.l_price[li]))
         if high <= low:
-            return None
+            return None, _degenerate_diagnostic(t, age, lookback_bars)
         return DealingRange(high, low, (high + low) / 2,
-                            int(self.h_index[hi]), int(self.l_index[li]))
+                            int(self.h_index[hi]), int(self.l_index[li])), None
+
+    def dealing_range(self, t: int,
+                      lookback_bars: int = RANGE_STALENESS_BARS) -> DealingRange | None:
+        return self.dealing_range_state(t, lookback_bars)[0]
 
 
 def ote_from_signal(df: pd.DataFrame, start: int, end: int, entry: float, direction: str) -> float | None:
