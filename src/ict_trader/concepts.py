@@ -27,10 +27,9 @@ from __future__ import annotations
 import argparse
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Literal
-from zoneinfo import ZoneInfo
 
 import matplotlib
 
@@ -42,6 +41,7 @@ import pandas as pd
 from matplotlib.patches import Rectangle
 
 from .cisd import CISD, CISDConfig, detect_cisd
+from .context import in_session_at
 from .enhancements import SMT, SessionLevel, detect_htf_cisds, detect_session_levels, detect_smt
 from .pd_arrays import PDAArray, detect_breakers, detect_mitigations, detect_rejections
 from .sweeps import KeyLevel, LiquiditySweep, detect_key_levels, detect_sweeps, nearest_key_target, score_key_levels
@@ -678,26 +678,36 @@ def detect_gaps(df: pd.DataFrame, cfg: ICTConfig) -> list[Gap]:
     return result
 
 
+#: Killzone labels in ``ICTResult.killzones`` are aliases into the one session
+#: table in :mod:`ict_trader.context` (P0-12).  They are presentation names, not
+#: a second clock.
+_KILLZONE_ALIASES: dict[str, str] = {
+    "New York": "ny_am",
+    "London Open": "london",
+    "London Close": "london_close",
+    "Asian": "asian",
+}
+
+
 def detect_killzones(df: pd.DataFrame, cfg: ICTConfig) -> dict[str, list[tuple[int, int]]]:
+    """Annotate the canonical session windows that contain each bar.
+
+    Every window is read through :func:`context.in_session_at`; this module
+    keeps no timezone table of its own, so a killzone span cannot disagree with
+    ``context.in_session`` (P0-12).  Silver Bullet is a model window, not a
+    killzone (silver_bullet R12 / killzone R32), so it is deliberately absent.
+    """
     if not cfg.show_killzones or len(df) < 3:
         return {}
     dt = pd.to_datetime(df["date"])
     if (dt.iloc[-1] - dt.iloc[0]).total_seconds() / max(len(df) - 1, 1) > 20 * 3600:
         return {}  # daily bars: no intraday killzones
-    sessions = {
-        "New York": ("America/New_York", time(7, 0), time(9, 0)),
-        "London Open": ("Europe/London", time(7, 0), time(10, 0)),
-        "London Close": ("Europe/London", time(15, 0), time(17, 0)),
-        "Asian": ("Asia/Tokyo", time(10, 0), time(14, 0)),
-    }
     zones: dict[str, list[tuple[int, int]]] = {}
-    for name, (tz, start, end) in sessions.items():
+    for name, key in _KILLZONE_ALIASES.items():
         current: list[int] = []
         spans: list[tuple[int, int]] = []
         for i, ts in enumerate(dt):
-            local = ts.tz_localize("UTC").tz_convert(ZoneInfo(tz)) if ts.tzinfo is None else ts.tz_convert(ZoneInfo(tz))
-            inside = start <= local.time() <= end
-            if inside:
+            if in_session_at(ts, key):
                 current.append(i)
             elif current:
                 spans.append((current[0], current[-1]))

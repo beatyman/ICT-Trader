@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 
 from .concepts import ICTConfig, analyze
+from .context import in_silver_bullet as _canonical_silver_bullet
 from .indicators import add_indicators, resample_htf
 from .strategy import net_rr
 
@@ -201,18 +202,15 @@ def premium_discount(price: float, range_high: float, range_low: float,
 
 
 def in_silver_bullet(dt, tz: str = "America/New_York", input_tz: str = "UTC") -> bool:
-    """ICT Silver Bullet window: 10:00-11:00 New York time.
+    """ICT Silver Bullet window, read from the one canonical table (P0-12).
 
-    ``input_tz`` is the timezone of the naive timestamps in ``df``
-    (UTC for crypto, America/New_York for US, Asia/Hong_Kong for HK...)."""
-    try:
-        from zoneinfo import ZoneInfo
-        ts = pd.Timestamp(dt)
-        local = ts.tz_localize(input_tz).tz_convert(ZoneInfo(tz))
-        h, m = local.hour, local.minute
-        return (h == 10) or (h == 11 and m == 0)
-    except Exception:
-        return False
+    ``context.SILVER_BULLET_WINDOWS`` is the only definition: three one-hour
+    New York windows, half-open ``[start, end)``.  This wrapper keeps the old
+    ``tz``/``input_tz`` signature, but ``tz`` cannot select a second window set;
+    the canonical table is always evaluated on the New York clock.  ``input_tz``
+    is the timezone of a naive ``dt`` (UTC for crypto, ...).
+    """
+    return _canonical_silver_bullet(dt, tz=tz, input_tz=input_tz)
 
 
 def detect_intraday_session_levels(df: pd.DataFrame, tz: str = "America/New_York",

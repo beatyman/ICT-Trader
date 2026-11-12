@@ -6,11 +6,11 @@ each can be ablated.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import time as dtime
 from enum import Enum
 from typing import Iterable, Literal
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -102,7 +102,17 @@ _MARKET_TZ: dict[str, str] = {
     "other": "UTC",
 }
 
-_SESSION_WINDOWS: dict[str, tuple[str, list[tuple[dtime, dtime]]]] = {
+#: The one Silver Bullet clock (silver_bullet R13/R14, LT-B01, SPEC §10.2):
+#: three one-hour windows on the America/New_York wall clock.  Every Silver
+#: Bullet call site imports this table; no module keeps a second clock (P0-12).
+SILVER_BULLET_TZ = "America/New_York"
+SILVER_BULLET_WINDOWS: tuple[tuple[dtime, dtime], ...] = (
+    (dtime(3, 0), dtime(4, 0)),
+    (dtime(10, 0), dtime(11, 0)),
+    (dtime(14, 0), dtime(15, 0)),
+)
+
+_SESSION_WINDOWS: dict[str, tuple[str, Sequence[tuple[dtime, dtime]]]] = {
     "cn": ("Asia/Shanghai", [(dtime(9, 30), dtime(11, 30)), (dtime(13, 0), dtime(15, 0))]),
     "hk": ("Asia/Hong_Kong", [(dtime(9, 30), dtime(12, 0)), (dtime(13, 0), dtime(16, 0))]),
     "london": ("America/New_York", [(dtime(2, 0), dtime(5, 0))]),
@@ -122,26 +132,44 @@ _SESSION_WINDOWS: dict[str, tuple[str, list[tuple[dtime, dtime]]]] = {
     "london_close": ("America/New_York", [(dtime(10, 0), dtime(12, 0))]),
     "ny_am": ("America/New_York", [(dtime(7, 0), dtime(10, 0))]),
     "ny_pm": ("America/New_York", [(dtime(13, 30), dtime(16, 0))]),
-    # ICT Silver Bullet windows, New York local time.
-    "silver_bullet": ("America/New_York", [
-        (dtime(3, 0), dtime(4, 0)),
-        (dtime(10, 0), dtime(11, 0)),
-        (dtime(14, 0), dtime(15, 0)),
-    ]),
+    "silver_bullet": (SILVER_BULLET_TZ, SILVER_BULLET_WINDOWS),
 }
+
+
+def session_windows(key: str) -> tuple[str, tuple[tuple[dtime, dtime], ...]]:
+    """Return the canonical ``(zone, windows)`` pair for one session gate.
+
+    This is the only read path for the table above.  Callers that annotate the
+    clock (``concepts.detect_killzones``) must derive their spans from it rather
+    than defining a second timezone table (P0-12).
+    """
+    zone, windows = _SESSION_WINDOWS[key]
+    return zone, tuple(windows)
 
 
 def _as_zone(df: pd.DataFrame, idx: int, zone: str, market: str = "other") -> pd.Timestamp:
     ts = pd.Timestamp(df["date"].iloc[idx])
     if ts.tzinfo is None:
-        source = {
-            "cn": "Asia/Shanghai",
-            "hk": "Asia/Hong_Kong",
-            "crypto": "UTC",
-            "other": "UTC",
-        }.get(market, "UTC")
+        source = _MARKET_TZ.get(market, "UTC")
         return ts.tz_localize(source, ambiguous="NaT", nonexistent="shift_forward").tz_convert(zone)
     return ts.tz_convert(zone)
+
+
+def _gate_key(market: str, gate: SessionGate) -> str | None:
+    """Resolve a gate (including ``auto``) to one key in the session table.
+
+    ``None`` means "no gate" and always passes; it is distinct from a gate
+    whose window is simply closed at this instant.
+    """
+    if gate == "none":
+        return None
+    if gate == "auto":
+        if market in {"cn", "hk"}:
+            return market
+        if market == "other":
+            return "ny_am"
+        return None
+    return gate
 
 
 def _in_window(t: dtime, start: dtime, end: dtime) -> bool:
@@ -157,6 +185,66 @@ def _in_window(t: dtime, start: dtime, end: dtime) -> bool:
     return t >= start or t < end
 
 
+def _stamp_in_zone(ts, zone: str, market: str = "other",
+                   input_tz: str | None = None) -> pd.Timestamp | None:
+    """Convert one timestamp into ``zone``; ``None`` when it is not a time.
+
+    Naive stamps are read in ``input_tz`` when supplied, else in the market's
+    native zone (UTC for crypto).  Aware stamps are converted directly, so the
+    caller's input convention never moves the instant.
+    """
+    try:
+        stamp = pd.Timestamp(ts)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(stamp):
+        return None
+    if stamp.tzinfo is None:
+        source = input_tz or _MARKET_TZ.get(market, "UTC")
+        try:
+            stamp = stamp.tz_localize(source, ambiguous="NaT",
+                                      nonexistent="shift_forward")
+        except (TypeError, ValueError):
+            return None
+    if pd.isna(stamp):
+        return None
+    try:
+        return stamp.tz_convert(zone)
+    except (TypeError, ValueError):
+        return None
+
+
+def in_session_at(ts, gate: SessionGate, market: str = "other",
+                  input_tz: str | None = None) -> bool:
+    """Timestamp-level twin of :func:`in_session` over the same table.
+
+    ``in_session`` reads one bar of a frame; this reads a single instant.  Both
+    resolve ``gate``/``auto`` through :func:`_gate_key` and test the same
+    half-open windows, so a bar verdict and an instant verdict cannot diverge.
+    """
+    key = _gate_key(market, gate)
+    if key is None:
+        return True
+    zone, windows = _SESSION_WINDOWS[key]
+    local = _stamp_in_zone(ts, zone, market, input_tz)
+    if local is None:
+        return False
+    t = local.time()
+    return any(_in_window(t, start, end) for start, end in windows)
+
+
+def in_silver_bullet(ts, tz: str = SILVER_BULLET_TZ,
+                     input_tz: str = "UTC") -> bool:
+    """Whether ``ts`` is inside the canonical Silver Bullet table (P0-12).
+
+    This is the one Silver Bullet predicate.  ``tz`` is accepted only because
+    the former ``rules.in_silver_bullet`` exposed it; it cannot select a
+    second window set, because there is one table and it is defined on the
+    ``America/New_York`` clock.  ``input_tz`` is the zone of a naive ``ts``.
+    """
+    return in_session_at(ts, "silver_bullet", "crypto", input_tz=input_tz)
+
+
 def in_session(df: pd.DataFrame, idx: int, market: str, gate: SessionGate) -> bool:
     """Return whether a closed bar falls in the requested cash/session window.
 
@@ -164,17 +252,9 @@ def in_session(df: pd.DataFrame, idx: int, market: str, gate: SessionGate) -> bo
     crypto) and then converted to the session timezone.  This matters for the
     New York kill zones: Binance 15m timestamps are UTC, not New York local.
     """
-    if gate == "none":
+    key = _gate_key(market, gate)
+    if key is None:
         return True
-    if gate == "auto":
-        if market in {"cn", "hk"}:
-            key = market
-        elif market == "other":
-            key = "ny_am"
-        else:
-            return True
-    else:
-        key = gate
     zone, windows = _SESSION_WINDOWS[key]
     t = _as_zone(df, idx, zone, market).time()
     return any(_in_window(t, start, end) for start, end in windows)
