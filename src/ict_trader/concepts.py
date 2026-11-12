@@ -382,7 +382,11 @@ def detect_fvgs(df: pd.DataFrame, cfg: ICTConfig) -> list[FVG]:
         f.first_presented = not prior
         by_dir[f.direction].append(f)
 
-    # update mitigation and right edges
+    # Update lifecycle and right edges.  AR-04: an FVG is invalidated only by a
+    # **body close** through the far edge (bull ``close < bottom``, bear
+    # ``close > top``).  A wick beyond that edge which closes back inside keeps
+    # the gap alive as a *tested* FVG (AR-10a): ``touched_at`` records the wick,
+    # ``active``/``mitigated`` record the body close.
     # Vectorised per-gap scan.  The old Python nested loop was O(FVG * N) in
     # interpreted code and became unusable on multi-year 15m histories.
     for f in out:
@@ -391,36 +395,38 @@ def detect_fvgs(df: pd.DataFrame, cfg: ICTConfig) -> list[FVG]:
             f.right = n - 1
             continue
         if f.direction == "bull":
-            lows = low[start:]
-            touch = lows < f.top
-            full = lows <= f.bottom
-            if touch.any():
-                f.touched_at = start + int(np.argmax(touch))
-            if full.any():
-                f.active = False
-                f.mitigated = True
-                f.right = start + int(np.argmax(full))
-                continue
+            touch = low[start:] < f.top  # wick inside the gap => tested
+            invalidated = close[start:] < f.bottom  # body close beyond far edge
         else:
-            highs = high[start:]
-            touch = highs > f.bottom
-            full = highs >= f.top
-            if touch.any():
-                f.touched_at = start + int(np.argmax(touch))
-            if full.any():
-                f.active = False
-                f.mitigated = True
-                f.right = start + int(np.argmax(full))
-                continue
-        if f.active:
-            f.right = n - 1
+            touch = high[start:] > f.bottom
+            invalidated = close[start:] > f.top
+        if touch.any():
+            f.touched_at = start + int(np.argmax(touch))
+        if invalidated.any():
+            f.active = False
+            f.mitigated = True
+            f.right = start + int(np.argmax(invalidated))
+            continue
+        f.right = n - 1
     return out
 
 
 def detect_bpr(fvgs: list[FVG]) -> list[FVG]:
-    """Balance Price Range = overlap of the latest bull and bear FVG."""
-    bulls = [f for f in fvgs if f.direction == "bull"]
-    bears = [f for f in fvgs if f.direction == "bear"]
+    """Balance Price Range = the intersection of two opposite-direction FVGs.
+
+    AR-11: the band is the intersection (never the union) and exists only while
+    ``bottom < top``.  AR-12: the constituents must be opposite-direction
+    *gaps*; an IFVG is a flipped gap, not a gap, and a previously derived BPR is
+    not a gap either, so only strict ``label == "FVG"`` rows that are still
+    directional (``not inverted``) qualify.
+
+    Polarity is a corpus conflict (PP:C3: first gap / newer gap / entry side;
+    V18 must choose).  P0 declares the *newer gap* reading (b), which two of the
+    three cited sources attest, instead of the old hardcoded ``"bull"``.
+    """
+    gaps = [f for f in fvgs if f.label == "FVG" and not f.inverted]
+    bulls = [f for f in gaps if f.direction == "bull"]
+    bears = [f for f in gaps if f.direction == "bear"]
     if not bulls or not bears:
         return []
     b, s = bulls[-1], bears[-1]
@@ -428,8 +434,10 @@ def detect_bpr(fvgs: list[FVG]) -> list[FVG]:
     bottom = max(b.bottom, s.bottom)
     if top <= bottom:
         return []
-    return [FVG("bull", top, bottom, min(b.left, s.left), max(b.right, s.right),
-                max(b.created, s.created), True, False, "BPR")]
+    direction: Direction = "bear" if s.created > b.created else "bull"
+    return [FVG(direction, top, bottom, min(b.left, s.left),
+                max(b.right, s.right), max(b.created, s.created),
+                active=True, mitigated=False, label="BPR")]
 
 
 def detect_ifvg(fvgs: list[FVG], df: pd.DataFrame) -> list[FVG]:

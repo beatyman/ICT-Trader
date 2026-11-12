@@ -71,14 +71,16 @@ def build_sweep_events(frame: pd.DataFrame, *, ttl_bars: int = 8,
     for s in raw:
         if int(s.reclaim_bar) < cutoff:
             continue
-        i = max(0, min(int(s.sweep_bar), len(times) - 1))
-        t = times[i]
+        # The sweep is known only when the reclaim prints, so its time is the
+        # reclaim bar (not the penetration bar) and the TTL counts from there.
+        r = max(0, min(int(s.reclaim_bar), len(times) - 1))
+        t = times[r]
         ev = SweepEvent(
             "SSL" if s.direction == "bull" else "BSL",
             "bullish" if s.direction == "bull" else "bearish",
             t, float(s.level), float(s.reclaim_close),
             float(s.penetration_atr), t + max(1, int(ttl_bars)) * step,
-            int(s.reclaim_bar), False, float(s.sweep_price), str(s.name),
+            r, False, float(s.sweep_price), str(s.name),
         )
         ev.active = now <= ev.expires_at
         out.append(ev)
