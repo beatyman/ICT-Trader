@@ -36,7 +36,7 @@ import pandas as pd
 
 from .concepts import ICTConfig, ICTResult, analyze, fetch_futu, load_csv
 from .config import config_hash as _config_hash
-from .context import in_session
+from .context import (PO3PeriodContract, in_session, resolve_model_identity)
 from .stats import mean_interval, n_for_margin, wilson_interval
 from .variants import VariantConfig
 
@@ -632,6 +632,17 @@ class StrategyConfig:
     #: The run's declared variants (P1-01, §14.1-3/A7).  Empty by design: an
     #: undeclared fork is never guessed by the simulator; a read refuses.
     variant_config: VariantConfig = field(default_factory=VariantConfig)
+    #: P1-11: the same model/period identity the setup surface declares -- the
+    #: PO3 six-field period contract (GW-02), the narrative order (§3.4) and
+    #: one execution-model family (RE:EX-18).  All three are declared together
+    #: or none is; the simulator never infers a family from the CISD path.
+    po3_period: PO3PeriodContract | dict[str, object] | None = None
+    narrative_order: str | None = None
+    execution_model_id: str | None = None
+    #: Refuse to simulate an unspecified model.  Off is the pre-P1-11
+    #: compatibility path: the trade carries the empty identity, which is
+    #: explicitly ``undeclared`` rather than a defaulted family.
+    model_identity_gate: bool = False
 
     def read_variant(self, variant_id: str) -> str:
         """Read one declared fork through the single register (A7)."""
@@ -640,12 +651,24 @@ class StrategyConfig:
     @property
     def config_hash(self) -> str:
         """The declared-variant configuration hash (SYSTEM_SPEC A2)."""
+        extra: dict[str, object] = {}
+        # P1-11: the declared identity is part of the digest; nothing is hashed
+        # by implication and an undeclared identity adds nothing.
+        if self.po3_period is not None:
+            extra["po3_period"] = self.po3_period.to_public()
+        if self.narrative_order is not None:
+            extra["narrative_order"] = self.narrative_order
+        if self.execution_model_id is not None:
+            extra["execution_model_id"] = self.execution_model_id
+        if self.model_identity_gate:
+            extra["model_identity_gate"] = True
         return _config_hash(
             self.variant_config,
             be_mode=self.declared_be_mode(),
             entry_mode=self.entry_mode,
             ladder_mode=self.declared_ladder_mode(),
             rr_mode=self.rr_mode,
+            **extra,
         )
 
     def __post_init__(self) -> None:
@@ -666,6 +689,25 @@ class StrategyConfig:
         # simulated fill (P0-19; MG-01/MG-08/V31).
         self.declared_ladder_mode()
         self.declared_be_mode()
+        # P1-11: one model/period identity, declared together or not at all.
+        # The simulator may only report a trade under a family the run named;
+        # ``model_identity_gate`` refuses the empty identity instead of falling
+        # back to the legacy CISD path as if it were a declared model.
+        identity = resolve_model_identity(
+            period=self.po3_period,
+            narrative_order=self.narrative_order,
+            execution_model_id=self.execution_model_id,
+            required=self.model_identity_gate,
+        )
+        object.__setattr__(self, "po3_period", identity.period)
+        object.__setattr__(
+            self, "narrative_order",
+            None if identity.narrative_order is None
+            else identity.narrative_order.order.value)
+        object.__setattr__(
+            self, "execution_model_id",
+            None if identity.execution_model is None
+            else identity.execution_model.model_id)
 
     def rr_floor(self) -> float:
         """The declared gate floor: explicit ``min_rr`` else the mode's floor."""
@@ -727,6 +769,10 @@ class Trade:
     htf_fvg_tf: str = ""
     regime_trend: str = ""
     regime_vol: str = ""
+    #: P1-11: the model identity the run declared for this trade.  Empty means
+    #: the pre-P1-11 path declared none; it is never a defaulted family.
+    execution_model_id: str = ""
+    narrative_order: str = ""
 
 
 @dataclass
@@ -1160,6 +1206,15 @@ def simulate_cisd(
             htf_fvg_tf=str(features.get("htf_fvg_tf", "")),
             regime_trend=str(features.get("regime_trend", "")),
             regime_vol=str(features.get("regime_vol", "")),
+            # P1-11: the setup's identity travels with the trade; a direct
+            # simulator caller falls back to the declared config, never to an
+            # inferred family.
+            execution_model_id=str(
+                features.get("execution_model_id")
+                or cfg.execution_model_id or ""),
+            narrative_order=str(
+                features.get("narrative_order")
+                or cfg.narrative_order or ""),
         ))
         eq_points.append((dates.iloc[exit_idx], equity))
 

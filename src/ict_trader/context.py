@@ -9,7 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, time as dtime, timedelta
 from enum import Enum, StrEnum
-from typing import Iterable, Literal
+from types import MappingProxyType
+from typing import Iterable, Literal, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
@@ -4596,3 +4597,740 @@ def structure_bias(swings: Iterable, t: int, lookback: int = 2) -> str:
         if lh and ll:
             return serialize_bias(BiasDirection.BEAR)
     return serialize_bias(BiasDirection.NEUTRAL)
+
+
+# --------------------------------------------------------------------------- #
+# P1-11 -- model and period identity
+#
+# Three declarations that the corpus makes mandatory and the checkout had no
+# object for:
+#
+# * the **PO3 six-field period contract** (GW-02/GW-03): instrument, candle
+#   length, session definition, timezone, opening price, ending time -- filled
+#   before any phase label, with one opening convention and never a mix;
+# * the **narrative order** (SYSTEM_SPEC §3.4): ``bias_first`` or
+#   ``draw_first``; the two orderings may not be mixed inside one run, and both
+#   still enter ``B1`` before ``D1``;
+# * the **execution model** (RE:EX-18): one selected family out of the ten in
+#   SYSTEM_SPEC §8.4.  The families are not variants of one rule and are never
+#   averaged; an id outside the declared set is not resolved to a "closest"
+#   family, because an implicit model is exactly the defect the audit names.
+#
+# §14.2 has no ``V##`` row for any of the three, so each is a declared run input
+# (like the week clock and the daily-bias family) with no default.  An absent
+# declaration refuses with ``NT_VARIANT_UNDECLARED`` (§14.1-2/F12) instead of
+# being filled in by the implementation.
+# --------------------------------------------------------------------------- #
+#: GW-02: the six fields a PO3 period contract must fill **before any label**.
+#: The tuple is the contract's arity and field order; there is no seventh field
+#: and no optional one (``po3_amd`` R11, ``dedup_batch_036.md:124``: "Before you
+#: label any phase, write down the instrument, candle length, session
+#: definition, timezone, opening price, and ending time.").
+PO3_PERIOD_FIELDS: tuple[str, ...] = (
+    "instrument",
+    "candle_length",
+    "session_definition",
+    "timezone",
+    "opening_price",
+    "ending_time",
+)
+PO3_PERIOD_SOURCE = (
+    "GW-02 [LT-P01]; po3_amd R11 (all six fields filled before any label)")
+
+#: GW-03's *default*, kept as a labelled constant.  A caller may pass these to
+#: :func:`declare_po3_period`, but no constructor, config or gate applies them
+#: implicitly: the daily opening convention is a declaration, not an inherited
+#: value.
+PO3_DAILY_DEFAULT_OPEN: dtime = dtime(0, 0)
+PO3_DAILY_DEFAULT_ZONE = "America/New_York"
+
+#: GW-05: the accumulation -> manipulation -> distribution order is fixed.  A
+#: label that reorders the phases is not a PO3 label.
+PO3_PHASE_ORDER: tuple[str, ...] = (
+    "accumulation", "manipulation", "distribution")
+
+
+class PO3Phase(StrEnum):
+    """The three PO3 phases in their one legal order (GW-05)."""
+
+    ACCUMULATION = "accumulation"
+    MANIPULATION = "manipulation"
+    DISTRIBUTION = "distribution"
+
+
+class ModelIdentityUndeclared(ValueError):
+    """A required model-identity declaration is missing (fail-closed).
+
+    ``refusal`` is the first-class form (A3/A6): its code is
+    ``NT_VARIANT_UNDECLARED`` and its ``variant_id`` is the missing field, so a
+    caller can assert the refusal without parsing the message.  No period, order
+    or family is substituted -- §14.1-2 makes an unspecified model a refusal,
+    not a default.
+    """
+
+    def __init__(self, field: str, detail: str = "") -> None:
+        self.field = str(field)
+        self.refusal = Refusal(
+            RefusalCode.NT_VARIANT_UNDECLARED, self.field,
+            detail or "the model/period identity is not declared")
+        super().__init__(str(self.refusal))
+
+
+class PO3PeriodIncomplete(ValueError):
+    """GW-02: fewer than six period fields are filled, so no label is legal."""
+
+    def __init__(self, missing: Iterable[str], detail: str = "") -> None:
+        self.missing_fields = tuple(str(name) for name in missing)
+        self.refusal = Refusal(
+            RefusalCode.NT_VARIANT_UNDECLARED, "po3_period_contract",
+            detail or (
+                "GW-02 requires all six period fields before any label; "
+                f"missing {list(self.missing_fields)}"))
+        super().__init__(str(self.refusal))
+
+
+class UnknownExecutionModel(ValueError):
+    """The declared id is not one of the ten families; it is never resolved."""
+
+    def __init__(self, value: object) -> None:
+        self.value = str(value)
+        self.refusal = Refusal(
+            RefusalCode.NT_VARIANT_UNDECLARED, "execution_model_id",
+            f"{self.value!r} is not a declared execution-model family; "
+            f"declare exactly one of {EXECUTION_MODEL_FAMILIES} (RE:EX-18)")
+        super().__init__(str(self.refusal))
+
+
+def _period_text(value: object, field: str) -> str:
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"PO3 period {field} must not be blank")
+    return text
+
+
+def _validate_period_zone(zone: object) -> str:
+    """GW-03/R47: a named IANA zone, never a fixed UTC offset."""
+    text = str(zone).strip()
+    try:
+        ZoneInfo(text)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(
+            f"unknown PO3 period timezone {zone!r}; GW-03/R47 require a named "
+            "IANA zone (for example 'America/New_York'), not a fixed offset"
+        ) from None
+    return text
+
+
+def _parse_period_clock(value: object, field: str) -> dtime:
+    try:
+        return parse_day_clock(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"PO3 period {field} is not a valid clock: {exc}") from None
+
+
+def _period_price(value: object) -> float:
+    if isinstance(value, bool):
+        raise ValueError(
+            "PO3 period opening_price must be a number, not a bool")
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"PO3 period opening_price {value!r} is not numeric") from None
+    if not np.isfinite(price) or price <= 0:
+        raise ValueError(
+            f"PO3 period opening_price must be finite and > 0, got {value!r}")
+    return price
+
+
+@dataclass(frozen=True, slots=True)
+class PO3PeriodContract:
+    """The GW-02 six-field PO3 period contract, complete by construction.
+
+    The object cannot exist with a missing field: :func:`declare_po3_period`
+    collects every field and refuses the incomplete set with
+    :class:`PO3PeriodIncomplete` before this class is built.  The six fields are
+    exactly :data:`PO3_PERIOD_FIELDS`; ``to_public`` returns exactly those six
+    keys, so a consumer cannot mistake a provenance note for a period field.
+
+    The contract is a declaration, not a detector: it says which interval is
+    being labelled.  It does not itself decide a phase (see
+    :func:`label_po3_phase`) and it does not choose an opening convention --
+    :meth:`assert_opening_convention` refuses a mix against the one declared
+    :class:`DayBoundary` (GW-03).
+    """
+
+    instrument: str
+    candle_length: str
+    session_definition: str
+    timezone: str
+    opening_price: float
+    ending_time: dtime
+
+    def __post_init__(self) -> None:
+        missing: list[str] = []
+        for name in PO3_PERIOD_FIELDS:
+            value = getattr(self, name)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                missing.append(name)
+        if missing:
+            raise PO3PeriodIncomplete(missing)
+        for name in ("instrument", "candle_length", "session_definition"):
+            object.__setattr__(
+                self, name, _period_text(getattr(self, name), name))
+        object.__setattr__(
+            self, "timezone", _validate_period_zone(self.timezone))
+        object.__setattr__(
+            self, "ending_time", _parse_period_clock(self.ending_time, "ending_time"))
+        object.__setattr__(
+            self, "opening_price", _period_price(self.opening_price))
+
+    @property
+    def source(self) -> str:
+        return PO3_PERIOD_SOURCE
+
+    def to_public(self) -> dict[str, object]:
+        """Exactly the six GW-02 fields, with a clock as ``HH:MM``."""
+        return {
+            "instrument": self.instrument,
+            "candle_length": self.candle_length,
+            "session_definition": self.session_definition,
+            "timezone": self.timezone,
+            "opening_price": self.opening_price,
+            "ending_time": self.ending_time.strftime("%H:%M"),
+        }
+
+    as_dict = to_public
+
+    def opening_convention_conflict(self, boundary: DayBoundary) -> str | None:
+        """GW-03: the contract and the boundary must use one zone, or none."""
+        if self.timezone != boundary.zone:
+            return (
+                "GW-03 declares one opening convention, never mixed, but the "
+                f"PO3 period is in {self.timezone!r} and the declared day "
+                f"boundary {boundary.kind!r} is in {boundary.zone!r}")
+        return None
+
+    def assert_opening_convention(self, boundary: DayBoundary) -> "PO3PeriodContract":
+        """Return ``self`` when the opening convention matches ``boundary``."""
+        conflict = self.opening_convention_conflict(boundary)
+        if conflict is not None:
+            raise ValueError(conflict)
+        return self
+
+
+def declare_po3_period(fields: Mapping[str, object] | None = None, *,
+                       boundary: DayBoundary | None = None,
+                       **values: object) -> PO3PeriodContract:
+    """Build the one complete PO3 period contract, or refuse.
+
+    All six GW-02 fields are required.  ``fields`` may be a mapping and
+    ``values`` are the same fields as keywords; an unknown key refuses instead
+    of being stored as a seventh field.  When ``boundary`` is supplied, GW-03's
+    one-opening-convention rule is enforced before the contract is returned.
+    """
+    merged: dict[str, object] = dict(fields or {})
+    merged.update(values)
+    unknown = sorted(set(merged) - set(PO3_PERIOD_FIELDS))
+    if unknown:
+        raise ValueError(
+            f"unknown PO3 period field(s) {unknown}; GW-02 declares exactly "
+            f"{list(PO3_PERIOD_FIELDS)} (there is no seventh field)")
+    missing = [
+        name for name in PO3_PERIOD_FIELDS
+        if name not in merged or merged[name] is None
+        or (isinstance(merged[name], str) and not str(merged[name]).strip())
+    ]
+    if missing:
+        raise PO3PeriodIncomplete(missing)
+    contract = PO3PeriodContract(
+        **{name: merged[name] for name in PO3_PERIOD_FIELDS})
+    if boundary is not None:
+        contract.assert_opening_convention(boundary)
+    return contract
+
+
+def resolve_po3_period(value: object, *,
+                       boundary: DayBoundary | None = None
+                       ) -> PO3PeriodContract:
+    """Normalize a contract or its six-field mapping; never a default."""
+    if isinstance(value, PO3PeriodContract):
+        contract = value
+    elif isinstance(value, Mapping):
+        contract = declare_po3_period(value)
+    else:
+        raise TypeError(
+            "a PO3 period contract is a PO3PeriodContract or its six-field "
+            f"mapping; got {type(value).__name__}")
+    if boundary is not None:
+        contract.assert_opening_convention(boundary)
+    return contract
+
+
+@dataclass(frozen=True, slots=True)
+class PO3PhaseLabel:
+    """One phase label bound to its completed period contract (GW-02/GW-05)."""
+
+    phase: PO3Phase
+    contract: PO3PeriodContract
+    source: str = "GW-02/GW-05; po3_amd R1/R11"
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "phase": self.phase.value,
+            "phase_index": PO3_PHASE_ORDER.index(self.phase.value) + 1,
+            "phase_order": list(PO3_PHASE_ORDER),
+            "period": self.contract.to_public(),
+            "period_fields_complete": True,
+            "source": self.source,
+        }
+
+
+def label_po3_phase(phase: object,
+                    contract: object) -> PO3PhaseLabel:
+    """Label one PO3 phase only after the six-field contract is complete.
+
+    ``phase`` must be one of the three GW-05 phases.  ``contract`` is the
+    completed :class:`PO3PeriodContract` (or its six-field mapping); ``None``
+    and an incomplete mapping both refuse with :class:`PO3PeriodIncomplete`,
+    which is the codified form of "if you cannot fill in all six, the chart is
+    not ready to be labeled" (R11).
+    """
+    if contract is None:
+        raise PO3PeriodIncomplete(
+            PO3_PERIOD_FIELDS,
+            "GW-02: all six period fields must be filled before any phase "
+            "label; no contract was supplied")
+    if not isinstance(contract, PO3PeriodContract):
+        contract = declare_po3_period(contract)
+    key = str(phase).strip().lower()
+    try:
+        parsed = PO3Phase(key)
+    except ValueError:
+        raise ValueError(
+            f"unknown PO3 phase {phase!r}; GW-05 fixes {list(PO3_PHASE_ORDER)}"
+        ) from None
+    return PO3PhaseLabel(parsed, contract)
+
+
+# --------------------------------------------------------------------------- #
+# P1-11 -- narrative order (§3.4): two complete orderings, never mixed
+# --------------------------------------------------------------------------- #
+class NarrativeOrder(StrEnum):
+    """The two complete narrative orderings of SYSTEM_SPEC §3.4."""
+
+    BIAS_FIRST = "bias_first"
+    DRAW_FIRST = "draw_first"
+
+
+#: The one admissible option set.  §3.4 gives two complete orderings; a third
+#: or a per-field hybrid is not a declared model.
+NARRATIVE_ORDER_OPTIONS: tuple[str, ...] = tuple(
+    order.value for order in NarrativeOrder)
+
+#: §3.4: whichever ordering is chosen, the machine enters ``B1`` before ``D1``.
+#: The ordering changes only which field is authored first, not the state graph.
+NARRATIVE_STATE_ENTRY_ORDER: tuple[str, ...] = ("B1", "D1")
+NARRATIVE_ORDER_SOURCE = (
+    "SYSTEM_SPEC §3.4 [SN §3.4-1; SN:C3]; B1 precedes D1 under both orderings")
+
+_NARRATIVE_AUTHORING: dict[NarrativeOrder, tuple[str, str]] = {
+    NarrativeOrder.BIAS_FIRST: ("bias", "draw"),
+    NarrativeOrder.DRAW_FIRST: ("draw", "bias"),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class NarrativeOrderSpec:
+    """One declared ordering: the authored pair plus the invariant state path."""
+
+    order: NarrativeOrder
+    authored_first: str
+    authored_second: str
+    state_entry_order: tuple[str, ...] = NARRATIVE_STATE_ENTRY_ORDER
+    source: str = NARRATIVE_ORDER_SOURCE
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.order, NarrativeOrder):
+            object.__setattr__(
+                self, "order", NarrativeOrder(str(self.order).strip().lower()))
+        expected = _NARRATIVE_AUTHORING[self.order]
+        if (self.authored_first, self.authored_second) != expected:
+            raise ValueError(
+                f"{self.order.value} authors {expected}, not "
+                f"({self.authored_first!r}, {self.authored_second!r})")
+        if tuple(self.state_entry_order) != NARRATIVE_STATE_ENTRY_ORDER:
+            raise ValueError(
+                "§3.4 fixes the state path at B1 -> D1 under both orderings; "
+                f"got {self.state_entry_order!r}")
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "order": self.order.value,
+            "authored_first": self.authored_first,
+            "authored_second": self.authored_second,
+            "state_entry_order": list(self.state_entry_order),
+            "source": self.source,
+        }
+
+
+def declare_narrative_order(value: object) -> NarrativeOrderSpec:
+    """Return the one declared ordering, or refuse.
+
+    ``None``/blank refuses with ``NT_VARIANT_UNDECLARED``.  A non-empty value
+    that is not one of the two options raises: two orderings may not be mixed
+    inside one run (§3.4), so a combined or hybrid string is not coerced.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ModelIdentityUndeclared(
+            "narrative_order",
+            "SYSTEM_SPEC §3.4 declares two complete orderings; declare exactly "
+            f"one of {NARRATIVE_ORDER_OPTIONS}")
+    key = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    try:
+        order = NarrativeOrder(key)
+    except ValueError:
+        raise ValueError(
+            f"unknown narrative_order {value!r}; §3.4 declares exactly "
+            f"{NARRATIVE_ORDER_OPTIONS} and the two may not be mixed"
+        ) from None
+    first, second = _NARRATIVE_AUTHORING[order]
+    return NarrativeOrderSpec(order, first, second)
+
+
+# --------------------------------------------------------------------------- #
+# P1-11 -- execution model: one of the ten families (RE:EX-18; §8.4)
+# --------------------------------------------------------------------------- #
+#: The ten non-equivalent families of SYSTEM_SPEC §8.4, in table order.  This
+#: is the complete admissible set: an id outside it is not mapped onto the
+#: nearest family (``execution_model`` R8: "not variants of one rule and must
+#: not be averaged").
+EXECUTION_MODEL_FAMILIES: tuple[str, ...] = (
+    "m2022",
+    "silver_bullet",
+    "judas_london",
+    "ny_am",
+    "macro_reprice",
+    "ote_confluence",
+    "ifvg_inversion",
+    "fvg_first_limit",
+    "turtle_soup",
+    "po3_amd",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionModelSpec:
+    """One §8.4 model family: its window, required chain, entry, stop, source.
+
+    The fields are the spec table's columns transcribed, not an added strategy:
+    declaring a family records what the family *is* so a review can see which
+    one a run selected.  The declaration does not blend two families' columns.
+    """
+
+    model_id: str
+    name: str
+    window: str
+    required_chain: str
+    entry: str
+    stop: str
+    source: str
+
+    def __post_init__(self) -> None:
+        model_id = str(self.model_id).strip()
+        if model_id not in EXECUTION_MODEL_FAMILIES:
+            raise ValueError(
+                f"{model_id!r} is not one of the ten §8.4 families "
+                f"{EXECUTION_MODEL_FAMILIES}")
+        object.__setattr__(self, "model_id", model_id)
+        for name in ("name", "window", "required_chain", "entry", "stop",
+                     "source"):
+            value = str(getattr(self, name)).strip()
+            if not value:
+                raise ValueError(
+                    f"execution model {model_id}: {name} must not be empty")
+            object.__setattr__(self, name, value)
+
+    def to_public(self) -> dict[str, str]:
+        return {
+            "model_id": self.model_id,
+            "name": self.name,
+            "window": self.window,
+            "required_chain": self.required_chain,
+            "entry": self.entry,
+            "stop": self.stop,
+            "source": self.source,
+        }
+
+
+_EXECUTION_MODEL_ROWS: tuple[dict[str, str], ...] = (
+    {
+        "model_id": "m2022",
+        "name": "M2022",
+        "window": "per V13 (the declared window table)",
+        "required_chain": (
+            "bias → draw → sweep → displacement → MSS → array → retrace"),
+        "entry": "array CE",
+        "stop": "sweep extreme ∓ buffer",
+        "source": "[RE:EX-01..EX-03; SN-S09]",
+    },
+    {
+        "model_id": "silver_bullet",
+        "name": "Silver Bullet",
+        "window": ("03:00–04:00, 10:00–11:00, 14:00–15:00 America/New_York "
+                   "(fork: 10:00–11:00 only)"),
+        "required_chain": (
+            "window → draw → sweep of prior H/L → displacement → shift "
+            "(required by 4, absent in 3) → FVG formed inside the window → "
+            "retrace"),
+        "entry": "FVG CE",
+        "stop": "per declared anchor",
+        "source": "[LT-B01..LT-B08; LT:C7/C21]",
+    },
+    {
+        "model_id": "judas_london",
+        "name": "Judas / London",
+        "window": "observe 00:00–05:00 America/New_York, entries after",
+        "required_chain": (
+            "bias selects sweep side → Judas at session open → MSS on 5M close "
+            "→ 5M three-candle FVG at CE"),
+        "entry": "FVG CE",
+        "stop": "Judas extreme wick + buffer",
+        "source": "[LT-J01..LT-J09]",
+    },
+    {
+        "model_id": "ny_am",
+        "name": "NY AM",
+        "window": "NY windows (the declared window table)",
+        "required_chain": "as M2022 with the NY window table",
+        "entry": "array CE",
+        "stop": "sweep extreme",
+        "source": "[RE:EX-09]",
+    },
+    {
+        "model_id": "macro_reprice",
+        "name": "Macro reprice",
+        "window": "one of the 8 macro windows (SYSTEM_SPEC §10.2)",
+        "required_chain": (
+            "draw within reach → no pre-positioning → permitted behaviour only "
+            "→ expire at close"),
+        "entry": "array CE",
+        "stop": "per declared anchor",
+        "source": "[LT-M01..LT-M06]",
+    },
+    {
+        "model_id": "ote_confluence",
+        "name": "OTE confluence",
+        "window": "retrace leg",
+        "required_chain": (
+            "leg must incorporate a break in market structure → band "
+            "0.62–0.79 → confluence"),
+        "entry": 'band entry (0.705 preference, "not required")',
+        "stop": "leg extreme",
+        "source": "[PP:OTE-01..OTE-07]",
+    },
+    {
+        "model_id": "ifvg_inversion",
+        "name": "IFVG inversion",
+        "window": "any declared",
+        "required_chain": (
+            "strict FVG → body close beyond far edge → retest"),
+        "entry": "zone CE on the return",
+        "stop": (
+            "beyond the zone extreme; abs(entry − stop) ≤ zone_height"),
+        "source": "[PP:IFVG-07; PP:IFVG-09; PP:IFVG-08]",
+    },
+    {
+        "model_id": "fvg_first_limit",
+        "name": "FVG-first limit",
+        "window": "any declared",
+        "required_chain": (
+            "FVG → limit at CE → invalidate on body close beyond far edge"),
+        "entry": "CE limit",
+        "stop": "far edge + declared buffer",
+        "source": "[PP:FVG-04; PP:FVG-05]",
+    },
+    {
+        "model_id": "turtle_soup",
+        "name": "Turtle Soup",
+        "window": "session",
+        "required_chain": (
+            "penetration of a prior extreme then reversal"),
+        "entry": "retrace of the reversal leg",
+        "stop": "beyond the raid extreme",
+        "source": "[LT-S13; RE:EX-18]",
+    },
+    {
+        "model_id": "po3_amd",
+        "name": "PO3 / AMD",
+        "window": "declared interval, default open 00:00 America/New_York",
+        "required_chain": (
+            "accumulation → manipulation (boundary trade + non-acceptance + "
+            "LTF shift) → only distribution traded"),
+        "entry": "model-specific",
+        "stop": "per declared anchor",
+        "source": "[LT-P01..LT-P06; LT-P09]",
+    },
+)
+
+#: The one family read path: index by the declared id.  Read-only, like the
+#: V## register, so no module can add a private eleventh family at run time.
+EXECUTION_MODEL_FAMILY_SPECS: Mapping[str, ExecutionModelSpec] = (
+    MappingProxyType({
+        row["model_id"]: ExecutionModelSpec(**row)
+        for row in _EXECUTION_MODEL_ROWS
+    })
+)
+
+
+def parse_execution_model_id(value: object) -> str:
+    """Return the one declared family id, or refuse.
+
+    ``None``/blank is an undeclared model (``NT_VARIANT_UNDECLARED``); any other
+    non-family string is an invented model and raises
+    :class:`UnknownExecutionModel`.  Both are refusals: neither is mapped to a
+    "closest" family.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ModelIdentityUndeclared(
+            "execution_model_id",
+            "RE:EX-18 requires one selected execution model out of the ten "
+            f"declared families; declare one of {EXECUTION_MODEL_FAMILIES}")
+    key = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if key not in EXECUTION_MODEL_FAMILY_SPECS:
+        raise UnknownExecutionModel(value)
+    return key
+
+
+def execution_model_spec(value: object) -> ExecutionModelSpec:
+    """The selected family's §8.4 row (window, chain, entry, stop, source)."""
+    return EXECUTION_MODEL_FAMILY_SPECS[parse_execution_model_id(value)]
+
+
+def declare_execution_model(value: object) -> ExecutionModelSpec:
+    """Alias of :func:`execution_model_spec`: declare exactly one family."""
+    return execution_model_spec(value)
+
+
+# --------------------------------------------------------------------------- #
+# P1-11 -- the identity triple: period contract + narrative order + model
+# --------------------------------------------------------------------------- #
+MODEL_IDENTITY_FIELDS: tuple[str, ...] = (
+    "po3_period", "narrative_order", "execution_model_id")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelIdentity:
+    """The declared model and period identity as one object.
+
+    The three parts are declared together or not at all: a model id without its
+    period contract would be an unspecified model, and a period contract
+    without a family would not say what is executed.  :meth:`require` is the
+    fail-closed read; :meth:`refusal` is its first-class result form.
+    """
+
+    period: PO3PeriodContract | None = None
+    narrative_order: NarrativeOrderSpec | None = None
+    execution_model: ExecutionModelSpec | None = None
+
+    @property
+    def missing_fields(self) -> tuple[str, ...]:
+        return tuple(
+            name for name, value in (
+                ("po3_period", self.period),
+                ("narrative_order", self.narrative_order),
+                ("execution_model_id", self.execution_model),
+            ) if value is None
+        )
+
+    @property
+    def complete(self) -> bool:
+        return not self.missing_fields
+
+    def require(self) -> "ModelIdentity":
+        """Return ``self`` when complete; otherwise refuse (no default)."""
+        missing = self.missing_fields
+        if missing:
+            raise ModelIdentityUndeclared(
+                missing[0],
+                "the model/period identity is incomplete; missing "
+                f"{list(missing)} of {list(MODEL_IDENTITY_FIELDS)}.  A period "
+                "contract (GW-02), a narrative order (§3.4) and one execution "
+                "model (RE:EX-18) are declared together or not at all")
+        return self
+
+    def refusal(self) -> Refusal | None:
+        """``None`` when complete, else the ``NT_VARIANT_UNDECLARED`` refusal."""
+        missing = self.missing_fields
+        if not missing:
+            return None
+        return Refusal(
+            RefusalCode.NT_VARIANT_UNDECLARED, missing[0],
+            "the model/period identity is incomplete; missing "
+            f"{list(missing)} of {list(MODEL_IDENTITY_FIELDS)}")
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "declared": self.complete,
+            "period_contract": (None if self.period is None
+                                else self.period.to_public()),
+            "narrative_order": (None if self.narrative_order is None
+                                else self.narrative_order.to_public()),
+            "execution_model_id": (None if self.execution_model is None
+                                   else self.execution_model.model_id),
+            "execution_model": (None if self.execution_model is None
+                                else self.execution_model.to_public()),
+            "missing_fields": list(self.missing_fields),
+            "source": (
+                "GW-02/GW-03 (period); SYSTEM_SPEC §3.4 (narrative order); "
+                "RE:EX-18 / §8.4 (execution model)"),
+        }
+
+
+def resolve_model_identity(*, period: object = None,
+                           narrative_order: object = None,
+                           execution_model_id: object = None,
+                           boundary: DayBoundary | None = None,
+                           required: bool = False) -> ModelIdentity:
+    """Normalize one identity triple, refusing a piecemeal declaration.
+
+    All three fields are declared together or none is: naming only a model, or
+    only a period, has not identified a model and the gaps are not filled in.
+    ``required=True`` additionally refuses the empty identity -- that is the
+    run-level gate, which is off by default so a pre-P1-11 run can still emit
+    its (explicitly undeclared) evidence.
+    """
+    given = {
+        "po3_period": period,
+        "narrative_order": narrative_order,
+        "execution_model_id": execution_model_id,
+    }
+    declared = [name for name, value in given.items() if value is not None]
+    if declared and len(declared) != len(given):
+        missing = [name for name, value in given.items() if value is None]
+        raise ModelIdentityUndeclared(
+            missing[0],
+            f"the model identity is declared piecemeal: {declared} are set and "
+            f"{missing} are not; declare all of {list(MODEL_IDENTITY_FIELDS)} "
+            "or none (P1-11)")
+    identity = ModelIdentity(
+        period=(None if period is None
+                else resolve_po3_period(period, boundary=boundary)),
+        narrative_order=(None if narrative_order is None
+                         else declare_narrative_order(narrative_order)),
+        execution_model=(None if execution_model_id is None
+                         else declare_execution_model(execution_model_id)),
+    )
+    return identity.require() if required else identity
+
+
+def declare_model_identity(*, period: object = None,
+                           narrative_order: object = None,
+                           execution_model_id: object = None,
+                           boundary: DayBoundary | None = None) -> ModelIdentity:
+    """Declare the complete triple; a missing part refuses (no default)."""
+    return resolve_model_identity(
+        period=period, narrative_order=narrative_order,
+        execution_model_id=execution_model_id, boundary=boundary,
+        required=True)

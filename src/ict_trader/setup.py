@@ -42,6 +42,10 @@ from .context import (BiasDirection, BiasState, BiasStateStore,
                       DayBoundary, LastDailyMSSLock,
                       DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
                       MACRO_GATE_NAMES, MidnightOpen, SwingIndex,
+                      MODEL_IDENTITY_FIELDS, ModelIdentity,
+                      NARRATIVE_ORDER_SOURCE,
+                      NARRATIVE_STATE_ENTRY_ORDER,
+                      PO3_PERIOD_FIELDS, PO3_PERIOD_SOURCE, PO3PeriodContract,
                       WEEK_OPEN_OPTIONS,
                       WEEKLY_ANCHOR_OPTIONS, WEEKLY_ANCHOR_SOURCES,
                       WEEKLY_PROBABILITY_SOURCE, WEEKLY_PROBABILITY_STATUS,
@@ -54,7 +58,8 @@ from .context import (BiasDirection, BiasState, BiasStateStore,
                       open_vs_daily_ce, ote_from_signal, outside_day_bias,
                       parse_bias, parse_daily_bias_family, parse_day_clock,
                       prior_close_bias, resolve_daily_polarity,
-                      resolve_day_boundary, resolve_weekly_anchor,
+                      resolve_day_boundary, resolve_model_identity,
+                      resolve_weekly_anchor,
                       serialize_bias, structure_location_from_range,
                       validate_bias_vocabulary, validate_neutral_handling,
                       weekly_anchor_bias, weekly_bias_gate)
@@ -344,6 +349,24 @@ class SetupConfig:
     #: requires :attr:`daily_bias_family` and a declared V04 day boundary (every
     #: DB-04..DB-07 family is day-scoped; GW-01 refuses an implicit day).
     daily_bias_gate: bool = False
+    #: P1-11: the PO3 six-field period contract (GW-02/GW-03).  A mapping is
+    #: normalized to a complete :class:`PO3PeriodContract` at construction; a
+    #: missing field refuses.  Declared together with the narrative order and
+    #: the execution model, or not at all.
+    po3_period: PO3PeriodContract | dict[str, object] | None = None
+    #: P1-11: ``bias_first`` or ``draw_first`` (SYSTEM_SPEC §3.4).  The two
+    #: orderings may not be mixed, and both still enter ``B1`` before ``D1``.
+    narrative_order: str | None = None
+    #: P1-11: one selected execution-model family out of the ten in §8.4
+    #: (RE:EX-18).  An id outside the declared set refuses; it is never mapped
+    #: onto a "closest" family.
+    execution_model_id: str | None = None
+    #: P1-11: refuse a run that has no complete model identity instead of
+    #: emitting a setup under an unspecified model (§14.1-2,
+    #: ``NT_VARIANT_UNDECLARED``).  ``False`` keeps the pre-P1-11 compatibility
+    #: path, which labels the identity ``undeclared`` on every setup and claims
+    #: no family.
+    model_identity_gate: bool = False
 
     def read_variant(self, variant_id: str) -> str:
         """Read one declared fork through the single register (A7).
@@ -401,6 +424,17 @@ class SetupConfig:
             extra["daily_bias_family"] = self.daily_bias_family
         if self.daily_bias_gate:
             extra["daily_bias_gate"] = True
+        # P1-11: the declared identity is part of the reproducibility digest.
+        # An undeclared identity adds nothing (the legacy path must hash the
+        # same as before), and no part is hashed by implication.
+        if self.po3_period is not None:
+            extra["po3_period"] = self.po3_period.to_public()
+        if self.narrative_order is not None:
+            extra["narrative_order"] = self.narrative_order
+        if self.execution_model_id is not None:
+            extra["execution_model_id"] = self.execution_model_id
+        if self.model_identity_gate:
+            extra["model_identity_gate"] = True
         return _config_hash(
             self.variant_config,
             bias_primitive=self.bias_primitive,
@@ -489,6 +523,27 @@ class SetupConfig:
                 f"{self.daily_bias_family!r} and daily_bias_filter="
                 f"{self.daily_bias_filter!r}.  The corpus's daily-bias families "
                 "may not be combined or averaged (daily_bias C4); declare one")
+        # P1-11: the model/period identity is one declaration, not three
+        # optional fields.  It is normalized here (a mapping becomes the complete
+        # six-field contract; the family id becomes the declared id) and either
+        # all three parts are declared or none is.  No part is guessed from the
+        # legacy CISD path, and ``model_identity_gate`` refuses the empty
+        # identity rather than running an unspecified model (§14.1-2).
+        identity = resolve_model_identity(
+            period=self.po3_period,
+            narrative_order=self.narrative_order,
+            execution_model_id=self.execution_model_id,
+            required=self.model_identity_gate,
+        )
+        object.__setattr__(self, "po3_period", identity.period)
+        object.__setattr__(
+            self, "narrative_order",
+            None if identity.narrative_order is None
+            else identity.narrative_order.order.value)
+        object.__setattr__(
+            self, "execution_model_id",
+            None if identity.execution_model is None
+            else identity.execution_model.model_id)
         resolve_ladder_mode(self.t1_at_r, self.t1_at_eq)
         resolve_be_mode(self.breakeven_at_r, self.t1_move_be,
                         self.ladder_mode_of() != "off")
@@ -1601,6 +1656,19 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             "V04",
             "the run requires a declared day boundary (GW-01), but V04 is "
             "unset; declare one of " + ", ".join(DAY_BOUNDARY_OPTIONS))
+    # P1-11: the model/period identity is resolved against the one declared day
+    # boundary.  GW-03 permits exactly one opening convention, so a period
+    # contract in another zone refuses instead of being silently relabelled;
+    # the gate additionally refuses an entirely undeclared identity.  With the
+    # gate off, the same object is emitted as evidence and ``declared`` is
+    # False -- no family, order or period is claimed on the run's behalf.
+    model_identity: ModelIdentity = resolve_model_identity(
+        period=cfg.po3_period,
+        narrative_order=cfg.narrative_order,
+        execution_model_id=cfg.execution_model_id,
+        boundary=day_boundary,
+        required=cfg.model_identity_gate,
+    )
     # P1-04: the midnight open is read under the declared V04 boundary, its
     # polarity under the declared V05 reading.  The gate refuses an undeclared
     # fork instead of choosing a side; with the gate off, no V05 read happens
@@ -2040,6 +2108,9 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 continue
             best_sweep = max(recent_sweeps, key=lambda s: s.strength) if recent_sweeps else None
             day_key, day_anchor_bar, day_anchor_price = pre.day_info(t)
+            identity_period = model_identity.period
+            identity_order = model_identity.narrative_order
+            identity_model = model_identity.execution_model
             quality_parts.update({
                 "stack": cfg.stack,
                 "bias_tf_fork": spec.bias_tf_fork,
@@ -2194,6 +2265,50 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                           "detail": weekly_gate_result.refusal.detail}),
                 "weekly_probability_status": WEEKLY_PROBABILITY_STATUS,
                 "weekly_probability_source": WEEKLY_PROBABILITY_SOURCE,
+                # P1-11: the one declared model/period identity.  With the
+                # gate off and nothing declared this is an explicitly empty
+                # identity -- no family, order or period is claimed.  The
+                # period contract's six fields travel as the contract object,
+                # never as free-form prose (GW-02).
+                "model_identity": model_identity.to_public(),
+                "model_identity_declared": model_identity.complete,
+                "model_identity_gate": bool(cfg.model_identity_gate),
+                "model_identity_missing_fields": list(
+                    model_identity.missing_fields),
+                "model_identity_fields": list(MODEL_IDENTITY_FIELDS),
+                "po3_period_contract": (None if identity_period is None
+                                        else identity_period.to_public()),
+                "po3_period_fields": list(PO3_PERIOD_FIELDS),
+                "po3_period_complete": identity_period is not None,
+                "po3_period_source": PO3_PERIOD_SOURCE,
+                "narrative_order": (None if identity_order is None
+                                    else identity_order.order.value),
+                "narrative_order_authored_first": (
+                    None if identity_order is None
+                    else identity_order.authored_first),
+                "narrative_order_authored_second": (
+                    None if identity_order is None
+                    else identity_order.authored_second),
+                "narrative_order_state_entry": list(
+                    NARRATIVE_STATE_ENTRY_ORDER),
+                "narrative_order_source": NARRATIVE_ORDER_SOURCE,
+                "execution_model_id": (None if identity_model is None
+                                       else identity_model.model_id),
+                "execution_model_family": (None if identity_model is None
+                                           else identity_model.name),
+                "execution_model_spec": (None if identity_model is None
+                                         else identity_model.to_public()),
+                "execution_model_window": (None if identity_model is None
+                                           else identity_model.window),
+                "execution_model_required_chain": (
+                    None if identity_model is None
+                    else identity_model.required_chain),
+                "execution_model_entry": (None if identity_model is None
+                                          else identity_model.entry),
+                "execution_model_stop": (None if identity_model is None
+                                         else identity_model.stop),
+                "execution_model_source": (None if identity_model is None
+                                           else identity_model.source),
                 "daily_ce": daily_ce_value,
                 "daily_open_vs_ce": (
                     None if open_comparison is None
@@ -2311,7 +2426,14 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
                         market=cfg.market,
                         # P1-01: the simulator reads the same declared register
                         # as the setup surface; no private variant copy (A7).
-                        variant_config=cfg.variant_config)
+                        variant_config=cfg.variant_config,
+                        # P1-11: the same declared model/period identity travels
+                        # into the simulator so a trade can never be reported
+                        # under a different model than the setup that admitted it.
+                        po3_period=cfg.po3_period,
+                        narrative_order=cfg.narrative_order,
+                        execution_model_id=cfg.execution_model_id,
+                        model_identity_gate=cfg.model_identity_gate)
     r = simulate_cisd(df, res2, sc, Path(path).stem)
     return r.trades, {"signals": len(sigs), **r.metrics}
 
