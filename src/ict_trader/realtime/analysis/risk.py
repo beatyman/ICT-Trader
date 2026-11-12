@@ -12,6 +12,12 @@ declared precedence order; it never unions every available anchor (RK-06,
 [RE:C-04]).  The buffer is non-negative and the wired CISD stop is built from
 the pivot plus that buffer instead of sitting on the pivot (RK-01, RK-04).
 
+P0-05 target ladder: ``RiskPlan.targets`` carries the **full** admissible ladder
+(nearest first).  It is never sliced, because the target count is a declared
+ladder mode fork (1/2/3/5/8, [RE:C-17]), not a constant of this module.  The RR
+gate is computed from the *nearest* target only, so a far target cannot be used
+to pass the gate on a nearer setup (TG-07).
+
 ``STOP_POLICY``/``stop_from_anchor`` live in :mod:`ict_trader.cisd` because that
 is the wired call site and the backtest must remain importable without the
 optional realtime stack; they are re-exported here as the public risk API.
@@ -147,4 +153,6 @@ def build_risk_plan(direction: str, entry: float, atr: float,
         # Fail-closed: a blocked plan is never sized and never carries a ladder.
         return RiskPlan(stop, (), gross, net, 0.0, sl_atr, tuple(blockers))
     qty = (equity * risk_pct) / risk
-    return RiskPlan(stop, tuple(valid[:3]), gross, net, qty, sl_atr, ())
+    # The full admissible ladder, nearest first; the ladder mode - not this
+    # module - decides how many rungs a plan uses (P0-05, [RE:C-17]).
+    return RiskPlan(stop, tuple(valid), gross, net, qty, sl_atr, ())

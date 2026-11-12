@@ -7,9 +7,11 @@
         + PDA and displacement quality
 
 Entry is the next 15m open by default; `entry_mode="retest_key"` waits for a
-retest of the CISD key level.  Stop is the CISD invalidation wick; target is
-fixed R by default, with optional liquidity-pool targeting.  A sweep may reclaim
-within a small window instead of only on its penetration candle.
+retest of the CISD key level.  Stop is the CISD invalidation wick.  The target
+is selected by the declared ``target_mode`` family (default: nearest unswept
+liquidity pool, TG-02); a setup with no admissible target is refused instead of
+being given an RR-derived substitute.  A sweep may reclaim within a small window
+instead of only on its penetration candle.
 
 The goal is one setup that can be repeated and reviewed, not a parameter
 search contest.
@@ -30,12 +32,20 @@ from .concepts import ICTConfig, analyze, detect_fvgs, load_csv
 from .context import (SwingIndex, candle2_closure, candle3_closure, dealing_range,
                       in_session, ote_from_signal, structure_bias)
 from .pd_arrays import count_path_liquidity, near_arrays
-from .sweeps import nearest_key_target
 from .strategy import StrategyConfig, simulate_cisd
 from .indicators import (add_indicators, align_htf, ichimoku, macd,
                          mark_htf_known_at, resample_cn_4h, resample_htf)
 from .quality import Displacement, measure_displacement, score_setup
 from .regime import Regime, market_regime
+
+
+#: Declared target families (TG-02/TG-11, CODE_MAPPING P0-05).  ``fixed`` and
+#: ``hybrid`` are repo modes; ``liquidity``/``dol``/``htf_dol`` select from the
+#: liquidity inventory.  ``fixed`` is no longer the default: the corpus default
+#: selector is the nearest unswept pool, and a fixed R is a ratio that may have
+#: no relationship with structure (target_selection R8/R18).
+TARGET_MODES = ("fixed", "liquidity", "hybrid", "dol", "htf_dol")
+DEFAULT_TARGET_MODE = "liquidity"
 
 
 @dataclass
@@ -63,9 +73,14 @@ class SetupConfig:
     min_sweep_strength: float = 0.0   # BTC 15m A/B: >=3.0 lifts the win rate
     min_stop_atr: float = 0.0         # BTC 15m A/B: >2.0 ATR stops win ~55-60%
     use_key_targets: bool = False
-    target_mode: str = "fixed"  # fixed | liquidity | hybrid | dol | htf_dol
-    min_target_rr: float = 2.0
-    max_target_rr: float = 6.0
+    # Declared target family (TG-02/TG-11, P0-05).  ``fixed`` remains an
+    # explicitly labelled repo mode; it is not the default.  An undeclared value
+    # refuses at construction instead of silently falling back to fixed+2R.
+    target_mode: str = DEFAULT_TARGET_MODE  # fixed | liquidity | hybrid | dol | htf_dol
+    min_target_rr: float = 2.0       # plan-gate floor, applied at the fill (TG-11)
+    # Deprecated, retained for API/CLI compatibility.  The invented ceiling
+    # silently dropped valid far targets and is no longer applied (P0-05).
+    max_target_rr: float | None = None
     min_disp_body_ratio: float = 0.0
     min_disp_atr: float = 0.0
     min_disp_multiple: float = 0.0
@@ -74,6 +89,7 @@ class SetupConfig:
     fvg_min_body: float = 0.5
     fvg_min_width_atr: float = 0.0
     allow_short: bool = False
+    # Fixed-R target used only when target_mode declares "fixed"/"hybrid".
     rr: float = 2.0
     max_bars: int = 40
     breakeven_at_r: float = 0.0
@@ -117,6 +133,12 @@ class SetupConfig:
     stack: str = "1d_4h_15m"  # 1d_4h_15m | 1d_1h_15m | 1d_15m | 4h_15m | 4h_1h_15m
     daily_bias_filter: str = "none"  # none | c2 | c3 (E1: Candle 2/3 daily bias)
     htf_structure_gate: str = "none"  # none | aligned (corpus HTF structure HH/HL vs LH/LL)
+
+    def __post_init__(self) -> None:
+        if self.target_mode not in TARGET_MODES:
+            raise ValueError(
+                f"unknown target_mode {self.target_mode!r}; "
+                f"declare one of {TARGET_MODES}")
 
 
 def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
@@ -171,6 +193,109 @@ def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
             rr=max(cfg.rr, 2.5),
         )
     return cfg
+
+
+def _declared_target_mode(cfg: SetupConfig) -> str:
+    """Resolve the declared target family.
+
+    ``use_key_targets`` is the legacy alias for the ``hybrid`` family and is
+    preserved for API compatibility.  Unknown families refuse instead of
+    defaulting to ``fixed`` (V28/TG-11).
+    """
+    mode = cfg.target_mode
+    if mode not in TARGET_MODES:
+        raise ValueError(
+            f"unknown target_mode {mode!r}; declare one of {TARGET_MODES}")
+    if cfg.use_key_targets and mode == "fixed":
+        return "hybrid"
+    return mode
+
+
+def _fixed_r_target(direction: str, level: float, risk: float, rr: float) -> float:
+    """The declared fixed-R target (repo family; never a silent fallback)."""
+    offset = float(rr) * risk
+    return float(level + offset) if direction == "bull" else float(level - offset)
+
+
+def _admissible_levels(levels: Iterable, direction: str, level: float,
+                       at: int | None) -> list:
+    """Levels admissible at ``at`` and on the target side of ``level``.
+
+    TG-03: a level is admissible only if it was known at the signal bar and had
+    not been swept or broken by then.
+    """
+    out = []
+    for lv in levels:
+        if at is None:
+            # No bar context: fall back to the level's lifetime flags.
+            if getattr(lv, "swept", False) or getattr(lv, "broken", False):
+                continue
+        else:
+            if int(getattr(lv, "known_at", 0)) > int(at):
+                continue
+            sweep_bar = getattr(lv, "sweep_bar", None)
+            broken_at = getattr(lv, "broken_at", None)
+            if sweep_bar is not None and int(sweep_bar) <= int(at):
+                continue
+            if broken_at is not None and int(broken_at) <= int(at):
+                continue
+        price = float(getattr(lv, "price"))
+        beyond = price > level if direction == "bull" else price < level
+        if beyond:
+            out.append(lv)
+    return out
+
+
+def _nearest_price(levels: Iterable, direction: str) -> float:
+    """Nearest price beyond the entry: lowest for longs, highest for shorts."""
+    prices = (float(getattr(lv, "price")) for lv in levels)
+    return min(prices) if direction == "bull" else max(prices)
+
+
+def select_target(cfg: SetupConfig, direction: str, level: float, sl: float,
+                  levels: Iterable = (), at: int | None = None) -> float | None:
+    """Select the one structural target declared by ``cfg.target_mode``.
+
+    Selection is structural and comes **first**; the RR floor is applied later,
+    from the actual fill, by the plan gate (target_selection R18).  A nearest
+    pool below the floor is therefore refused (``NT_TARGET_TOO_NEAR``) instead
+    of being skipped for a farther one (TG-07).  There is no upper RR bound: the
+    old ``max_target_rr`` ceiling silently dropped valid far targets (P0-05).
+
+    * ``fixed``    - declared repo mode: ``level +/- rr * risk``;
+    * ``liquidity``- nearest unswept pool beyond the entry, else ``None``;
+    * ``hybrid``   - liquidity target when one exists, else the fixed-R target;
+    * ``dol``      - nearest pool beyond the entry, else ``None``;
+    * ``htf_dol``  - nearest session/pool level when one exists, else ``dol``.
+
+    ``levels`` are filtered for look-ahead (TG-03) before selection; the caller
+    may pass the full inventory or an already-filtered list.
+    """
+    mode = _declared_target_mode(cfg)
+    level = float(level)
+    risk = abs(level - float(sl))
+    if risk <= 0:
+        return None
+    if mode == "fixed":
+        return _fixed_r_target(direction, level, risk, cfg.rr)
+
+    admissible = _admissible_levels(levels, direction, level, at)
+    if mode in {"liquidity", "hybrid"}:
+        if admissible:
+            return _nearest_price(admissible, direction)
+        if mode == "liquidity":
+            return None
+        return _fixed_r_target(direction, level, risk, cfg.rr)
+
+    if mode == "htf_dol":
+        anchored = [lv for lv in admissible
+                    if str(getattr(lv, "source", "")) in {"session", "pool"}]
+        if anchored:
+            return _nearest_price(anchored, direction)
+        # No time-anchored level: fall back to the ordinary draw inventory.
+    if not admissible:
+        return None
+    return _nearest_price(admissible, direction)
 
 
 def _drop_incomplete_htf(base: pd.DataFrame, h: pd.DataFrame) -> pd.DataFrame:
@@ -543,6 +668,7 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     if cfg.origin_filter == "fvg" and cfg.require_sweep:
         cfg = replace(cfg, require_sweep=False)
     spec = _stack_spec(cfg)
+    target_mode = _declared_target_mode(cfg)
     # All per-bar series are computed once: the loop below visits every CISD
     # (1210 on 20k BTC bars) and previously re-derived ATR, the HTF row lookup,
     # the swing scans and the displacement window each time.
@@ -704,52 +830,18 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 quality_parts["fvg_size_atr"] = float(chosen_fvg.size_atr)
                 quality_parts["fvg_first"] = bool(chosen_fvg.first_presented)
                 quality_parts["fvg_fresh"] = bool(chosen_fvg.fresh)
-            target = None
-            mode = cfg.target_mode
-            if cfg.use_key_targets and mode == "fixed":
-                mode = "hybrid"
-            if mode in {"liquidity", "hybrid", "dol", "htf_dol"}:
-                levels = [k for k in result.key_levels
-                          if k.known_at <= t
-                          and (k.sweep_bar is None or k.sweep_bar > t)
-                          and (k.broken_at is None or k.broken_at > t)]
-                risk = abs(c.level - c.sl)
-                prices = sorted(
-                    [k.price for k in levels
-                     if (k.price > c.level if c.direction == "bull" else k.price < c.level)],
-                    key=lambda p: abs(p - c.level),
-                )
-                if mode in {"dol", "htf_dol"}:
-                    if mode == "htf_dol":
-                        # Corpus HTF DOL: prefer time-anchored session/pool levels
-                        # (PDH/PWH/EQH above, PDL/PWL/EQL below), skip arbitrary
-                        # swing BSL/SSL. Fall back to all levels if none anchor.
-                        anchored = [k for k in levels if k.source in {"session", "pool"}]
-                        pool_prices = sorted(
-                            [k.price for k in anchored
-                             if (k.price > c.level if c.direction == "bull" else k.price < c.level)],
-                            key=lambda p: abs(p - c.level),
-                        )
-                        pool_prices = pool_prices or prices
-                    else:
-                        pool_prices = prices
-                    valid = [p for p in pool_prices if risk > 0
-                             and cfg.min_target_rr <= abs(p - c.level) / risk <= cfg.max_target_rr]
-                    target = valid[0] if valid else None
-                    if target is None:
-                        continue
-                else:
-                    tgt = nearest_key_target(levels, c.level, c.direction == "bull", at=t)
-                    if tgt is not None and risk > 0:
-                        rr = abs(tgt - c.level) / risk
-                        if cfg.min_target_rr <= rr <= cfg.max_target_rr:
-                            target = tgt
-                    if target is None and mode == "liquidity":
-                        continue
+            target = select_target(cfg, c.direction, c.level, c.sl,
+                                   result.key_levels, at=t)
+            if target is None:
+                # TG-01: a plan without a target is not a trade.  Refuse here
+                # rather than letting the plan gate invent an RR-derived price
+                # (P0-05).
+                continue
+            risk = abs(c.level - c.sl)
+            quality_parts["target_mode"] = target_mode
+            quality_parts["target_rr"] = (abs(target - c.level) / risk
+                                          if risk > 0 else 0.0)
             path_target = target
-            if path_target is None:
-                risk = abs(c.level - c.sl)
-                path_target = c.level + (cfg.rr * risk if c.direction == "bull" else -cfg.rr * risk)
             inducements = count_path_liquidity(result.swings, c.level, path_target, c.direction)
             if cfg.max_inducements >= 0 and inducements > cfg.max_inducements:
                 continue
@@ -844,7 +936,7 @@ def main() -> None:
     ap.add_argument("--origin-filter", choices=["any", "both", "sweep", "fvg"], default="any")
     ap.add_argument("--sweep-reclaim-bars", type=int, default=3)
     ap.add_argument("--use-key-targets", action="store_true")
-    ap.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid", "dol", "htf_dol"], default="fixed")
+    ap.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid", "dol", "htf_dol"], default=DEFAULT_TARGET_MODE)
     ap.add_argument("--entry-mode", choices=["next_open", "retest_key", "fvg_ce", "ob_me", "ote"], default="next_open")
     ap.add_argument("--retest-max-bars", type=int, default=20)
     ap.add_argument("--retest-tolerance-atr", type=float, default=0.0)
@@ -875,7 +967,8 @@ def main() -> None:
     ap.add_argument("--min-disp-multiple", type=float, default=0.0)
     ap.add_argument("--min-setup-score", type=float, default=0.0)
     ap.add_argument("--min-target-rr", type=float, default=2.0)
-    ap.add_argument("--max-target-rr", type=float, default=6.0)
+    ap.add_argument("--max-target-rr", type=float, default=None,
+                    help="deprecated and ignored: there is no upper RR ceiling (P0-05)")
     args = ap.parse_args()
     cfg = SetupConfig(rr=args.rr, max_bars=args.max_bars, min_grade=args.min_grade,
                       min_confluence=args.min_confluence, allow_short=args.allow_short,

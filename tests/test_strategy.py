@@ -42,7 +42,8 @@ def test_no_overlapping_trade():
               sl=96, target=112, grade=4, checks={"sweep": True})
     res = ICTResult(bars=df, cisds=[c1, c2], config=ICTConfig())
     r = simulate_cisd(df, res, StrategyConfig(min_grade=0, min_confluence=0,
-                                              entry_delay=1, max_bars=10), "test")
+                                              entry_delay=1, max_bars=10,
+                                              min_rr=1.0), "test")
     assert len(r.trades) == 1
 
 
@@ -82,7 +83,9 @@ def test_net_rr_deducts_costs():
     assert net > 1.0
 
 
-def test_low_measured_target_falls_back_to_two_r():
+def test_low_measured_target_is_refused_not_replaced_by_two_r():
+    """P0-05: the plan gate refuses ``NT_TARGET_TOO_NEAR``; it never invents a
+    target from the RR floor (TG-01/TG-07)."""
     df = frame([90, 95, 100, 102, 108, 111, 112, 110, 109, 108])
     c = CISD("bull", level=100, extreme=95, body_extreme=95, start=1, end=2,
              sl=95, target=103, grade=4, checks={"sweep": True})
@@ -90,10 +93,8 @@ def test_low_measured_target_falls_back_to_two_r():
     r = simulate_cisd(df, res, StrategyConfig(min_grade=0, min_confluence=0,
                                               entry_delay=1, max_bars=5,
                                               min_rr=2.0), "test")
-    assert len(r.trades) == 1
-    t = r.trades[0]
-    assert t.features["entry_rr"] >= 2.0
-    assert t.tp > 110
+    assert len(r.trades) == 0
+    assert r.metrics["refused_target_too_near"] == 1
 
 
 def test_atr_trailing_exit():

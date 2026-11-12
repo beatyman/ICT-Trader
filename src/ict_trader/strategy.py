@@ -9,7 +9,9 @@ Execution:
   * enter at the next bar open by default, or optionally wait for a retest of
     the CISD key level (``entry_mode="retest_key"``)
   * stop at the CISD invalidation level
-  * target at the measured level or a fixed R multiple
+  * target supplied by the setup's declared ``target_mode``; a signal with no
+    target, or a target below the RR floor at the actual fill, is refused rather
+    than given an RR-derived substitute (TG-01, TG-07)
   * conservative same-bar rule: if both SL and TP are touched, SL wins
   * fixed-fractional risk, commission and slippage
   * counters for skipped / not-triggered signals (execution audit)
@@ -30,6 +32,14 @@ import pandas as pd
 
 from .concepts import ICTConfig, ICTResult, analyze, fetch_futu, load_csv
 from .stats import mean_interval, n_for_margin, wilson_interval
+
+
+#: §12 refusal codes recorded by the plan gate (A3).  A plan without a target
+#: violates TG-01, and a target nearer than the declared floor is
+#: ``NT_TARGET_TOO_NEAR`` (TG-07/TG-11).  Neither is ever replaced by an
+#: RR-derived price (P0-05).
+TARGET_MISSING_CODE = "NT_DATA_MISSING"
+TARGET_TOO_NEAR_CODE = "NT_TARGET_TOO_NEAR"
 
 
 def net_rr(entry: float, stop: float, target: float, direction: str,
@@ -72,7 +82,9 @@ def net_rr(entry: float, stop: float, target: float, direction: str,
 @dataclass
 class StrategyConfig:
     risk_pct: float = 0.01          # fraction of equity risked per trade
-    rr: float = 2.0                 # fallback target in R
+    #: Retained for API compatibility.  Targets are authored by setup's declared
+    #: ``target_mode``; the plan gate never manufactures one from this value.
+    rr: float = 2.0
     max_bars: int = 40              # time stop
     min_grade: int = 4              # 3=C, 4=B-, 5=B+, 6=A, 7=A+
     min_confluence: int = 3         # sweep / PDA / volume / session / target / SMT
@@ -89,7 +101,7 @@ class StrategyConfig:
     entry_delay: int = 1            # bars after confirmation
     max_trades_per_day: int = 4
     max_concurrent: int = 5
-    min_rr: float = 1.2             # skip signals with a worse measured target
+    min_rr: float = 1.2             # plan-gate floor from the actual fill (TG-11)
     breakeven_at_r: float = 0.0     # move SL to entry at this favourable R
     min_displacement_atr: float = 0.0
     entry_mode: str = "next_open"   # next_open | retest_key
@@ -212,6 +224,9 @@ def simulate_cisd(
         "skipped_daily_loss": 0,
         "skipped_gap": 0,
         "not_triggered": 0,
+        "refused_target_missing": 0,
+        "refused_target_too_near": 0,
+        "refused_target_wrong_side": 0,
     }
     mode = cfg.entry_mode
     if mode not in {"next_open", "retest_key", "fvg_ce", "ob_me", "ote"}:
@@ -303,7 +318,6 @@ def simulate_cisd(
         if day_counts.get(day, 0) >= cfg.max_trades_per_day:
             stats["skipped_day_limit"] += 1
             continue
-        day_counts[day] = day_counts.get(day, 0) + 1
 
         slip = raw_entry * cfg.slippage_bps / 10000.0
         entry = raw_entry + slip if c.direction == "bull" else raw_entry - slip
@@ -317,12 +331,26 @@ def simulate_cisd(
                 stats["skipped_gap"] += 1
                 continue
 
-        # A target supplied by the signal may be valid at the signal price but
-        # not after the actual fill.  Judge every target from the fill so a
-        # high-R configuration cannot silently keep a 1.1R measured target.
+        # TG-01: the plan gate requires a target before the order.  The target
+        # is authored by setup's declared ``target_mode``; this gate never
+        # derives one from the RR floor (P0-05).  If the authored target is too
+        # near the actual fill, the setup is refused with
+        # ``NT_TARGET_TOO_NEAR`` rather than reaching for a farther one (TG-07).
         tp = c.target
-        if tp is None or abs(tp - entry) / risk < cfg.min_rr:
-            tp = entry + cfg.rr * risk if c.direction == "bull" else entry - cfg.rr * risk
+        if tp is None:
+            stats["refused_target_missing"] += 1
+            continue
+        target_reward = (float(tp) - entry) if c.direction == "bull" else (entry - float(tp))
+        if not target_reward > 0:
+            stats["refused_target_wrong_side"] += 1
+            continue
+        if target_reward / risk < cfg.min_rr:
+            stats["refused_target_too_near"] += 1
+            continue
+
+        # The daily budget is spent only by a plan that survives every
+        # pre-trade refusal above.
+        day_counts[day] = day_counts.get(day, 0) + 1
 
         # A-share T+1: the first bar on a later trading day is the earliest exit
         entry_day = dates.iloc[entry_idx].date()
