@@ -12,16 +12,26 @@ P1-07 adds two objects to this boundary:
   invented (F10);
 * the **closed-bar guard** (:func:`last_bar_closed`) used by the engine before
   it evaluates anything (CB-01/CB-10).
+
+P1-04 adds the opening-price boundary, :func:`midnight_open_evidence`: it
+carries the midnight open as a price object, its declared V05 reading
+(DB-01/DB-02), and DB-03's two-price comparison against the daily CE.  The two
+booleans are separate rules (``daily_bias`` C5) and an undeclared V05 is a
+coded refusal, never a majority default.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from ...context import (BiasDirection, BiasInvalidation, BiasState,
-                        DEFAULT_NEUTRAL_HANDLING, RevisionEvent, parse_bias,
-                        serialize_bias, validate_neutral_handling)
-from ...variants import RefusalCode, VariantConfig, VariantUndeclared
+from ...context import (DAILY_POLARITY_SOURCES, BiasDirection,
+                        BiasInvalidation, BiasState, DEFAULT_NEUTRAL_HANDLING,
+                        MidnightOpen, RevisionEvent,
+                        daily_open_polarity, daily_polarity_mode,
+                        open_vs_daily_ce, parse_bias, serialize_bias,
+                        validate_neutral_handling)
+from ...variants import Refusal, RefusalCode, VariantConfig, VariantUndeclared
 
 #: §12 refusal codes used by this boundary.  They are read from the one typed
 #: vocabulary (:class:`~ict_trader.variants.RefusalCode`), never re-typed, and
@@ -842,4 +852,84 @@ def htf_bias_evidence(frame: Any, end_idx: int, *,
         rule: (None if state is None
                else {"bias": serialize_bias(state.bias)})
         for rule, state in states.items()
+    }
+
+
+def _refusal_record(refusal: Refusal | None) -> dict[str, object] | None:
+    """A refusal as a JSON-safe record, or ``None`` when there is none."""
+    if refusal is None:
+        return None
+    return {
+        "code": refusal.code.value,
+        "variant_id": refusal.variant_id,
+        "detail": refusal.detail,
+    }
+
+
+def midnight_open_evidence(opening: MidnightOpen, *, price: object,
+                           variant_config: VariantConfig,
+                           daily_ce: object | None = None) -> dict:
+    """P1-04 evidence: the opening **price object**, V05, and DB-03.
+
+    The three objects are deliberately kept apart, because two of them share a
+    name in the corpus and produce opposite trade sides on the same bar
+    (``daily_bias`` C2/C5):
+
+    * ``midnight_open`` is the price object (price, anchor instant, day key,
+      V04 provenance) -- never a timestamp alone;
+    * ``polarity`` is DB-01/DB-02 applied to the current ``price`` under the
+      **declared** V05 option.  An undeclared V05 yields ``polarity=None`` and
+      a coded ``polarity_refusal`` with ``NT_VARIANT_UNDECLARED``; no majority
+      reading is substituted (§14.3 ``BLOCK``);
+    * ``open_vs_daily_ce`` is DB-03's two-price comparison (the open against
+      the daily CE), and it is never derived from ``price > ce`` (C5).  Without
+      a ``daily_ce`` it is reported missing rather than fabricated.
+
+    Every refusal travels as its §12 code (A3/A6); an empty value is never the
+    evidence for a refusal.
+    """
+    if not isinstance(opening, MidnightOpen):
+        raise TypeError(
+            "midnight_open_evidence needs the MidnightOpen price object, got "
+            f"{type(opening).__name__}")
+    value = float(price)
+    if not math.isfinite(value):
+        raise ValueError(f"the compared price must be finite, got {price!r}")
+
+    mode, mode_refusal = daily_polarity_mode(variant_config)
+    reading: BiasDirection | None = None
+    polarity_refusal: Refusal | None = mode_refusal
+    if mode is not None:
+        reading, polarity_refusal = daily_open_polarity(
+            opening, value, polarity=mode)
+
+    comparison = None
+    comparison_refusal: Refusal | None = None
+    if daily_ce is not None:
+        comparison, comparison_refusal = open_vs_daily_ce(opening, daily_ce)
+
+    missing: list[str] = []
+    if mode is None or reading is None:
+        missing.append("polarity")
+    if daily_ce is None:
+        missing.append("daily_ce")
+    elif comparison is None:
+        missing.append("open_vs_daily_ce")
+
+    return {
+        "midnight_open": opening.to_public(),
+        "price": value,
+        "polarity": (
+            None if mode is None else {
+                "variant_id": "V05",
+                "mode": mode,
+                "reading": ("" if reading is None else serialize_bias(reading)),
+                "source": DAILY_POLARITY_SOURCES[mode],
+            }),
+        "polarity_refusal": _refusal_record(polarity_refusal),
+        "daily_ce": (None if daily_ce is None else float(daily_ce)),
+        "open_vs_daily_ce": (
+            None if comparison is None else comparison.to_public()),
+        "open_vs_daily_ce_refusal": _refusal_record(comparison_refusal),
+        "missing_fields": missing,
     }

@@ -34,14 +34,17 @@ from .cisd import CISD
 from .concepts import (ICTConfig, PIVOT_LEFT, analyze, detect_fvgs, find_pivots,
                        load_csv)
 from .config import config_hash as _config_hash
-from .variants import VariantConfig, VariantUndeclared
+from .variants import Refusal, RefusalCode, VariantConfig, VariantUndeclared
 from .context import (BiasDirection, BiasState, BiasStateStore,
+                      DAILY_POLARITY_SOURCES,
                       DAY_BOUNDARY_OPTIONS, DayBoundary,
                       DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
-                      SwingIndex, bias_vocabulary_readings, candle2_closure,
-                      candle3_closure, dealing_range, in_session,
-                      neutral_blocks, neutral_weight, ote_from_signal,
-                      parse_bias, parse_day_clock, resolve_day_boundary,
+                      MidnightOpen, SwingIndex, bias_vocabulary_readings,
+                      candle2_closure, candle3_closure, daily_open_polarity,
+                      dealing_range, in_session, midnight_open_from_anchor,
+                      neutral_blocks, neutral_weight, open_vs_daily_ce,
+                      ote_from_signal, parse_bias, parse_day_clock,
+                      resolve_daily_polarity, resolve_day_boundary,
                       serialize_bias, validate_bias_vocabulary,
                       validate_neutral_handling)
 from .pd_arrays import count_path_liquidity, near_arrays
@@ -295,6 +298,14 @@ class SetupConfig:
     #: keeps the pre-P1-03 compatibility path (which is labelled ``undeclared``
     #: on every emitted setup instead of silently claiming a day boundary).
     day_boundary_required: bool = False
+    #: P1-04: gate the directional setups on the **declared** V05
+    #: midnight-open polarity.  ``False`` keeps the pre-P1-04 compatibility
+    #: path (the price object and its evidence are still emitted when V04 is
+    #: declared, but they do not veto).  ``True`` requires V04 (the boundary
+    #: that defines the open) and V05 (the polarity reading); either being
+    #: undeclared refuses with ``NT_VARIANT_UNDECLARED`` -- no majority reading
+    #: is picked on the run's behalf (§14.3 ``BLOCK``).
+    midnight_open_gate: bool = False
 
     def read_variant(self, variant_id: str) -> str:
         """Read one declared fork through the single register (A7).
@@ -328,6 +339,8 @@ class SetupConfig:
             extra["broker_roll"] = self.broker_roll
         if self.day_boundary_required:
             extra["day_boundary_required"] = True
+        if self.midnight_open_gate:
+            extra["midnight_open_gate"] = True
         return _config_hash(
             self.variant_config,
             bias_primitive=self.bias_primitive,
@@ -855,6 +868,10 @@ class _SetupPrecompute:
         self.cfg = cfg
         self.spec = spec
         self._bias_states: dict[int, BiasState] = {}
+        # P1-04: one price object per day anchor, built on first use.  The
+        # key is the anchor bar so a day is read once, not once per CISD.
+        self._midnight_opens: dict[int, MidnightOpen | None] = {}
+        self._midnight_open_refusals: dict[int, Refusal | None] = {}
 
     def bars_ok(self, t: int) -> bool:
         """NaN gate: HTF 1D indicators, 4H indicators and 15m Ichimoku present."""
@@ -891,6 +908,32 @@ class _SetupPrecompute:
         stamp = self.dates.iloc[anchor]
         return (self.day_boundary.day_key(stamp, market=self.cfg.market),
                 anchor, float(self.open[anchor]))
+
+    def midnight_open(self, t: int
+                      ) -> tuple[MidnightOpen | None, Refusal | None]:
+        """The declared day's opening **price** object at base bar ``t`` (P1-04).
+
+        The price is the open of the day's first base bar, read from the same
+        V04 boundary as :meth:`day_info` (GW-01: one boundary).  The bar must
+        start exactly at the boundary; otherwise the open is not the day's
+        opening price and ``NT_DATA_MISSING`` is returned instead of a
+        fabricated level.  Results are cached per anchor bar.
+        """
+        if self.day_boundary is None or self.day_anchor_bar is None:
+            return None, Refusal(
+                RefusalCode.NT_VARIANT_UNDECLARED, "V04",
+                "no declared day boundary; a midnight open has no clock "
+                "(GW-01, §14.1-4)")
+        anchor = int(self.day_anchor_bar[int(t)])
+        if anchor in self._midnight_opens:
+            return (self._midnight_opens[anchor],
+                    self._midnight_open_refusals[anchor])
+        opening, refusal = midnight_open_from_anchor(
+            self.day_boundary, price=self.open[anchor],
+            stamp=self.dates.iloc[anchor], bar=anchor, market=self.cfg.market)
+        self._midnight_opens[anchor] = opening
+        self._midnight_open_refusals[anchor] = refusal
+        return opening, refusal
 
     def bias_state(self, t: int) -> BiasState:
         """The one :class:`BiasState` for base bar ``t`` (P1-02).
@@ -1215,7 +1258,8 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 refusals: list[dict] | None = None, *,
                 bias_store: BiasStateStore | None = None,
                 day_boundary: DayBoundary | None = None,
-                day_boundary_required: bool | None = None) -> list[CISD]:
+                day_boundary_required: bool | None = None,
+                daily_ce: float | None = None) -> list[CISD]:
     """Build the admitted setups.  ``refusals`` is an optional audit sink.
 
     When supplied, every setup refused by a named §12 code appends one dict
@@ -1236,6 +1280,15 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     the run is marked ``undeclared`` on every setup (the legacy path) and
     ``day_boundary_required=True`` refuses with ``NT_VARIANT_UNDECLARED``
     instead of inventing a day.
+
+    P1-04: with V04 declared, every setup carries the day's
+    :class:`~ict_trader.context.MidnightOpen` price object (price, anchor
+    instant, day key) and, when V05 is declared, its DB-01/DB-02 polarity.
+    ``daily_ce`` is the caller's declared daily CE for DB-03's two-price
+    comparison; when it is ``None`` the comparison is reported missing rather
+    than derived from a ``price > ce`` boolean (C5).  ``midnight_open_gate``
+    turns the declared polarity into a directional gate and refuses an
+    undeclared V04 or V05.
     """
     cfg = apply_quality_profile(cfg)
     # P1-03: resolve the one declared day boundary before any bar is read.  V04
@@ -1264,6 +1317,26 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             "V04",
             "the run requires a declared day boundary (GW-01), but V04 is "
             "unset; declare one of " + ", ".join(DAY_BOUNDARY_OPTIONS))
+    # P1-04: the midnight open is read under the declared V04 boundary, its
+    # polarity under the declared V05 reading.  The gate refuses an undeclared
+    # fork instead of choosing a side; with the gate off, no V05 read happens
+    # at all and the evidence reports "no polarity" rather than a default.
+    midnight_polarity: str | None = None
+    if cfg.midnight_open_gate:
+        if day_boundary is None:
+            raise VariantUndeclared(
+                "V04",
+                "midnight_open_gate requires the declared day boundary that "
+                "defines the opening price (GW-01), but V04 is unset")
+        if not cfg.variant_config.is_declared("V05"):
+            raise VariantUndeclared(
+                "V05",
+                "midnight_open_gate requires the declared daily polarity, but "
+                "V05 is unset; declare one of "
+                + ", ".join(DAILY_POLARITY_SOURCES))
+    if cfg.variant_config.is_declared("V05"):
+        midnight_polarity = resolve_daily_polarity(cfg.variant_config)
+    daily_ce_value = None if daily_ce is None else float(daily_ce)
     if cfg.origin_filter == "fvg" and cfg.require_sweep:
         cfg = replace(cfg, require_sweep=False)
     spec = _stack_spec(cfg)
@@ -1287,6 +1360,60 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
         if cfg.daily_bias_filter in DAILY_BIAS_FILTERS[1:] and (
                 bias_dir is None or parse_bias(bias_dir) is not parse_bias(c.direction)):
             continue
+        # P1-04: the midnight open is a price object; DB-01/DB-02 (V05) and
+        # DB-03 are two different comparisons.  The gate compares this bar's
+        # close -- the price known at ``t`` -- with the opening price, and the
+        # two-price DB-03 evidence never consumes the current price (C5).
+        midnight: MidnightOpen | None = None
+        midnight_refusal: Refusal | None = None
+        if day_boundary is not None:
+            midnight, midnight_refusal = pre.midnight_open(t)
+        open_reading: BiasDirection | None = None
+        open_refusal: Refusal | None = None
+        open_comparison = None
+        open_comparison_refusal: Refusal | None = None
+        if midnight is not None:
+            if midnight_polarity is not None:
+                open_reading, open_refusal = daily_open_polarity(
+                    midnight, close[t], polarity=midnight_polarity)
+            if daily_ce_value is not None:
+                open_comparison, open_comparison_refusal = open_vs_daily_ce(
+                    midnight, daily_ce_value)
+        if cfg.midnight_open_gate:
+            if midnight is None:
+                refusal = midnight_refusal
+                _record_refusal(
+                    refusals,
+                    code=(RefusalCode.NT_DATA_MISSING.value if refusal is None
+                          else refusal.code.value),
+                    direction=c.direction, signal_bar=int(t),
+                    gate="midnight_open", day_boundary_kind=day_boundary.kind,
+                    detail=("" if refusal is None else refusal.detail),
+                )
+                continue
+            if open_refusal is not None:
+                _record_refusal(
+                    refusals, code=open_refusal.code.value,
+                    direction=c.direction, signal_bar=int(t),
+                    gate="midnight_open", midnight_open=midnight.price,
+                    midnight_open_polarity_mode=midnight_polarity,
+                    detail=open_refusal.detail,
+                )
+                continue
+            if open_reading is None or open_reading is not parse_bias(c.direction):
+                _record_refusal(
+                    refusals, code=RefusalCode.NT_BIAS_GATE.value,
+                    direction=c.direction, signal_bar=int(t),
+                    gate="midnight_open", midnight_open=midnight.price,
+                    price=float(close[t]),
+                    midnight_open_polarity=serialize_bias(open_reading),
+                    midnight_open_polarity_mode=midnight_polarity,
+                    detail=("the declared V05 midnight-open polarity is "
+                            "no reading for this bar" if open_reading is None
+                            else "the declared V05 midnight-open polarity "
+                                 "does not match the setup direction"),
+                )
+                continue
         # P0-09: the HTF gate reads structure on spec.bias_tf, not on the
         # base/entry frame.  P1-02: the reading is a stored BiasState object,
         # not a per-call boolean; the gate reads its bias field.  When a
@@ -1519,6 +1646,40 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 "day_key": day_key,
                 "day_anchor_bar": day_anchor_bar,
                 "day_anchor_price": day_anchor_price,
+                # P1-04: the midnight open as a **price object** (price,
+                # anchor instant, day key, V04 provenance), its declared V05
+                # polarity, and DB-03's two-price comparison.  ``None``/``""``
+                # means the object was not declared or not available; it never
+                # means a fabricated reading, and a refusal travels as its §12
+                # code instead of an empty value (A3/A6).
+                "midnight_open": (None if midnight is None
+                                  else midnight.to_public()),
+                "midnight_open_declared": midnight is not None,
+                "midnight_open_gate": bool(cfg.midnight_open_gate),
+                "midnight_open_source": (None if midnight is None
+                                         else midnight.source),
+                "midnight_open_data_refusal": (
+                    None if midnight_refusal is None
+                    else {"code": midnight_refusal.code.value,
+                          "detail": midnight_refusal.detail}),
+                "midnight_open_polarity_mode": midnight_polarity,
+                "midnight_open_polarity": (
+                    "" if open_reading is None else serialize_bias(open_reading)),
+                "midnight_open_polarity_source": (
+                    None if midnight_polarity is None
+                    else DAILY_POLARITY_SOURCES[midnight_polarity]),
+                "midnight_open_polarity_refusal": (
+                    None if open_refusal is None
+                    else {"code": open_refusal.code.value,
+                          "detail": open_refusal.detail}),
+                "daily_ce": daily_ce_value,
+                "daily_open_vs_ce": (
+                    None if open_comparison is None
+                    else open_comparison.to_public()),
+                "daily_open_vs_ce_refusal": (
+                    None if open_comparison_refusal is None
+                    else {"code": open_comparison_refusal.code.value,
+                          "detail": open_comparison_refusal.detail}),
                 # The timeframe the gate actually read (P0-09).  It is the
                 # same declared tier the indicators use, and is recorded so a
                 # consumer never has to assume which frame produced the state.

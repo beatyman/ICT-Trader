@@ -1306,6 +1306,394 @@ def resolve_day_boundary(variant_config, *, broker_roll: object | None = None,
                                 broker_zone=broker_zone)
 
 
+# --------------------------------------------------------------------------- #
+# P1-04 — the midnight open as a price object, V05 polarity, DB-03
+# --------------------------------------------------------------------------- #
+#: V05 options, read from the one register (A7).  The strings are not re-typed
+#: here: ``majority`` is DB-01 and ``inverted`` is DB-02.
+DAILY_POLARITY_OPTIONS: tuple[str, ...] = tuple(read_variant_spec("V05").options)
+
+#: The source of each V05 reading.  DB-01 is attested by five sources; DB-02 is
+#: one operational source that contradicts them.  §14.3 makes the fork
+#: ``BLOCK``, so neither reading is a default and an undeclared V05 refuses.
+DAILY_POLARITY_SOURCES: dict[str, str] = {
+    "majority": ("DB-01 [SN-D01]: bullish iff price < midnight open; bearish "
+                 "iff price > midnight open"),
+    "inverted": ("DB-02 [SN-D02]: below the midnight open => bearish; above "
+                 "=> bullish (one source; contradicts DB-01)"),
+}
+
+#: DB-03's one attested two-price reading.  It compares the midnight open with
+#: the **daily CE**, not the current price with a CE: ``daily_bias`` C5 warns
+#: that collapsing the two into one ``price > ce`` boolean silently merges
+#: three rules.
+DAILY_OPEN_VS_CE_SOURCE: str = (
+    "DB-03 [SN-D03]: midnight_open > daily_CE => the day opens in premium => "
+    "a bearish Judas from premium toward discount is more likely")
+
+#: The two outcomes of the DB-03 comparison.  §14.3 makes DB-03 a ``MODE``:
+#: both outcomes ship.  The corpus states the premium branch only, so the
+#: discount branch carries no invented directional mirror.
+DAILY_OPEN_LOCATIONS: tuple[str, ...] = ("premium", "discount")
+
+
+@dataclass(frozen=True, slots=True)
+class MidnightOpen:
+    """The declared day's opening **price**, not a timestamp (P1-04).
+
+    ``daily_bias`` R5 makes the day's unit a price -- "the 00:00 New York
+    opening price, ICT's anchor for the 'true day'" -- and ``premium_discount``
+    R33 separates the two objects: the true day is a *time period*, the
+    midnight open is a *price level*.  This type carries both, so no consumer
+    can mistake the instant for the price.
+
+    The price is the open of the first base bar of the declared day.  That bar
+    must start **at** the declared V04 boundary; otherwise its open is not the
+    boundary's opening price and :func:`midnight_open_from_anchor` reports
+    ``NT_DATA_MISSING`` instead of authoring a level (X1).
+
+    ``kind``/``zone``/``anchor_time`` record the V04 declaration the price was
+    read under (GW-01: exactly one boundary, never mixed).  When V04 is
+    ``NY midnight`` this is literally the corpus's midnight open; under another
+    V04 option it is that declared day's opening price, and
+    :attr:`is_midnight_open` says so instead of renaming it.
+    """
+
+    price: float
+    at: pd.Timestamp
+    day: str
+    bar: int
+    kind: str
+    zone: str
+    anchor_time: dtime
+    source: str
+    variant_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        price = float(self.price)
+        if not np.isfinite(price):
+            raise ValueError(
+                f"the midnight open must be a finite price, got {self.price!r}")
+        object.__setattr__(self, "price", price)
+        at = pd.Timestamp(self.at)
+        if pd.isna(at):
+            raise ValueError("the midnight open instant is NaT")
+        if at.tzinfo is None:
+            raise ValueError(
+                "the midnight open instant must be tz-aware; a naive stamp "
+                "would need an undeclared input timezone")
+        object.__setattr__(self, "at", at)
+        day = str(self.day).strip()
+        if not day:
+            raise ValueError("the midnight open must name its day key")
+        object.__setattr__(self, "day", day)
+        bar = int(self.bar)
+        if bar < 0:
+            raise ValueError(f"the anchor bar must be >= 0, got {self.bar!r}")
+        object.__setattr__(self, "bar", bar)
+        kind = str(self.kind).strip()
+        if kind not in DAY_BOUNDARY_OPTIONS:
+            raise ValueError(
+                f"unknown V04 day boundary {self.kind!r}; declare one of "
+                f"{DAY_BOUNDARY_OPTIONS}")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "zone", _validate_day_zone(self.zone))
+        object.__setattr__(self, "anchor_time", parse_day_clock(self.anchor_time))
+        source = str(self.source).strip()
+        if not source:
+            raise ValueError("the midnight open must carry its provenance")
+        object.__setattr__(self, "source", source)
+        ids: list[str] = []
+        raw_ids = ((self.variant_ids,) if isinstance(self.variant_ids, str)
+                   else self.variant_ids)
+        for raw in raw_ids:
+            variant_id = str(raw).strip().upper()
+            read_variant_spec(variant_id)  # refuse an undeclared V## id
+            if variant_id not in ids:
+                ids.append(variant_id)
+        object.__setattr__(self, "variant_ids", tuple(ids))
+
+    @property
+    def is_midnight_open(self) -> bool:
+        """Whether V04 named the corpus's NY-midnight anchor for this price."""
+        return self.kind == "NY midnight"
+
+    def is_knowable(self, bar: int) -> bool:
+        """The opening price is observable from its anchor bar onward.
+
+        The open prints at the bar's first trade and does not repaint, so it is
+        not withheld until the bar closes; a bar *before* the anchor cannot know
+        it (CB-07).
+        """
+        return int(bar) >= self.bar
+
+    @property
+    def missing_fields(self) -> tuple[str, ...]:
+        """A constructed price object is complete; nothing is filled later."""
+        return ()
+
+    def to_public(self) -> dict[str, object]:
+        """The JSON-safe contract record (price plus its anchor instant)."""
+        return {
+            "price": self.price,
+            "at": self.at.isoformat(),
+            "day": self.day,
+            "bar": int(self.bar),
+            "kind": self.kind,
+            "zone": self.zone,
+            "anchor_time": self.anchor_time.strftime("%H:%M"),
+            "source": self.source,
+            "is_midnight_open": self.is_midnight_open,
+            "variant_id": "V04",
+            "variant_ids": list(self.variant_ids),
+            "missing_fields": list(self.missing_fields),
+        }
+
+
+def midnight_open_from_anchor(boundary: DayBoundary, *, price: object,
+                              stamp: object, bar: int,
+                              market: str = "other",
+                              input_tz: str | None = None,
+                              variant_ids: Iterable[str] = ("V04",)
+                              ) -> tuple[MidnightOpen | None, Refusal | None]:
+    """Build the opening price from a known anchor bar, checking alignment.
+
+    The check is the point of the function: the first bar of a day is only the
+    day's opening price when it starts exactly at the declared boundary.  A
+    coarse frame whose first bar opens at 02:00 does not open the 00:00 day, so
+    its open is reported as missing rather than passed off as the anchor (X1).
+    """
+    if not isinstance(boundary, DayBoundary):
+        raise TypeError(
+            "a midnight open needs the declared DayBoundary object, not a "
+            f"{type(boundary).__name__}")
+    local = boundary._stamp(stamp, input_tz=input_tz,
+                            market=market).tz_convert(boundary.zone)
+    start = boundary.bucket_start(stamp, input_tz=input_tz, market=market)
+    if local != start:
+        return None, Refusal(
+            RefusalCode.NT_DATA_MISSING,
+            detail=(f"the first bar of the declared {boundary.kind!r} day starts "
+                    f"at {local.isoformat()}, not at the boundary "
+                    f"{boundary.anchor_time.strftime('%H:%M')} "
+                    f"{boundary.zone}; its open is not the day's opening price"))
+    opening = MidnightOpen(
+        price=price, at=local, day=start.isoformat(), bar=int(bar),
+        kind=boundary.kind, zone=boundary.zone,
+        anchor_time=boundary.anchor_time, source=boundary.source,
+        variant_ids=variant_ids)
+    return opening, None
+
+
+def opening_price(boundary: DayBoundary, df: pd.DataFrame, bar: int, *,
+                  market: str = "other", input_tz: str | None = None
+                  ) -> tuple[MidnightOpen | None, Refusal | None]:
+    """The declared day's opening price at ``bar`` as a :class:`MidnightOpen`.
+
+    This is the frame-level read path: it locates the first base bar of the day
+    containing ``bar`` (the same anchor the P1-03 budget account uses) and
+    returns its open together with the anchor instant and the V04 provenance.
+    """
+    if not isinstance(boundary, DayBoundary):
+        raise TypeError(
+            "a midnight open needs the declared DayBoundary object, not a "
+            f"{type(boundary).__name__}")
+    index = int(bar)
+    if index < 0 or index >= len(df):
+        return None, Refusal(
+            RefusalCode.NT_DATA_MISSING,
+            detail=f"bar {index} is outside the {len(df)}-bar frame")
+    anchors = boundary.anchor_bars(df, market=market, input_tz=input_tz)
+    anchor = int(anchors[index])
+    return midnight_open_from_anchor(
+        boundary, price=df["open"].iloc[anchor],
+        stamp=df["date"].iloc[anchor], bar=anchor, market=market,
+        input_tz=input_tz)
+
+
+def resolve_daily_polarity(variant_config) -> str:
+    """Read V05 from the one register (A7).
+
+    An undeclared V05 raises
+    :class:`~ict_trader.variants.VariantUndeclared` with
+    ``NT_VARIANT_UNDECLARED``.  No reading is selected on the caller's behalf:
+    DB-01 and DB-02 give opposite trade sides on the same bar (§14.3 ``BLOCK``).
+    """
+    option = variant_config.read("V05")
+    if option not in DAILY_POLARITY_OPTIONS:
+        raise ValueError(
+            f"V05 returned {option!r}, which is not one of "
+            f"{DAILY_POLARITY_OPTIONS}")
+    return option
+
+
+def daily_polarity_mode(variant_config) -> tuple[str | None, Refusal | None]:
+    """The fail-closed result form of :func:`resolve_daily_polarity` (A6).
+
+    Declared: ``(option, None)``.  Undeclared: ``(None, Refusal)`` carrying
+    ``NT_VARIANT_UNDECLARED``; the caller never receives a substitute reading.
+    """
+    refusal = variant_config.check("V05")
+    if refusal is not None:
+        return None, refusal
+    return resolve_daily_polarity(variant_config), None
+
+
+def daily_open_polarity(opening: MidnightOpen, price: object, *,
+                        polarity: str
+                        ) -> tuple[BiasDirection | None, Refusal | None]:
+    """DB-01/DB-02: the one declared V05 reading of one price against the open.
+
+    ``majority`` (DB-01) reads ``price < open`` as bullish and ``price > open``
+    as bearish; ``inverted`` (DB-02) reads the opposite boolean.  Both rules
+    declare ``<`` and ``>`` only, so equality has **no branch**: it returns a
+    typed ``NT_NO_BIAS`` refusal rather than picking a side or inventing a
+    tolerance.  The midnight open is also not the dealing-range EQ, so an
+    equality is deliberately not reported as ``NT_AT_EQ`` (``premium_discount``
+    R12: this divider has no EQ).
+    """
+    if not isinstance(opening, MidnightOpen):
+        raise TypeError(
+            "DB-01/DB-02 compare a price against the MidnightOpen object, not "
+            f"a {type(opening).__name__}; the only timestamp is not a price")
+    mode = str(polarity).strip()
+    if mode not in DAILY_POLARITY_OPTIONS:
+        raise ValueError(
+            f"unknown V05 daily polarity {polarity!r}; declare one of "
+            f"{DAILY_POLARITY_OPTIONS}")
+    value = float(price)
+    if not np.isfinite(value):
+        raise ValueError(f"the compared price must be finite, got {price!r}")
+    if value == opening.price:
+        return None, Refusal(
+            RefusalCode.NT_NO_BIAS,
+            detail=(f"price {value!r} equals the midnight open "
+                    f"{opening.price!r}; {mode!r} declares only < and >, so "
+                    "there is no equality reading (no tolerance is invented)"))
+    below = value < opening.price
+    if mode == "majority":
+        reading = BiasDirection.BULL if below else BiasDirection.BEAR
+    else:  # inverted: DB-02 is the opposite boolean on the same bar
+        reading = BiasDirection.BEAR if below else BiasDirection.BULL
+    return reading, None
+
+
+@dataclass(frozen=True, slots=True)
+class OpenVsDailyCE:
+    """DB-03: the midnight open against the **daily CE** -- two prices.
+
+    ``daily_bias`` C5 and ``premium_discount`` R33 give this comparison its own
+    identity: it is not DB-01's ``price`` vs ``open`` boolean, and it is not
+    ``price > ce``.  ``location`` is the relation of the two prices
+    (``premium`` when the open is above the daily CE, ``discount`` when below).
+    §14.3 marks DB-03 ``MODE``, so both outcomes ship.
+
+    The corpus states one directional reading only -- an open in premium makes a
+    bearish Judas more likely -- so ``judas_lean`` is bearish on the premium
+    branch and explicitly absent on the discount branch.  The mirror is **not**
+    invented: :attr:`missing_fields` names the absent lean.
+    """
+
+    midnight_open: MidnightOpen
+    daily_ce: float
+    location: str
+    judas_lean: BiasDirection | None
+    judas_lean_source: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.midnight_open, MidnightOpen):
+            raise TypeError(
+                "DB-03's first price must be the MidnightOpen object; a bare "
+                "float or timestamp is a different comparison")
+        ce = float(self.daily_ce)
+        if not np.isfinite(ce):
+            raise ValueError(f"the daily CE must be finite, got {self.daily_ce!r}")
+        object.__setattr__(self, "daily_ce", ce)
+        location = str(self.location).strip()
+        if location not in DAILY_OPEN_LOCATIONS:
+            raise ValueError(
+                f"unknown DB-03 location {self.location!r}; the two-price "
+                f"comparison has {DAILY_OPEN_LOCATIONS}")
+        object.__setattr__(self, "location", location)
+        lean = None if self.judas_lean is None else parse_bias(self.judas_lean)
+        if location == "premium":
+            if lean is not BiasDirection.BEAR:
+                raise ValueError(
+                    "DB-03's premium branch is the corpus's bearish Judas lean")
+        elif lean is not None:
+            raise ValueError(
+                "DB-03 attests the premium branch only; the discount branch "
+                "may not carry an invented directional mirror")
+        object.__setattr__(self, "judas_lean", lean)
+        source = None if self.judas_lean_source is None else str(
+            self.judas_lean_source).strip()
+        if location == "premium" and not source:
+            raise ValueError("the premium branch must carry its DB-03 citation")
+        if location == "discount" and source:
+            raise ValueError(
+                "the discount branch has no DB-03 citation to carry")
+        object.__setattr__(self, "judas_lean_source", source or None)
+
+    @property
+    def compares(self) -> tuple[str, str]:
+        """The two price operands, named so no consumer substitutes a third."""
+        return ("midnight_open.price", "daily_ce")
+
+    @property
+    def missing_fields(self) -> tuple[str, ...]:
+        """The absent directional lean is named, never filled in with a mirror."""
+        return () if self.judas_lean is not None else ("judas_lean",)
+
+    def to_public(self) -> dict[str, object]:
+        """The JSON-safe two-price comparison record."""
+        return {
+            "rule": "DB-03",
+            "midnight_open": {
+                "price": self.midnight_open.price,
+                "day": self.midnight_open.day,
+                "bar": int(self.midnight_open.bar),
+            },
+            "daily_ce": self.daily_ce,
+            "location": self.location,
+            "judas_lean": (serialize_bias(self.judas_lean)
+                           if self.judas_lean is not None else ""),
+            "judas_lean_source": self.judas_lean_source,
+            "compares": list(self.compares),
+            "missing_fields": list(self.missing_fields),
+        }
+
+
+def open_vs_daily_ce(opening: MidnightOpen, daily_ce: object
+                     ) -> tuple[OpenVsDailyCE | None, Refusal | None]:
+    """DB-03: compare the midnight open with the daily CE (two prices).
+
+    The first operand is the :class:`MidnightOpen` price, never the current
+    price: passing the current price here would silently recreate the
+    ``price > ce`` boolean that C5 forbids.  An exact equality is ``NT_AT_EQ``
+    because the daily CE is the dealing-range midpoint and DB-03 has no
+    equality branch.
+    """
+    if not isinstance(opening, MidnightOpen):
+        raise TypeError(
+            "DB-03 compares two prices: the first must be the MidnightOpen "
+            f"object, got {type(opening).__name__}")
+    ce = float(daily_ce)
+    if not np.isfinite(ce):
+        raise ValueError(f"the daily CE must be finite, got {daily_ce!r}")
+    if opening.price == ce:
+        return None, Refusal(
+            RefusalCode.NT_AT_EQ,
+            detail=(f"the midnight open {opening.price!r} equals the daily CE "
+                    f"{ce!r}; DB-03 compares two prices and declares no "
+                    "equality branch (no tolerance is invented)"))
+    if opening.price > ce:
+        comparison = OpenVsDailyCE(
+            opening, ce, "premium", BiasDirection.BEAR, DAILY_OPEN_VS_CE_SOURCE)
+    else:
+        comparison = OpenVsDailyCE(opening, ce, "discount", None, None)
+    return comparison, None
+
+
 def dealing_range_state(swings: Iterable, idx: int,
                         lookback_bars: int = RANGE_STALENESS_BARS
                         ) -> tuple[DealingRange | None, RangeDiagnostic | None]:
