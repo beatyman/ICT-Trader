@@ -8,6 +8,9 @@ Signal:
 Execution:
   * enter at the next bar open by default, or optionally wait for a retest of
     the CISD key level (``entry_mode="retest_key"``)
+  * the declared window gate applies to the **fill bar**, not only to the
+    signal bar: a fill outside the window is refused with
+    ``NT_FILL_OUTSIDE_WINDOW`` (P0-13, EN-04/§8.2)
   * stop at the CISD invalidation level
   * target supplied by the setup's declared ``target_mode``; a signal with no
     target, or a target below the RR floor at the actual fill, is refused rather
@@ -31,6 +34,7 @@ import numpy as np
 import pandas as pd
 
 from .concepts import ICTConfig, ICTResult, analyze, fetch_futu, load_csv
+from .context import in_session
 from .stats import mean_interval, n_for_margin, wilson_interval
 
 
@@ -40,6 +44,13 @@ from .stats import mean_interval, n_for_margin, wilson_interval
 #: RR-derived price (P0-05).
 TARGET_MISSING_CODE = "NT_DATA_MISSING"
 TARGET_TOO_NEAR_CODE = "NT_TARGET_TOO_NEAR"
+
+#: §12 refusal code for a fill bar outside the declared window (P0-13,
+#: EN-04/§8.2).  The signal bar passing the window gate is not enough when the
+#: entry fills on a later bar: a fill after the window has closed is not that
+#: model's trade.  Defined here (and re-exported by ``setup``) so the code has
+#: one spelling, matching the plan-gate codes above.
+NT_FILL_OUTSIDE_WINDOW = "NT_FILL_OUTSIDE_WINDOW"
 
 
 def net_rr(entry: float, stop: float, target: float, direction: str,
@@ -122,6 +133,12 @@ class StrategyConfig:
     # setup's dealing-range EQ (`quality_parts["dr_eq"]`) instead of at t1_at_r R.
     t1_at_eq: bool = False
     max_daily_loss_r: float = 0.0     # stop new entries after this daily R loss (0=off)
+    # P0-13: the window gate must also cover the bar the order actually fills
+    # on.  These mirror ``SetupConfig.session_gate``/``market`` so
+    # ``setup.run_one`` can forward the declaration and a direct simulator
+    # caller can declare it too.  ``none`` always passes and is the default.
+    session_gate: str = "none"
+    market: str = "other"
 
 
 @dataclass
@@ -227,6 +244,7 @@ def simulate_cisd(
         "refused_target_missing": 0,
         "refused_target_too_near": 0,
         "refused_target_wrong_side": 0,
+        "refused_fill_outside_window": 0,
     }
     mode = cfg.entry_mode
     if mode not in {"next_open", "retest_key", "fvg_ce", "ob_me", "ote"}:
@@ -310,6 +328,16 @@ def simulate_cisd(
         else:
             entry_idx = t + cfg.entry_delay
             raw_entry = open_[entry_idx]
+
+        # P0-13: the window gate must read the *fill* bar, not the signal bar.
+        # ``next_open`` fills one bar after the signal, and a retest can fill
+        # many bars later; a fill after the declared window has closed is not
+        # that model's setup (EN-05), so the order is refused with a named §12
+        # code and no position is opened.
+        if cfg.session_gate != "none" and not in_session(
+                df, int(entry_idx), cfg.market, cfg.session_gate):
+            stats["refused_fill_outside_window"] += 1
+            continue
 
         day = dates.iloc[entry_idx].date()
         if cfg.max_daily_loss_r > 0 and day_r.get(day, 0.0) <= -cfg.max_daily_loss_r:

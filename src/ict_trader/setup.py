@@ -7,7 +7,10 @@
         + PDA and displacement quality
 
 Entry is the next 15m open by default; `entry_mode="retest_key"` waits for a
-retest of the CISD key level.  Stop is the CISD invalidation wick.  The target
+retest of the CISD key level.  A declared session window gates both the signal
+bar and the bar that fills ``next_open`` entries: a fill after the window has
+closed is refused with ``NT_FILL_OUTSIDE_WINDOW`` rather than opened late
+(P0-13, EN-04/§8.2).  Stop is the CISD invalidation wick.  The target
 is selected by the declared ``target_mode`` family (default: nearest unswept
 liquidity pool, TG-02); a setup with no admissible target is refused instead of
 being given an RR-derived substitute.  A sweep may reclaim within a small window
@@ -33,7 +36,7 @@ from .context import (BiasState, SwingIndex, candle2_closure, candle3_closure,
                       dealing_range, in_session, ote_from_signal, parse_bias,
                       serialize_bias)
 from .pd_arrays import count_path_liquidity, near_arrays
-from .strategy import StrategyConfig, simulate_cisd
+from .strategy import (NT_FILL_OUTSIDE_WINDOW, StrategyConfig, simulate_cisd)
 from .indicators import (add_indicators, align_htf, ichimoku, macd,
                          mark_htf_known_at, resample_cn_4h, resample_htf)
 from .quality import Displacement, measure_displacement, score_setup
@@ -784,8 +787,34 @@ def _daily_bias_series(df: pd.DataFrame, daily: pd.DataFrame | None,
     return out
 
 
+def _next_open_fill_bar(cfg: SetupConfig, signal_bar: int) -> int | None:
+    """The bar a ``next_open`` entry fills on, or ``None`` when it fills later.
+
+    A ``next_open`` entry fills at the next bar's open (``StrategyConfig``
+    ``entry_delay=1``, the declared default).  The retest-family modes
+    (``retest_key``/``fvg_ce``/``ob_me``/``ote``) fill on a bar found by the
+    simulator, so the fill bar is unknown here; ``simulate_cisd`` gates that
+    actual bar itself (P0-13).
+    """
+    return int(signal_bar) + 1 if cfg.entry_mode == "next_open" else None
+
+
+def _record_refusal(refusals: list[dict] | None, **fields) -> None:
+    """Append one refusal to the optional sink; ``None`` means not requested."""
+    if refusals is not None:
+        refusals.append(fields)
+
+
 def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
-                daily: pd.DataFrame | None = None) -> list[CISD]:
+                daily: pd.DataFrame | None = None,
+                refusals: list[dict] | None = None) -> list[CISD]:
+    """Build the admitted setups.  ``refusals`` is an optional audit sink.
+
+    When supplied, every setup refused by a named §12 code appends one dict
+    (``code`` plus the bars/gate involved) to ``refusals``.  It defaults to
+    ``None``, so the signature and return value are unchanged for existing
+    callers (P0-13 records ``NT_FILL_OUTSIDE_WINDOW`` here).
+    """
     cfg = apply_quality_profile(cfg)
     if cfg.origin_filter == "fvg" and cfg.require_sweep:
         cfg = replace(cfg, require_sweep=False)
@@ -815,8 +844,23 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
         if (cfg.htf_structure_gate == "aligned"
                 and parse_bias(htf_struct) is not parse_bias(c.direction)):
             continue
-        if cfg.session_gate != "none" and not in_session(df, t, cfg.market, cfg.session_gate):
-            continue
+        if cfg.session_gate != "none":
+            if not in_session(df, t, cfg.market, cfg.session_gate):
+                continue
+            # P0-13: the signal bar passing the window gate is not enough when
+            # the entry fills on a later bar.  ``next_open`` fills on ``t+1``;
+            # gate that bar too and refuse the setup if it is outside, so a
+            # late fill can never open a position (EN-04/§8.2).
+            fill_bar = _next_open_fill_bar(cfg, t)
+            if (fill_bar is not None and fill_bar < len(df)
+                    and not in_session(df, fill_bar, cfg.market, cfg.session_gate)):
+                _record_refusal(
+                    refusals, code=NT_FILL_OUTSIDE_WINDOW,
+                    direction=c.direction, signal_bar=int(t),
+                    fill_bar=int(fill_bar), session_gate=cfg.session_gate,
+                    market=cfg.market,
+                )
+                continue
 
         pd_pos = None
         dr = pre.swings.dealing_range(t, cfg.pd_lookback)
@@ -1037,7 +1081,12 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
                         retest_tolerance_atr=cfg.retest_tolerance_atr,
                         trail_activate_r=cfg.trail_activate_r,
                         trail_atr_mult=cfg.trail_atr_mult,
-                        max_daily_loss_r=cfg.max_daily_loss_r)
+                        max_daily_loss_r=cfg.max_daily_loss_r,
+                        # P0-13: the simulator re-checks the actual fill bar
+                        # against the same declared window, so retest-family
+                        # entries cannot fill after the window closes either.
+                        session_gate=cfg.session_gate,
+                        market=cfg.market)
     r = simulate_cisd(df, res2, sc, Path(path).stem)
     return r.trades, {"signals": len(sigs), **r.metrics}
 
