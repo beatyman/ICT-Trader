@@ -11,7 +11,8 @@ from typing import Any
 
 import pandas as pd
 
-from ...concepts import ICTConfig, build_zigzag, detect_liquidity, find_pivots
+from ...concepts import (ICTConfig, PIVOT_LEFT, PIVOT_RIGHT, build_zigzag,
+                         detect_liquidity, find_pivots)
 from ...enhancements import detect_session_levels
 from ...sweeps import detect_key_levels, detect_sweeps
 
@@ -44,19 +45,29 @@ class SweepEvent:
 
 
 def build_sweep_events(frame: pd.DataFrame, *, ttl_bars: int = 8,
-                       left: int = 2, right: int = 2) -> list[SweepEvent]:
+                       left: int = PIVOT_LEFT,
+                       right: int = PIVOT_RIGHT) -> list[SweepEvent]:
     """Return the same sweep events used by the ICT strategy engine.
 
     The canonical detector is ``ict_trader.sweeps.detect_sweeps`` over
     ``detect_key_levels``.  The realtime overlay must not maintain a second
     swing-only sweep algorithm.
+
+    ``left``/``right`` are the pivot width and are **honoured** (P0-20): a
+    caller that declares a different width gets that width, instead of silently
+    receiving the old hardcoded 5/1.  The defaults are the one declared
+    :data:`~ict_trader.concepts.PIVOT_WIDTH` (repo 5/1), so the default path is
+    unchanged.
     """
     if frame is None or len(frame) < 12:
         return []
+    if int(left) < 1 or int(right) < 0:
+        raise ValueError(
+            f"pivot width must be left >= 1 and right >= 0; got ({left}, {right})")
     df = frame.reset_index(drop=True).copy()
     if "date" not in df.columns:
         return []
-    pivots = find_pivots(df, 5, 1)
+    pivots = find_pivots(df, int(left), int(right))
     swings = build_zigzag(pivots)
     sessions = detect_session_levels(df)
     liq = detect_liquidity(df, pivots, ICTConfig())

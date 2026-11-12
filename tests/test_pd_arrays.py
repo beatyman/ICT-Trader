@@ -44,9 +44,13 @@ def test_rejection_block_from_long_upper_wick():
 
 
 def test_breaker_from_mitigated_ob():
-    arrays = detect_breakers([OB("bull", 105, 100, True, 3)])
+    # P0-20: the tiers are declared.  This test pins the *geometry* of the
+    # labelled ``minimal`` tier (failed OB flips, no sweep sequence); the
+    # default ``sequenced`` tier is tested in tests/test_p0_event_identity.py.
+    arrays = detect_breakers([OB("bull", 105, 100, True, 3)], tier="minimal")
     assert len(arrays) == 1
     assert arrays[0].kind == "breaker" and arrays[0].direction == "bear"
+    assert arrays[0].tier == "minimal"
 
 
 def test_mitigation_block_from_failed_swing():

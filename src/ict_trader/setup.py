@@ -31,7 +31,8 @@ import numpy as np
 import pandas as pd
 
 from .cisd import CISD
-from .concepts import ICTConfig, analyze, detect_fvgs, find_pivots, load_csv
+from .concepts import (ICTConfig, PIVOT_LEFT, analyze, detect_fvgs, find_pivots,
+                       load_csv)
 from .context import (BiasState, DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
                       SwingIndex, candle2_closure, candle3_closure,
                       dealing_range, in_session, neutral_blocks, neutral_weight,
@@ -69,11 +70,11 @@ DEFAULT_TARGET_MODE = "liquidity"
 GATE_STRENGTHS = ("hard_veto", "score")
 DEFAULT_GATE_STRENGTH = "hard_veto"
 
-#: Repo pivot width for the bias-tier swing scan: the ``ICTConfig.swing_len``
-#: default used by ``analyze`` for the base frame.  It is a repo value, not a
-#: corpus constant (P0-20 declares it); P0-09 only requires that the scan runs
-#: on the bias timeframe.
-_BIAS_PIVOT_LEFT = 5
+#: Repo pivot width for the bias-tier swing scan: the one declared
+#: :data:`~ict_trader.concepts.PIVOT_LEFT` (repo 5/1).  No module may carry a
+#: private copy of the width (ST-03, A7, P0-20); P0-09 only requires that the
+#: scan runs on the bias timeframe.
+_BIAS_PIVOT_LEFT = PIVOT_LEFT
 
 #: One declared value per bias-tier score, imported by both parsers and the
 #: config so SetupConfig / setup.main / cli.py cannot disagree (P0-18, TB-T11).
@@ -187,6 +188,10 @@ class SetupConfig:
     sweep_window: int = 15
     sweep_reclaim_bars: int = 3
     min_sweep_strength: float = 0.0   # BTC 15m A/B: >=3.0 lifts the win rate
+    #: Admission **filter**: skip a setup whose stop is tighter than this many
+    #: ATR.  It never moves a stop.  The stop-widening floor is a different
+    #: object and is named ``floor_atr`` in ``realtime.analysis.risk`` (P0-20,
+    #: RE:C-14).
     min_stop_atr: float = 0.0         # BTC 15m A/B: >2.0 ATR stops win ~55-60%
     use_key_targets: bool = False
     # Declared target family (TG-02/TG-11, P0-05).  ``fixed`` remains an
@@ -1136,6 +1141,8 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             if cfg.min_sweep_strength > 0 and sweep_strength < cfg.min_sweep_strength:
                 continue
             if cfg.min_stop_atr > 0:
+                # Admission filter only: a stop tighter than the declared
+                # minimum is skipped, never widened here (P0-20, RE:C-14).
                 stop_atr = abs(float(c.level) - float(c.sl)) / max(float(atr14[t]), 1e-12)
                 if stop_atr < cfg.min_stop_atr:
                     continue

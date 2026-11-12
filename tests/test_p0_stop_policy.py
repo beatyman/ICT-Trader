@@ -63,7 +63,7 @@ def test_declared_policy_uses_one_anchor_not_the_outermost_union():
 def test_negative_buffer_is_clamped_and_cannot_enter_the_anchor():
     stop = structural_stop("long", entry=100.0, atr=1.0,
                            sweep={"level": 98.0, "extreme": 97.2},
-                           structure=None, pad_atr=-5.0, min_stop_atr=0.0)
+                           structure=None, pad_atr=-5.0, floor_atr=0.0)
     assert stop == pytest.approx(97.2)  # buffer clamped to 0, never inside
     assert stop <= 97.2
 

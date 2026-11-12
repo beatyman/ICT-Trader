@@ -16,6 +16,35 @@ Direction = Literal["bull", "bear"]
 ArrayKind = Literal["breaker", "mitigation", "rejection"]
 
 
+#: PP:C9 / breaker R4: the corpus attests **two** breaker tiers and they are not
+#: the same object.  ``minimal`` is the one-sentence "a failed order block that
+#: flips"; ``sequenced`` is the breaker *proper* -- liquidity is taken first,
+#: then the order block fails, then the opposite side is retested.  Only the
+#: sequenced form carries the R6 sweep precondition.
+BREAKER_TIERS = ("minimal", "sequenced")
+DEFAULT_BREAKER_TIER = "sequenced"
+BREAKER_TIER_SOURCES: dict[str, dict[str, str]] = {
+    "minimal": {
+        "label": "repo",
+        "r4": "tier (i): failed OB flips, no sequence",
+        "source": "labelled minimal tier; no sweep precondition",
+    },
+    "sequenced": {
+        "label": "corpus",
+        "r4": "tier (ii): liquidity taken -> OB fails -> opposite-side retest",
+        "r6": "a breaker needs a liquidity sweep first (not only a close)",
+        "source": "declared breaker-proper tier",
+    },
+}
+
+#: The sweep each post-flip side requires (R6): a bullish breaker is a failed
+#: *bearish* OB, so sell-side liquidity must have been taken first; a bearish
+#: breaker is a failed *bullish* OB and needs buy-side liquidity.  In
+#: ``sweeps.detect_sweeps`` an SSL raid is labelled ``direction="bull"`` and a
+#: BSL raid ``direction="bear"``, so the post-flip side names its sweep.
+BREAKER_SWEEP_DIRECTION: dict[str, str] = {"bull": "bull", "bear": "bear"}
+
+
 @dataclass
 class PDAArray:
     kind: ArrayKind
@@ -25,6 +54,8 @@ class PDAArray:
     created: int
     confirmed_at: int
     source: str = ""
+    #: The declared tier that produced a breaker (empty for other arrays).
+    tier: str = ""
 
     @property
     def mid(self) -> float:
@@ -65,16 +96,47 @@ def detect_rejections(df: pd.DataFrame, swings: Iterable, wick_ratio: float = 0.
     return out
 
 
-def detect_breakers(order_blocks: Iterable) -> list[PDAArray]:
-    """A mitigated order block flips into a breaker on the other side."""
+def _breaker_sweep_ok(sweep: object, direction: Direction,
+                      flip_bar: int) -> bool:
+    """R6: the sweep must hit the parent OB's side and precede the flip."""
+    required = BREAKER_SWEEP_DIRECTION[direction]
+    if str(getattr(sweep, "direction", "")) != required:
+        return False
+    known_at = int(getattr(sweep, "reclaim_bar",
+                           getattr(sweep, "sweep_bar", -1)))
+    return known_at <= int(flip_bar)
+
+
+def detect_breakers(order_blocks: Iterable, sweeps: Iterable = (),
+                    *, tier: str = DEFAULT_BREAKER_TIER) -> list[PDAArray]:
+    """A mitigated order block flips into a breaker on the other side.
+
+    The **tier is declared**, never inferred (PP:C9/R4, P0-20):
+
+    * ``minimal`` -- the labelled repo tier: a failed OB flips, no sequence.
+    * ``sequenced`` (default) -- the corpus breaker *proper*: a liquidity sweep
+      on the parent OB's side must be known at or before the flip bar (R6).
+      With no matching sweep no breaker is emitted; a bare ``mitigated`` flag is
+      not a breaker.
+
+    The zone is the parent OB's bounds and the direction is the opposite of the
+    parent's (AR-20), unchanged by the tier.
+    """
+    if tier not in BREAKER_TIERS:
+        raise ValueError(
+            f"unknown breaker tier {tier!r}; declare one of {BREAKER_TIERS}")
+    sweep_list = list(sweeps)
     out: list[PDAArray] = []
     for ob in order_blocks:
         if not bool(getattr(ob, "mitigated", False)):
             continue
         right = int(getattr(ob, "right", getattr(ob, "created", 0)))
         direction: Direction = "bear" if getattr(ob, "direction") == "bull" else "bull"
+        if tier == "sequenced" and not any(
+                _breaker_sweep_ok(s, direction, right) for s in sweep_list):
+            continue
         out.append(PDAArray("breaker", direction, float(ob.top), float(ob.bottom),
-                            right, right, "mitigated_ob"))
+                            right, right, f"{tier}_mitigated_ob", tier))
     return out
 
 

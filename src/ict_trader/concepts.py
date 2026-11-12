@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import math
+from bisect import bisect_left, bisect_right, insort
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -51,10 +52,54 @@ from .context import (
     in_session_at,
 )
 from .enhancements import SMT, SessionLevel, detect_htf_cisds, detect_session_levels, detect_smt
-from .pd_arrays import PDAArray, detect_breakers, detect_mitigations, detect_rejections
+from .pd_arrays import (DEFAULT_BREAKER_TIER, PDAArray, detect_breakers,
+                        detect_mitigations, detect_rejections)
 from .sweeps import KeyLevel, LiquiditySweep, detect_key_levels, detect_sweeps, nearest_key_target, score_key_levels
 
 Direction = Literal["bull", "bear"]
+
+
+# ---------------------------------------------------------------------------
+# Declared constants (P0-20): one name, one value, one provenance.
+# No call site may re-type any of these.
+# ---------------------------------------------------------------------------
+#: ST-03: the pivot width is a declared constant.  The corpus modal is a
+#: 3-candle fractal (1 left / 1 right) and it disfavours the 5-candle fractal;
+#: the repo default is 5/1.  ``PIVOT_RIGHT`` is also the confirmation lag used
+#: by ``Swing.confirmed_at`` (ST-01).  Both values are labelled ``repo``: they
+#: are not promoted to corpus doctrine (§14.1-6).
+PIVOT_LEFT = 5
+PIVOT_RIGHT = 1
+PIVOT_WIDTH = (PIVOT_LEFT, PIVOT_RIGHT)
+PIVOT_WIDTH_SOURCE = "repo"
+PIVOT_WIDTH_NOTE = ("ST-03: corpus modal is 1/1 and disfavours 5/1; 5/1 is the "
+                    "labelled repo default")
+
+#: ST-03/LQ-03: pivot ties are **non-strict** (``>=`` high, ``<=`` low), so two
+#: equal highs are two pivots (EQH needs that).  ``build_zigzag`` then keeps the
+#: *later* equal extreme, i.e. the most recent confirmed swing, which is what
+#: the dealing-range and structure reads require.
+PIVOT_TIE_RULE = "non_strict"
+
+#: ST-09: the MSS level-selection fork.  The corpus attests four incompatible
+#: mains and chooses none of them, so the implementation must declare the one it
+#: uses instead of silently taking the latest confirmed swing (P0-20).
+STRUCTURE_LEVEL_SELECTIONS = ("most_recent_confirmed", "all_confirmed")
+DEFAULT_STRUCTURE_LEVEL_SELECTION = "most_recent_confirmed"
+STRUCTURE_LEVEL_SELECTION_SOURCES: dict[str, dict[str, str]] = {
+    "most_recent_confirmed": {
+        "label": "repo",
+        "st09": "most-recent secondary swing",
+        "source": ("repo default; ST-09 lists four mains and chooses none of "
+                   "them"),
+    },
+    "all_confirmed": {
+        "label": "corpus",
+        "st04": "exists swing_high(j), j < t: close[t] > price(j)",
+        "source": ("ST-04 existential break over every confirmed swing; the "
+                   "event attaches the nearest broken level"),
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +108,7 @@ Direction = Literal["bull", "bear"]
 @dataclass
 class ICTConfig:
     mode: Literal["present", "historical"] = "present"
-    swing_len: int = 5
+    swing_len: int = PIVOT_LEFT
     displacement_filter: bool = True
     displacement_body_ratio: float = 0.36
     fvg_min_atr: float = 0.0
@@ -106,6 +151,12 @@ class ICTConfig:
     max_key_levels: int = 10
     show_smt: bool = False
     max_smt: int = 3
+    #: ST-09: which confirmed swing the break is tested against (declared, not
+    #: implied).  ``detect_structure`` validates the value.
+    structure_level_selection: str = DEFAULT_STRUCTURE_LEVEL_SELECTION
+    #: PP:C9/R4: which breaker tier is emitted (``minimal`` flips a failed OB;
+    #: ``sequenced`` additionally requires a sweep before the flip).
+    breaker_tier: str = DEFAULT_BREAKER_TIER
 
 
 @dataclass
@@ -122,6 +173,12 @@ class StructureEvent:
     price: float
     kind: Literal["MSS", "BOS"]
     direction: Direction
+    #: Identity of the broken swing (P0-20).  The de-dupe key is
+    #: ``(swing_index, price)``: a re-break of the same price by a *newer*
+    #: swing is a new event, breaking the same swing twice is not.
+    swing_index: int | None = None
+    #: The declared ST-09 selection that produced this event.
+    level_selection: str = ""
 
 
 @dataclass
@@ -366,8 +423,16 @@ def load_csv(path: str | Path) -> pd.DataFrame:
     return df.dropna(subset=cols).reset_index(drop=True)
 
 
-def find_pivots(df: pd.DataFrame, left: int, right: int = 1) -> list[Swing]:
-    """Pine-like ta.pivothigh/pivotlow with left/right bars."""
+def find_pivots(df: pd.DataFrame, left: int = PIVOT_LEFT,
+                right: int = PIVOT_RIGHT) -> list[Swing]:
+    """Pine-like ta.pivothigh/pivotlow with the **declared** left/right bars.
+
+    The width is :data:`PIVOT_WIDTH` (repo 5/1); it is a parameter only so a
+    caller can state a different declaration, never so a module can carry a
+    private copy (ST-03, P0-20).  Ties follow :data:`PIVOT_TIE_RULE`
+    (``non_strict``: ``>=`` high, ``<=`` low), so two equal highs are two
+    pivots (LQ-03).
+    """
     highs = df["high"].to_numpy()
     lows = df["low"].to_numpy()
     out: list[Swing] = []
@@ -383,7 +448,12 @@ def find_pivots(df: pd.DataFrame, left: int, right: int = 1) -> list[Swing]:
 
 
 def build_zigzag(pivots: list[Swing]) -> list[Swing]:
-    """Alternating H/L zigzag, replacing the last point on extension."""
+    """Alternating H/L zigzag, replacing the last point on extension.
+
+    An equal extreme keeps the **later** pivot: the most recent confirmed swing
+    is the object the dealing range and structure reads must anchor on, so the
+    earlier equal high/low may not survive (ST-03/LQ-03, DR anchor).
+    """
     pivots = sorted(pivots, key=lambda s: (s.index, s.kind))
     zz: list[Swing] = []
     for p in pivots:
@@ -392,7 +462,11 @@ def build_zigzag(pivots: list[Swing]) -> list[Swing]:
             continue
         last = zz[-1]
         if p.kind == last.kind:
-            if (p.kind == "H" and p.price > last.price) or (p.kind == "L" and p.price < last.price):
+            if p.kind == "H":
+                extends = p.price >= last.price
+            else:
+                extends = p.price <= last.price
+            if extends:
                 zz[-1] = p
             continue
         zz.append(p)
@@ -402,15 +476,80 @@ def build_zigzag(pivots: list[Swing]) -> list[Swing]:
 # ---------------------------------------------------------------------------
 # Core engine
 # ---------------------------------------------------------------------------
-def detect_structure(df: pd.DataFrame, swings: list[Swing]) -> tuple[list[StructureEvent], pd.Series]:
-    """Close-through-swing MSS/BOS with a simple trend state."""
+def _candidate_high(level_selection: str, close_t: float, t: int,
+                    last_high: Swing | None,
+                    confirmed_prices: list[float],
+                    index_at_price: dict[float, int]) -> tuple[int, float] | None:
+    """The swing high the declared ST-09 selection tests at bar ``t``."""
+    if level_selection == "most_recent_confirmed":
+        if last_high is None or int(last_high.index) >= t:
+            return None
+        if close_t > float(last_high.price):
+            return int(last_high.index), float(last_high.price)
+        return None
+    # all_confirmed: ST-04 existential.  The nearest confirmed high strictly
+    # below the close is a witness of the break and the level to report.
+    pos = bisect_left(confirmed_prices, float(close_t)) - 1
+    if pos < 0:
+        return None
+    level = float(confirmed_prices[pos])
+    sw_index = int(index_at_price.get(level, -1))
+    if sw_index < 0 or sw_index >= t:
+        return None
+    return sw_index, level
+
+
+def _candidate_low(level_selection: str, close_t: float, t: int,
+                   last_low: Swing | None,
+                   confirmed_prices: list[float],
+                   index_at_price: dict[float, int]) -> tuple[int, float] | None:
+    """The swing low the declared ST-09 selection tests at bar ``t``."""
+    if level_selection == "most_recent_confirmed":
+        if last_low is None or int(last_low.index) >= t:
+            return None
+        if close_t < float(last_low.price):
+            return int(last_low.index), float(last_low.price)
+        return None
+    # all_confirmed: the nearest confirmed low strictly above the close.
+    pos = bisect_right(confirmed_prices, float(close_t))
+    if pos >= len(confirmed_prices):
+        return None
+    level = float(confirmed_prices[pos])
+    sw_index = int(index_at_price.get(level, -1))
+    if sw_index < 0 or sw_index >= t:
+        return None
+    return sw_index, level
+
+
+def detect_structure(
+    df: pd.DataFrame,
+    swings: list[Swing],
+    *,
+    level_selection: str = DEFAULT_STRUCTURE_LEVEL_SELECTION,
+) -> tuple[list[StructureEvent], pd.Series]:
+    """Close-through-swing MSS/BOS with a simple trend state (ST-04/ST-06).
+
+    Two formerly implicit choices are now declarations (P0-20):
+
+    * **level selection** (ST-09).  ``most_recent_confirmed`` tests only the
+      latest confirmed swing on each side -- the repo reading.  ``all_confirmed``
+      applies ST-04 literally over every confirmed swing and reports the nearest
+      level that was actually broken.
+    * **de-dupe identity** (C12).  The key is ``(swing.index, swing.price)``,
+      never the price alone: a re-break of the same price by a newer swing is a
+      new event, while breaking the same swing twice is not.
+    """
+    if level_selection not in STRUCTURE_LEVEL_SELECTIONS:
+        raise ValueError(
+            f"unknown structure level selection {level_selection!r}; declare "
+            f"one of {STRUCTURE_LEVEL_SELECTIONS} (ST-09)")
     n = len(df)
     close = df["close"].to_numpy()
     events: list[StructureEvent] = []
     trend = 0
-    last_broken_high: float | None = None
-    last_broken_low: float | None = None
     trend_series = np.zeros(n, dtype=int)
+    broken_highs: set[tuple[int, float]] = set()
+    broken_lows: set[tuple[int, float]] = set()
 
     # Point-in-time swing pointers.  The old implementation rebuilt
     # `[s for s in swings ...]` on every bar, which is O(N * swings) and
@@ -426,29 +565,52 @@ def detect_structure(df: pd.DataFrame, swings: list[Swing]) -> tuple[list[Struct
     hi = li = 0
     last_high: Swing | None = None
     last_low: Swing | None = None
+    # ``all_confirmed`` state: confirmed prices plus the latest index at each
+    # price (so an equal-price newer swing changes the identity, as required).
+    confirmed_high_prices: list[float] = []
+    confirmed_low_prices: list[float] = []
+    high_index_at: dict[float, int] = {}
+    low_index_at: dict[float, int] = {}
 
     for t in range(n):
         while hi < len(highs_sorted) and int(highs_sorted[hi].confirmed_at) <= t:
-            last_high = highs_sorted[hi]
+            s = highs_sorted[hi]
+            last_high = s
+            if level_selection == "all_confirmed":
+                price = float(s.price)
+                insort(confirmed_high_prices, price)
+                high_index_at[price] = max(
+                    int(s.index), high_index_at.get(price, -1))
             hi += 1
         while li < len(lows_sorted) and int(lows_sorted[li].confirmed_at) <= t:
-            last_low = lows_sorted[li]
+            s = lows_sorted[li]
+            last_low = s
+            if level_selection == "all_confirmed":
+                price = float(s.price)
+                insort(confirmed_low_prices, price)
+                low_index_at[price] = max(
+                    int(s.index), low_index_at.get(price, -1))
             li += 1
-        sh = last_high if last_high is not None and last_high.index < t else None
-        sl = last_low if last_low is not None and last_low.index < t else None
 
-        if sh is not None and close[t] > sh.price and sh.price != last_broken_high:
+        cand_h = _candidate_high(level_selection, float(close[t]), t, last_high,
+                                 confirmed_high_prices, high_index_at)
+        cand_l = _candidate_low(level_selection, float(close[t]), t, last_low,
+                                confirmed_low_prices, low_index_at)
+
+        if cand_h is not None and cand_h not in broken_highs:
             kind: Literal["MSS", "BOS"] = "MSS" if trend <= 0 else "BOS"
-            events.append(StructureEvent(t, sh.price, kind, "bull"))
+            events.append(StructureEvent(
+                t, cand_h[1], kind, "bull",
+                swing_index=cand_h[0], level_selection=level_selection))
+            broken_highs.add(cand_h)
             trend = 1
-            last_broken_high = sh.price
-            last_broken_low = None
-        elif sl is not None and close[t] < sl.price and sl.price != last_broken_low:
+        elif cand_l is not None and cand_l not in broken_lows:
             kind = "MSS" if trend >= 0 else "BOS"
-            events.append(StructureEvent(t, sl.price, kind, "bear"))
+            events.append(StructureEvent(
+                t, cand_l[1], kind, "bear",
+                swing_index=cand_l[0], level_selection=level_selection))
+            broken_lows.add(cand_l)
             trend = -1
-            last_broken_low = sl.price
-            last_broken_high = None
         trend_series[t] = trend
     return events, pd.Series(trend_series, index=df.index, name="trend")
 
@@ -960,9 +1122,20 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
     cfg = config or ICTConfig()
     if len(df) < max(cfg.swing_len + 2, 10):
         raise ValueError("not enough bars")
-    pivots = find_pivots(df, cfg.swing_len, 1)
+    pivots = find_pivots(df, cfg.swing_len, PIVOT_RIGHT)
     swings = build_zigzag(pivots)
-    events, trend = detect_structure(df, swings)
+    events, trend = detect_structure(
+        df, swings, level_selection=cfg.structure_level_selection)
+    # Levels/sweeps are built first: a breaker is a failed OB **after a sweep**
+    # (PP:C9/R4), so the declared tier needs the sweep inventory at detection
+    # time instead of inheriting a bare "mitigated" flag (P0-20).
+    liq = detect_liquidity(df, pivots, cfg)
+    sessions = detect_session_levels(df, max_per=cfg.max_sessions) if cfg.show_sessions else []
+    key_levels = detect_key_levels(df, swings, sessions, liq)
+    sweeps = detect_sweeps(df, key_levels,
+                           min_penetration_atr=cfg.sweep_min_penetration_atr,
+                           reclaim_window=cfg.sweep_reclaim_bars) if cfg.show_sweeps else []
+    score_key_levels(key_levels, sessions, df)
     fvgs = detect_fvgs(df, cfg)
     if cfg.show_ifvg:
         fvgs.extend(detect_ifvg(list(fvgs), df))
@@ -970,23 +1143,16 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
         fvgs.extend(detect_bpr(fvgs))
     obs = detect_order_blocks(df, events, swings, cfg)
     pd_arrays = (detect_rejections(df, swings)
-                 + detect_breakers(obs)
+                 + detect_breakers(obs, sweeps, tier=cfg.breaker_tier)
                  + detect_mitigations(df, swings))
     pd_arrays.sort(key=lambda x: x.confirmed_at)
-    liq = detect_liquidity(df, pivots, cfg)
     gaps = detect_gaps(df, cfg)
     kz = detect_killzones(df, cfg)
     fib = fibonacci(swings) if cfg.show_fib else []
-    sessions = detect_session_levels(df, max_per=cfg.max_sessions) if cfg.show_sessions else []
     htf_cisds = detect_htf_cisds(df, cfg.htf_tfs) if cfg.show_htf_cisd else []
     smts = detect_smt(df, smt_df, max_out=cfg.max_smt) if (cfg.show_smt and smt_df is not None) else []
     smt_bars = [(s.end, s.direction) for s in smts]
-    key_levels = detect_key_levels(df, swings, sessions, liq)
-    sweeps = detect_sweeps(df, key_levels,
-                           min_penetration_atr=cfg.sweep_min_penetration_atr,
-                           reclaim_window=cfg.sweep_reclaim_bars) if cfg.show_sweeps else []
     sweep_bars = [(s.reclaim_bar, s.direction) for s in sweeps]
-    score_key_levels(key_levels, sessions, df)
 
     cisds: list[CISD] = []
     if cfg.show_cisd:

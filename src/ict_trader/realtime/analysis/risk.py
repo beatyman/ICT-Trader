@@ -99,7 +99,7 @@ def structural_stop(direction: str, entry: float, atr: float,
                     sweep: dict | None, structure: dict | None,
                     ob: dict | None = None, *,
                     pad_atr: float | None = None,
-                    min_stop_atr: float | None = None,
+                    floor_atr: float | None = None,
                     policy: StopPolicy | None = None) -> float:
     """Structural stop beyond the *one* anchor selected by ``STOP_POLICY``.
 
@@ -113,10 +113,16 @@ def structural_stop(direction: str, entry: float, atr: float,
     refusal: RK-01/RK-07 place the stop beyond the wick, never on the level that
     was swept.
 
-    ``pad_atr``/``min_stop_atr`` remain accepted for API compatibility and
-    override ``policy.buffer_atr``/``policy.floor_atr`` when supplied.  The floor
-    is the repo's labelled minimum-distance widening; it is applied after the
-    buffer, only when an entry is known (P0-06, conflict #4).
+    ``pad_atr``/``floor_atr`` remain accepted for API compatibility and override
+    ``policy.buffer_atr``/``policy.floor_atr`` when supplied.  The floor is the
+    repo's labelled minimum-distance widening; it is applied after the buffer,
+    only when an entry is known (P0-06, conflict #4).
+
+    The widening parameter is named ``floor_atr``, matching
+    ``StopPolicy.floor_atr``.  ``SetupConfig.min_stop_atr`` is a *different*
+    object -- an admission filter that **skips** a setup whose stop is tighter
+    than the declared minimum -- so it does not carry this name (P0-20,
+    RE:C-14).
 
     No anchor at all is a refusal, not a default: ``StopAnchorUnresolved`` is
     raised instead of falling back to ``entry -/+ 1xATR``, which would author a
@@ -126,7 +132,7 @@ def structural_stop(direction: str, entry: float, atr: float,
     anchor = _select_stop_anchor(direction, sweep, structure, ob, p)
     stop = stop_from_anchor(direction, anchor, atr, policy=p, buffer_atr=pad_atr)
 
-    floor_atr = p.floor_atr if min_stop_atr is None else min_stop_atr
+    floor_atr = p.floor_atr if floor_atr is None else floor_atr
     floor = max(float(floor_atr), 0.0) * max(float(atr), 0.0)
     if floor > 0:
         # Declared repo widening, not a corpus value (RK-04).  It only ever

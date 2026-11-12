@@ -28,6 +28,38 @@ from ..evidence import (
 
 ENGINE_VERSION = "ict_trader-0.1.0"
 
+#: RE:RM-15 / V28: ``strategy.RR_MODE_FLOORS`` declares four gross-RR floors
+#: (3.0 / 1.5 / 2.0 / 0.0).  **None of them is 1.0**, so the engine's former
+#: ``if rr < 1.0`` was a private, undeclared floor that appeared in no table.
+#: P0-20 declares it as the engine's own ``repo`` admission mode instead of
+#: borrowing a corpus number; the V28 register itself is P1-13.
+ENGINE_RR_MODES = ("floor_1_0", "none")
+DEFAULT_ENGINE_RR_MODE = "floor_1_0"
+ENGINE_RR_FLOORS: dict[str, float] = {"floor_1_0": 1.0, "none": 0.0}
+ENGINE_RR_MODE_SOURCES: dict[str, dict[str, str]] = {
+    "floor_1_0": {
+        "label": "repo",
+        "v28": "outside V28",
+        "source": "engine admission floor; 1.0 is not one of V28's four floors",
+    },
+    "none": {
+        "label": "repo",
+        "v28": "outside V28",
+        "source": "declared absence of the engine admission floor",
+    },
+}
+
+
+def engine_rr_floor(mode: str = DEFAULT_ENGINE_RR_MODE) -> float:
+    """The declared gross-RR floor for ``mode`` (ValueError if undeclared)."""
+    try:
+        return ENGINE_RR_FLOORS[mode]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown engine rr_mode {mode!r}; declare one of {ENGINE_RR_MODES}"
+        ) from exc
+
+
 #: §12 refusal codes for the §8.1 structure chain.  The V25 detector is a
 #: P1-07 object, so a setup whose displacement conjunct is absent must fail
 #: closed instead of treating the unmeasured conjunct as true (DP-07).  A
@@ -68,6 +100,10 @@ class ICTEngine:
     version: str = ENGINE_VERSION
     warmup_bars: int = 800
     rule_mode: bool = False
+    #: Declared engine gross-RR admission mode (P0-20).  The old literal 1.0 is
+    #: now named and validated; ``none`` removes the engine floor (the setup /
+    #: strategy gates still apply their own declared floors).
+    rr_mode: str = DEFAULT_ENGINE_RR_MODE
     #: Refusals from the last scan, one dict per rejected setup
     #: (``{"code", "direction", "end", "data_gaps"}``).  An empty signal list
     #: alone is not a passing refusal (A3); this is where the §12 code lives.
@@ -76,6 +112,9 @@ class ICTEngine:
     #: has one.  P0-16: a stale (120-bar) range is a diagnosis, not a silent
     #: ``None``; it survives even when the scan emits no signal.
     range_diagnostic: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        engine_rr_floor(self.rr_mode)  # validate the declaration early
 
     def analyze(self, window: pd.DataFrame,
                 context: AnalysisContext) -> list[EngineSignal]:
@@ -139,7 +178,7 @@ class ICTEngine:
             if c.direction == "bear" and not (target < entry < stop):
                 continue
             rr = abs(target - entry) / risk
-            if rr < 1.0:
+            if rr < engine_rr_floor(self.rr_mode):
                 continue
             zone_low, zone_high = sorted((entry, float(c.level)))
             overlay_evidence = build_ict_overlays(frame)
