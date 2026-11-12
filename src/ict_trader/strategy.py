@@ -26,10 +26,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import time as dtime
+from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -601,6 +603,903 @@ def same_bar_exit(direction: str, high: float, low: float, stop: float,
 NT_FILL_OUTSIDE_WINDOW = "NT_FILL_OUTSIDE_WINDOW"
 
 
+# --------------------------------------------------------------------------- #
+# P1-15 management objects (SYSTEM_SPEC §9.6: MG-01…MG-11, V33, TG-08)
+# --------------------------------------------------------------------------- #
+# The corpus treats post-entry management as five separable decisions (TM-02),
+# not as one parameter.  This section owns the four declarations a management
+# plan cannot run without -- the holding class (V33/MG-11), the break-even form
+# (MG-08), the session flat (MG-05) and the target expiry (TG-08) -- and the
+# level ladder (MG-01/MG-02).  Nothing here invents a threshold:
+#
+# * every fraction, pip band and clock is the cited source's own value;
+# * a quantity the corpus leaves *missing* (a universal partial fraction, a
+#   reduce fraction, a trailing family) is never filled: the run must declare
+#   it, and an absent declaration is a refusal (`NT_*`), not a default;
+# * the ladder's per-level permissions are the corpus table, not a synthesis
+#   of it.  The full MG-02 table is a permission schedule, not one executable
+#   ladder: its tranches do not sum to 1, and :meth:`ManagementLadder.validate`
+#   says so instead of silently normalising it.
+#
+#: §12 codes the management surface refuses with.  A plan is never executed
+#: with a guessed holding class, an undeclared break-even form or an
+#: unstipulated target expiry.
+MANAGEMENT_UNDECLARED_CODE = "NT_VARIANT_UNDECLARED"
+MANAGEMENT_MISSING_CODE = "NT_DATA_MISSING"
+
+#: V33 is the holding-class fork; MG-08 names the BE-trigger vocabulary.
+HOLDING_CLASS_ID = "V33"
+BE_MODE_RULE_ID = "MG-08"
+
+
+class HoldingClass(StrEnum):
+    """V33: ``holding_class ∈ {intraday, swing, position}`` (MG-11).
+
+    MG-11 makes the field **required**; the enum is only the vocabulary.  A
+    run that does not declare it keeps the legacy path (no management plan),
+    and the plan builder refuses with ``NT_VARIANT_UNDECLARED`` rather than
+    choosing a class.
+    """
+
+    INTRADAY = "intraday"
+    SWING = "swing"
+    POSITION = "position"
+
+
+HOLDING_CLASSES: tuple[str, ...] = tuple(item.value for item in HoldingClass)
+
+
+def read_holding_class(value: HoldingClass | str) -> str:
+    """The one V33 read path: an exact declared option, else ``ValueError``."""
+    if isinstance(value, HoldingClass):
+        return value.value
+    text = str(value).strip().lower()
+    if text not in HOLDING_CLASSES:
+        raise ValueError(
+            f"unknown holding_class {value!r}; declare one of "
+            f"{HOLDING_CLASSES} (V33)")
+    return text
+
+
+class BEMode(StrEnum):
+    """MG-08: the five mutually exclusive break-even triggers.
+
+    ``never`` is a declared form, not a zero-valued float.  ``position`` admits
+    only ``never`` (TM-33: break-even is prohibited for position trades); the
+    other classes must declare one of the five, because the corpus supplies no
+    arbiter between them (TM-66, C2).
+    """
+
+    AT_FIRST_INTERNAL_POOL = "at_first_internal_pool"
+    AFTER_DAILY_RANGE_40_50 = "after_daily_range_40_50"
+    AFTER_FIRST_PROFIT_THIRD_OF_MOVE = "after_first_profit_third_of_move"
+    AFTER_SWING_MITIGATION = "after_swing_mitigation"
+    NEVER = "never"
+
+
+BE_MODE_FORMS: tuple[str, ...] = tuple(item.value for item in BEMode)
+
+#: Provenance of each MG-08 form.  Every form is a corpus attestation and the
+#: citation travels with it, so no form can be quoted as doctrine without its
+#: source (TM-31, TM-32, TM-33).
+BE_MODE_SOURCES: Mapping[str, dict[str, str]] = MappingProxyType({
+    BEMode.AT_FIRST_INTERNAL_POOL.value: {
+        "label": "corpus",
+        "source": "[RE:MG-10] first internal pool / first LRLR "
+                  "(doc_0505, doc_0508; TM-31)",
+    },
+    BEMode.AFTER_DAILY_RANGE_40_50.value: {
+        "label": "corpus (single)",
+        "source": "[RE:MG-10] after 40-50% of the expected daily range "
+                  "(doc_0306; TM-32)",
+    },
+    BEMode.AFTER_FIRST_PROFIT_THIRD_OF_MOVE.value: {
+        "label": "corpus (single)",
+        "source": "[RE:MG-10] after first profit and ~1/3 of the intended "
+                  "move (doc_0435; TM-32)",
+    },
+    BEMode.AFTER_SWING_MITIGATION.value: {
+        "label": "corpus (single)",
+        "source": "[RE:MG-10] after the entry is swing-mitigated "
+                  "(proj_c141d918; TM-32)",
+    },
+    BEMode.NEVER.value: {
+        "label": "corpus",
+        "source": "[RE:MG-10] never, for position trades (doc_0406; TM-33)",
+    },
+})
+
+#: The trigger names the pre-P1-15 simulator implements, mapped onto the MG-08
+#: vocabulary.  ``at_r`` has **no** attested form: TM-66 records that no source
+#: endorses a break-even move with neither a partial nor a maturity trigger, so
+#: it stays a labelled repo trigger (``REPO_ONLY_BE_MODES``) and cannot be
+#: reported as an MG-08 form.
+BE_MODE_IMPLEMENTED_FORMS: Mapping[str, str | None] = MappingProxyType({
+    "never": BEMode.NEVER.value,
+    "after_first_partial": BEMode.AT_FIRST_INTERNAL_POOL.value,
+    "at_r": None,
+})
+
+#: Implemented triggers that are repo choices, not corpus forms (TM-66).
+REPO_ONLY_BE_MODES: tuple[str, ...] = ("at_r",)
+
+
+def read_be_mode(value: BEMode | str) -> str:
+    """Return one exact MG-08 form; an unknown value is a ``ValueError``."""
+    text = value.value if isinstance(value, BEMode) else str(value).strip().lower()
+    if text not in BE_MODE_FORMS:
+        raise ValueError(
+            f"unknown break-even form {value!r}; declare one of "
+            f"{BE_MODE_FORMS} (MG-08)")
+    return text
+
+
+def mg08_be_mode(implementation: str | None) -> str | None:
+    """Map an implemented trigger onto its MG-08 form (``None`` if it has none).
+
+    ``never`` and ``after_first_partial`` are corpus forms; ``at_r`` is the
+    labelled repo trigger with no MG-08 entry (TM-66).  A missing
+    implementation returns ``None`` as well, so the caller refuses it instead
+    of reading an empty string as ``never``.
+    """
+    if implementation is None:
+        return None
+    text = str(implementation).strip().lower()
+    if text in BE_MODE_FORMS:
+        return text
+    if text in BE_MODE_IMPLEMENTED_FORMS:
+        return BE_MODE_IMPLEMENTED_FORMS[text]
+    raise ValueError(
+        f"unknown be_mode {implementation!r}; declare one of "
+        f"{BE_MODE_FORMS} or {tuple(BE_MODE_IMPLEMENTED_FORMS)}")
+
+
+@dataclass(frozen=True, slots=True)
+class HoldingClassPolicy:
+    """What V33 selects for one holding class (MG-11).
+
+    Every field is a corpus attestation or an explicit *missing* value:
+
+    * ``session_flat`` -- MG-11 says the class selects whether the flat
+      applies; TM-67 names applying an intraday flat to a position trade a
+      category error, so only ``intraday`` carries it.
+    * ``be_modes`` -- the MG-08 forms the class admits.  ``position`` admits
+      only ``never`` (TM-33).
+    * ``max_levels`` -- the ladder length the class's source states.  ``None``
+      means the corpus does not attest one for that class; the canonical count
+      is *missing* (1-5 levels across sources, TM-07).
+    * ``stop_lookback_days`` -- MG-11's position-trade stop (40 then 20
+      trading days); ``None`` where no such rule is attested.
+    * ``trailing_family`` -- ``None`` where the four incompatible trail
+      families (MG-12) have no per-class arbiter and the run must declare one.
+    """
+
+    holding_class: str
+    session_flat: bool
+    be_modes: tuple[str, ...]
+    max_levels: int | None
+    stop_lookback_days: tuple[int, int] | None
+    trailing_family: str | None
+    source_id: str
+    label: str = "corpus"
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "holding_class",
+                           read_holding_class(self.holding_class))
+        if not self.be_modes:
+            raise ValueError(f"{self.holding_class}: no BE form is admitted")
+        for mode in self.be_modes:
+            read_be_mode(mode)
+        if self.max_levels is not None and int(self.max_levels) <= 0:
+            raise ValueError(f"{self.holding_class}: max_levels must be > 0")
+        if self.stop_lookback_days is not None:
+            if len(self.stop_lookback_days) != 2 or any(
+                    int(day) <= 0 for day in self.stop_lookback_days):
+                raise ValueError(
+                    f"{self.holding_class}: stop_lookback_days must be two "
+                    f"positive integers")
+        if not self.source_id.strip():
+            raise ValueError(f"{self.holding_class}: a source_id is required")
+
+    def admits_be(self, mode: BEMode | str) -> bool:
+        """True only for an MG-08 form this class admits."""
+        return read_be_mode(mode) in self.be_modes
+
+
+_ALL_BE_FORMS: tuple[str, ...] = BE_MODE_FORMS
+
+#: The three V33 policies.  The per-class selection is the corpus' own horizon
+#: grouping (TM-31/TM-32/TM-33); see each row's ``source_id``.
+HOLDING_CLASS_POLICIES: Mapping[str, HoldingClassPolicy] = MappingProxyType({
+    HoldingClass.INTRADAY.value: HoldingClassPolicy(
+        HoldingClass.INTRADAY, session_flat=True, be_modes=_ALL_BE_FORMS,
+        max_levels=5, stop_lookback_days=None, trailing_family=None,
+        source_id="[RE:MG-07; MG-02; TM-67]",
+        notes="MG-02's session ladder is five levels. The canonical partial "
+              "count is missing (TM-07), and the trailing family is contested "
+              "(MG-12), so neither is defaulted here."),
+    HoldingClass.SWING.value: HoldingClassPolicy(
+        HoldingClass.SWING, session_flat=False, be_modes=_ALL_BE_FORMS,
+        max_levels=3, stop_lookback_days=None, trailing_family=None,
+        source_id="[TM-14; TM-32; TM-67]",
+        notes="doc_0635's swing ladder is PDH/PWH/PMH (three rungs). A swing "
+              "position is not managed like an intraday scalp (TM-67)."),
+    HoldingClass.POSITION.value: HoldingClassPolicy(
+        HoldingClass.POSITION, session_flat=False,
+        be_modes=(BEMode.NEVER.value,), max_levels=None,
+        stop_lookback_days=(40, 20), trailing_family="position_lookback",
+        source_id="[TM-33; TM-34; MG-11]",
+        notes="BE is prohibited for position trades (TM-33); the stop is MG-11's "
+              "40-then-20 trading-day lookback, not a ladder. No ladder length "
+              "is attested for this class."),
+})
+
+
+class LadderPermission(StrEnum):
+    """MG-02's per-level permission vocabulary (the source's own words)."""
+
+    MANDATORY = "mandatory"
+    OPTIONAL = "optional"
+    REMAINING = "remaining"
+    RUNNER = "runner"
+    SWING_ONLY = "swing_only"
+
+
+LADDER_PERMISSIONS: tuple[str, ...] = tuple(item.value for item in LadderPermission)
+
+
+@dataclass(frozen=True, slots=True)
+class LadderLevel:
+    """One rung of the MG-02 permission schedule.
+
+    ``fraction`` is ``None`` only where the source states no fraction (L5 is
+    "swing only"); the pip band is the source's own EUR/USD-scaled figure and is
+    carried as metadata, never used to derive a price.  ``requires`` is the
+    source's gate on the permission ("33/33/33 split", "4/4 alignment").
+    """
+
+    level_id: str
+    anchor: str
+    fraction: float | None
+    permission: str
+    pip_band: tuple[float, float] | None = None
+    requires: tuple[str, ...] = ()
+    move_stop_to_be: bool = False
+    source_id: str = "MG-02"
+
+    def __post_init__(self) -> None:
+        if not self.level_id.strip():
+            raise ValueError("ladder level id must not be empty")
+        if not self.anchor.strip():
+            raise ValueError(f"{self.level_id}: an anchor is required")
+        if self.permission not in LADDER_PERMISSIONS:
+            raise ValueError(
+                f"{self.level_id}: unknown permission {self.permission!r}; "
+                f"declare one of {LADDER_PERMISSIONS}")
+        if self.fraction is not None:
+            value = float(self.fraction)
+            if not 0.0 < value <= 1.0:
+                raise ValueError(
+                    f"{self.level_id}: fraction {value} must be in (0, 1]")
+        if self.pip_band is not None:
+            low, high = (float(bound) for bound in self.pip_band)
+            if low < 0 or high < low:
+                raise ValueError(
+                    f"{self.level_id}: invalid pip band [{low}, {high}]")
+        if not self.source_id.strip():
+            raise ValueError(f"{self.level_id}: a source_id is required")
+
+    def to_public(self) -> dict:
+        return {
+            "level_id": self.level_id,
+            "anchor": self.anchor,
+            "fraction": self.fraction,
+            "permission": self.permission,
+            "pip_band": None if self.pip_band is None else list(self.pip_band),
+            "requires": list(self.requires),
+            "move_stop_to_be": self.move_stop_to_be,
+            "source_id": self.source_id,
+        }
+
+
+#: MG-02's five-level permission schedule, transcribed from the source table
+#: (doc_0584 `dedup_batch_107.md:149`).  The bands are EUR/USD-scaled; L4's
+#: permission is gated on 4/4 alignment, L2's on a 33/33/33 split, and L5 is
+#: swing-only with no stated fraction.
+MG02_LEVELS: Mapping[str, LadderLevel] = MappingProxyType({
+    "L1": LadderLevel(
+        "L1", "first_irl", 0.50, LadderPermission.MANDATORY.value,
+        pip_band=(5.0, 15.0), move_stop_to_be=True,
+        source_id="[RE:MG-01/MG-02] (doc_0584 L1; doc_0589 T1)"),
+    "L2": LadderLevel(
+        "L2", "secondary_irl_1h_ce", 0.25,
+        LadderPermission.OPTIONAL.value, pip_band=(10.0, 25.0),
+        requires=("33/33/33 split",),
+        source_id="[RE:MG-02] (doc_0584 L2)"),
+    "L3": LadderLevel(
+        "L3", "pdh", 0.50, LadderPermission.REMAINING.value,
+        pip_band=(20.0, 60.0),
+        source_id="[RE:MG-02] (doc_0584 L3)"),
+    "L4": LadderLevel(
+        "L4", "pwh", 0.25, LadderPermission.RUNNER.value,
+        pip_band=(50.0, 150.0), requires=("4/4 alignment",),
+        source_id="[RE:MG-02] (doc_0584 L4)"),
+    "L5": LadderLevel(
+        "L5", "pmh_ipda", None, LadderPermission.SWING_ONLY.value,
+        requires=("swing horizon",),
+        source_id="[RE:MG-02] (doc_0584 L5)"),
+})
+
+
+@dataclass(frozen=True, slots=True)
+class ManagementLadder:
+    """An executable partial ladder: level fractions plus the runner leg.
+
+    MG-01 is the corpus' only well-attested ladder: close ``50%`` at the first
+    IRL, move the stop to entry, leave ``50%`` working to the ERL.  A wider
+    MG-02 selection is executable only when the selected tranches sum to 1;
+    :meth:`validate` enforces the TM-63 invariants (each fraction in ``(0, 1]``,
+    the fractions sum to 1, each level strictly beyond the previous one in the
+    trade direction and before the terminal target) instead of normalising a
+    schedule that was never a ladder.
+    """
+
+    levels: tuple[LadderLevel, ...]
+    terminal_anchor: str = "erl"
+    terminal_fraction: float = 0.50
+    source_id: str = "MG-01"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "levels", tuple(self.levels))
+        if not self.levels:
+            raise ValueError("a management ladder needs at least one level")
+        ids = [level.level_id for level in self.levels]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"duplicate ladder levels: {ids}")
+        if not self.terminal_anchor.strip():
+            raise ValueError("the runner leg needs a terminal anchor")
+        if not 0.0 < float(self.terminal_fraction) <= 1.0:
+            raise ValueError(
+                f"terminal_fraction {self.terminal_fraction} must be in (0, 1]")
+        if not self.source_id.strip():
+            raise ValueError("a ladder needs a source_id")
+
+    @property
+    def fractions(self) -> tuple[float, ...]:
+        """Every tranche including the runner leg."""
+        return tuple(
+            [float(level.fraction) for level in self.levels
+             if level.fraction is not None]
+            + [float(self.terminal_fraction)])
+
+    @property
+    def total_fraction(self) -> float:
+        return sum(self.fractions)
+
+    def validate(self, *, entry: float | None = None,
+                 direction: str | None = None,
+                 terminal_target: float | None = None,
+                 level_prices: Sequence[float] | None = None) -> None:
+        """Raise ``ValueError`` when the ladder is not executable (TM-63).
+
+        The fraction invariants need no prices.  The ordering invariants are
+        checked only when both ``entry``/``direction`` and ``level_prices`` are
+        supplied; a ladder cannot prove that a level is before the terminal
+        target without the target price, so a caller that has one must pass it.
+        """
+        fractions = self.fractions
+        if any(not 0.0 < value <= 1.0 for value in fractions):
+            raise ValueError(
+                f"ladder fractions must be in (0, 1]; got {fractions}")
+        if abs(sum(fractions) - 1.0) > 1e-9:
+            raise ValueError(
+                f"ladder fractions sum to {sum(fractions):g}, not 1; the "
+                f"MG-02 schedule is a permission table, not one executable "
+                f"ladder (TM-63)")
+        if level_prices is None:
+            return
+        prices = [float(price) for price in level_prices]
+        if len(prices) != len(self.levels):
+            raise ValueError(
+                f"expected {len(self.levels)} level prices, got {len(prices)}")
+        if entry is None or direction is None:
+            return
+        if direction in {"long", "bull"}:
+            sign = 1
+        elif direction in {"short", "bear"}:
+            sign = -1
+        else:
+            raise ValueError(f"unknown direction {direction!r}")
+        previous = float(entry)
+        for price in prices:
+            if sign * (price - previous) <= 0:
+                raise ValueError(
+                    f"ladder levels must be strictly beyond the previous one "
+                    f"in the trade direction; {price} does not follow "
+                    f"{previous} for a {direction} trade")
+            previous = price
+        if terminal_target is not None:
+            if sign * (float(terminal_target) - previous) <= 0:
+                raise ValueError(
+                    f"the terminal target {terminal_target} must be beyond the "
+                    f"last ladder level {previous}")
+
+    def to_public(self) -> dict:
+        return {
+            "levels": [level.to_public() for level in self.levels],
+            "terminal_anchor": self.terminal_anchor,
+            "terminal_fraction": self.terminal_fraction,
+            "total_fraction": self.total_fraction,
+            "source_id": self.source_id,
+        }
+
+
+#: MG-01's baseline ladder: 50% at the first IRL and 50% working to the ERL.
+DEFAULT_MANAGEMENT_LADDER = ManagementLadder(
+    (MG02_LEVELS["L1"],), terminal_anchor="erl", terminal_fraction=0.50,
+    source_id="[RE:MG-01] (doc_0589, doc_0635, doc_0410, doc_0584)")
+
+#: Readable alias for callers that name the rule rather than the default.
+MG01_LADDER = DEFAULT_MANAGEMENT_LADDER
+
+
+# --------------------------------------------------------------------------- #
+# Session flat (MG-05) and target expiry (TG-08)
+# --------------------------------------------------------------------------- #
+#: The declared management clock.  TM-68 records that no corpus source states
+#: whether its "EST" clocks follow daylight saving; the repo's one convention
+#: is ``America/New_York`` (the convention ``setup.session_gate`` already uses),
+#: so this surface resolves DST instead of carrying a fixed offset.
+SESSION_FLAT_ZONE = "America/New_York"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionFlat:
+    """MG-05: exit ``100%`` at the session's flat instant, overriding scores.
+
+    ``fraction`` is fixed at 1.0: the rule is "exit 100%", so a partial flat is
+    not representable.  ``alert_minutes`` is the source's ``04:55`` alert ahead
+    of the ``05:00`` flat.
+    """
+
+    clause: str
+    at: dtime
+    fraction: float = 1.0
+    alert_minutes: int = 5
+    overrides_score: bool = True
+    zone: str = SESSION_FLAT_ZONE
+    source_id: str = "[RE:MG-07] (TM-39)"
+
+    def __post_init__(self) -> None:
+        if not self.clause.strip():
+            raise ValueError("a session-flat clause needs a name")
+        if not isinstance(self.at, dtime):
+            raise ValueError(f"{self.clause}: 'at' must be a datetime.time")
+        if abs(float(self.fraction) - 1.0) > 1e-12:
+            raise ValueError(
+                f"{self.clause}: MG-05 exits 100% of the position; "
+                f"fraction {self.fraction} contradicts the rule")
+        if int(self.alert_minutes) < 0:
+            raise ValueError(f"{self.clause}: alert_minutes must be >= 0")
+        if not self.zone.strip():
+            raise ValueError(f"{self.clause}: a time zone is required")
+
+    @property
+    def alert_at(self) -> dtime:
+        """The pre-flat alert clock (``04:55`` for a ``05:00`` flat)."""
+        return (pd.Timestamp("2000-01-01") + pd.Timedelta(
+            hours=self.at.hour, minutes=self.at.minute,
+            seconds=self.at.second) - pd.Timedelta(
+                minutes=int(self.alert_minutes))).time()
+
+    def to_public(self) -> dict:
+        return {
+            "clause": self.clause,
+            "at": self.at.strftime("%H:%M"),
+            "zone": self.zone,
+            "fraction": self.fraction,
+            "alert_at": self.alert_at.strftime("%H:%M"),
+            "overrides_score": self.overrides_score,
+            "source_id": self.source_id,
+        }
+
+
+#: MG-05's two sessions: the London kill-zone close at 05:00 NY and the NY AM
+#: close at 11:00 NY.  This table is the only flat scheduler; nothing derives a
+#: third clock.
+SESSION_FLAT_CLAUSES: Mapping[str, SessionFlat] = MappingProxyType({
+    "london": SessionFlat(
+        "london", dtime(5, 0),
+        source_id="[RE:MG-07] London KZ close (TM-39, TM-43)"),
+    "ny_am": SessionFlat(
+        "ny_am", dtime(11, 0),
+        source_id="[RE:MG-07] NY AM close (TM-39, TM-43)"),
+})
+
+
+def _as_new_york(ts, input_tz: str = "UTC") -> pd.Timestamp | None:
+    """Read one stamp on the ``America/New_York`` clock (``None`` if unusable).
+
+    A naive stamp is read in ``input_tz`` (the repo's declared default for an
+    unmarked frame is UTC, matching ``context.in_session``); an aware stamp is
+    converted, so the input convention never moves the instant.
+    """
+    try:
+        stamp = pd.Timestamp(ts)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(stamp):
+        return None
+    if stamp.tzinfo is None:
+        try:
+            stamp = stamp.tz_localize(input_tz, ambiguous="NaT",
+                                      nonexistent="shift_forward")
+        except (TypeError, ValueError):
+            return None
+    if pd.isna(stamp):
+        return None
+    try:
+        return stamp.tz_convert(SESSION_FLAT_ZONE)
+    except (TypeError, ValueError):
+        return None
+
+
+def session_flat_due(ts, flat: SessionFlat, *, input_tz: str = "UTC") -> bool:
+    """True once ``ts`` is at or past the flat instant on the NY clock."""
+    local = _as_new_york(ts, input_tz)
+    return local is not None and local.time() >= flat.at
+
+
+def session_flat_deadline(entry_ts, flat: SessionFlat, *,
+                          input_tz: str = "UTC") -> pd.Timestamp | None:
+    """The flat instant on the trade's NY calendar date.
+
+    The deadline is rebuilt on the calendar date rather than by adding 24 hours,
+    so a DST transition inside the holding period cannot move the wall-clock
+    flat (TM-68's unresolved clock is at least DST-safe in this one declared
+    zone).  An entry at or after the instant is already at its deadline: the
+    window gate should have refused such an entry, and this is the fail-closed
+    backstop MG-05 asks for.
+    """
+    local = _as_new_york(entry_ts, input_tz)
+    if local is None:
+        return None
+    return _local_flat_instant(local.date(), flat)
+
+
+def _local_flat_instant(day, flat: SessionFlat) -> pd.Timestamp | None:
+    try:
+        naive = pd.Timestamp.combine(day, flat.at)
+        return naive.tz_localize(
+            flat.zone, ambiguous="NaT", nonexistent="shift_forward")
+    except (TypeError, ValueError):
+        return None
+
+
+#: TG-08: the expiry clock a target is stated against, and the only two
+#: dispositions the rule allows when the target is not reached.
+TARGET_EXPIRY_DEADLINES: tuple[str, ...] = ("session_flat", "next_window")
+TARGET_EXPIRY_ACTIONS: tuple[str, ...] = ("reduce", "flatten")
+
+
+@dataclass(frozen=True, slots=True)
+class TargetExpiry:
+    """TG-08: the target's expiry, stated with the plan.
+
+    "Not reached by session flat or next window ⇒ reduce or flatten".  Which
+    clock ends the target is declared (``deadline``) and so is the disposition
+    (``on_miss``).  The corpus states no reduce fraction, so ``reduce`` requires
+    the run to declare one; ``flatten`` takes 100% and a fraction would
+    contradict it.
+    """
+
+    deadline: str
+    on_miss: str
+    reduce_fraction: float | None = None
+    source_id: str = "TG-08"
+
+    def __post_init__(self) -> None:
+        if self.deadline not in TARGET_EXPIRY_DEADLINES:
+            raise ValueError(
+                f"unknown target-expiry deadline {self.deadline!r}; declare "
+                f"one of {TARGET_EXPIRY_DEADLINES} (TG-08)")
+        if self.on_miss not in TARGET_EXPIRY_ACTIONS:
+            raise ValueError(
+                f"unknown target-expiry action {self.on_miss!r}; declare one "
+                f"of {TARGET_EXPIRY_ACTIONS} (TG-08)")
+        if self.on_miss == "flatten":
+            if self.reduce_fraction is not None:
+                raise ValueError(
+                    "flatten exits 100%; a reduce_fraction contradicts it")
+        else:
+            if self.reduce_fraction is None:
+                raise ValueError(
+                    "TG-08 permits 'reduce', but the corpus states no reduce "
+                    "fraction (missing); declare reduce_fraction explicitly")
+            if not 0.0 < float(self.reduce_fraction) < 1.0:
+                raise ValueError(
+                    f"reduce_fraction {self.reduce_fraction} must be in (0, 1)")
+
+    def action(self, *, reached: bool) -> str:
+        """``hold`` when the target was reached, else the declared disposition."""
+        return "hold" if reached else self.on_miss
+
+    def to_public(self) -> dict:
+        return {
+            "deadline": self.deadline,
+            "on_miss": self.on_miss,
+            "reduce_fraction": self.reduce_fraction,
+            "source_id": self.source_id,
+        }
+
+
+class PlanImmutabilityError(ValueError):
+    """MG-09: the ladder may not be redrawn after entry.
+
+    The corpus names redrawing the ladder to justify holding as an invalidation
+    (TM-60), and "widen the stop / modify a ladder after entry" as one of the
+    five manufacturing routes (X17).  The plan is a frozen value; this error is
+    raised by the explicit revision guards, never by a silent in-place write.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ManagementPlan:
+    """One post-entry plan (MG-01/02/05/08/09, TG-08, V33).
+
+    ``blockers`` follows the ``RiskPlan`` convention: a refused plan carries the
+    §12 code(s) and **no** ladder, expiry, session flat or BE form, so it can
+    never be executed partially.  ``entry``/``stop``/``terminal_target`` are the
+    observed prices the ladder is validated against; they are kept on a refused
+    plan for the audit trail but authorise nothing.
+    """
+
+    holding_class: str
+    ladder: ManagementLadder | None = None
+    be_mode: str | None = None
+    session_flat: SessionFlat | None = None
+    target_expiry: TargetExpiry | None = None
+    entry: float | None = None
+    stop: float | None = None
+    terminal_target: float | None = None
+    blockers: tuple[str, ...] = ()
+    variant_id: str = HOLDING_CLASS_ID
+    source_id: str = "SYSTEM_SPEC §9.6 / MG-01-MG-11 / TG-08"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "blockers", tuple(self.blockers))
+        if self.holding_class:
+            object.__setattr__(self, "holding_class",
+                               read_holding_class(self.holding_class))
+        if self.be_mode is not None:
+            object.__setattr__(self, "be_mode", read_be_mode(self.be_mode))
+        if self.blockers:
+            # Fail-closed: a refused plan hands out no management decision.
+            if any(item is not None for item in
+                   (self.ladder, self.be_mode, self.session_flat,
+                    self.target_expiry)):
+                raise ValueError(
+                    "a refused management plan carries no ladder, BE form, "
+                    "session flat or target expiry (P0-04)")
+            return
+        if not self.holding_class:
+            raise ValueError(
+                "MG-11 requires a holding_class; a usable plan cannot omit "
+                "V33")
+        policy = HOLDING_CLASS_POLICIES[self.holding_class]
+        if self.be_mode is None:
+            raise ValueError("MG-08 requires a declared break-even form")
+        if not policy.admits_be(self.be_mode):
+            raise ValueError(
+                f"{self.holding_class}: break-even {self.be_mode!r} is not "
+                f"admitted by its policy {policy.be_modes}")
+        if self.target_expiry is None:
+            raise ValueError(
+                "TG-08 requires a target expiry stated with the plan")
+        if policy.session_flat and self.session_flat is None:
+            raise ValueError(
+                f"{self.holding_class}: MG-05's session flat applies but no "
+                f"clause was declared")
+        if not policy.session_flat and self.session_flat is not None:
+            raise ValueError(
+                f"{self.holding_class}: the session flat does not apply to "
+                f"this holding class (MG-11/TM-67)")
+        if (self.ladder is not None and policy.max_levels is not None
+                and len(self.ladder.levels) > policy.max_levels):
+            raise ValueError(
+                f"{self.holding_class}: ladder has {len(self.ladder.levels)} "
+                f"levels, more than the {policy.max_levels} attested for the "
+                f"class (MG-11)")
+
+    @property
+    def is_usable(self) -> bool:
+        """True when no §12 blocker withheld the plan."""
+        return not self.blockers
+
+    def redraw(self, **changes: object) -> "ManagementPlan":
+        """Return a revised plan, or refuse once the plan is post-entry.
+
+        Pre-entry revision is legitimate (the plan is still being authored);
+        after an entry exists the ladder is immutable (MG-09/TM-60).
+        """
+        if self.entry is not None:
+            raise PlanImmutabilityError(
+                "MG-09: the ladder may not be redrawn after entry")
+        return replace(self, **changes)
+
+    def check_redraw(self, revised: "ManagementPlan") -> None:
+        """Refuse a post-entry revision that changes the plan's decisions."""
+        if self.entry is None:
+            return
+        changed = (
+            revised.entry != self.entry
+            or revised.stop != self.stop
+            or revised.terminal_target != self.terminal_target
+            or revised.ladder != self.ladder
+            or revised.be_mode != self.be_mode
+        )
+        if changed:
+            raise PlanImmutabilityError(
+                "MG-09: the ladder, stop and target are immutable after entry")
+
+    def check_stop(self, new_stop: float) -> None:
+        """Refuse a stop that widens; moving inward is permitted (RK-05/MG-09)."""
+        if self.entry is None or self.stop is None:
+            return
+        sign = 1 if float(self.stop) < float(self.entry) else -1
+        if sign * (float(new_stop) - float(self.stop)) < 0:
+            raise PlanImmutabilityError(
+                f"RK-05/MG-09: the stop may only move inward; "
+                f"{new_stop} widens {self.stop}")
+
+    def to_public(self) -> dict:
+        return {
+            "holding_class": self.holding_class,
+            "ladder": None if self.ladder is None else self.ladder.to_public(),
+            "be_mode": self.be_mode,
+            "session_flat": (None if self.session_flat is None
+                             else self.session_flat.to_public()),
+            "target_expiry": (None if self.target_expiry is None
+                              else self.target_expiry.to_public()),
+            "entry": self.entry,
+            "stop": self.stop,
+            "terminal_target": self.terminal_target,
+            "blockers": list(self.blockers),
+            "variant_id": self.variant_id,
+            "source_id": self.source_id,
+        }
+
+
+def resolve_session_flat(holding_class: str | None,
+                         clause: str | None) -> SessionFlat | None:
+    """Resolve the declared MG-05 clause for one holding class.
+
+    ``None`` means no clause is declared.  A clause on a class whose policy
+    excludes the flat is a category error (TM-67), not a silently ignored
+    setting.
+    """
+    if holding_class is not None:
+        hc = read_holding_class(holding_class)
+        policy = HOLDING_CLASS_POLICIES[hc]
+    else:
+        policy = None
+    if clause is None:
+        return None
+    if holding_class is None:
+        raise ValueError(
+            "MG-11 requires a holding_class before a session flat can apply; "
+            "declare V33 or omit the clause")
+    text = str(clause).strip().lower()
+    try:
+        flat = SESSION_FLAT_CLAUSES[text]
+    except KeyError:
+        raise ValueError(
+            f"unknown session-flat clause {clause!r}; declare one of "
+            f"{tuple(SESSION_FLAT_CLAUSES)} (MG-05)") from None
+    if policy is not None and not policy.session_flat:
+        raise ValueError(
+            f"{hc}: the session flat does not apply to this holding class "
+            f"(MG-11/TM-67)")
+    return flat
+
+
+def build_management_plan(
+    *,
+    holding_class: HoldingClass | str | None,
+    ladder: ManagementLadder | None = None,
+    be_mode: BEMode | str | None = None,
+    session_clause: str | None = None,
+    target_expiry: TargetExpiry | None = None,
+    entry: float | None = None,
+    stop: float | None = None,
+    terminal_target: float | None = None,
+    level_prices: Sequence[float] | None = None,
+) -> ManagementPlan:
+    """Build the one fail-closed management plan (P1-15).
+
+    Absent declarations become §12 blockers, never defaults:
+
+    * no ``holding_class``            -> ``NT_VARIANT_UNDECLARED`` (V33/MG-11);
+    * no ``be_mode``                  -> ``NT_VARIANT_UNDECLARED`` (MG-08);
+    * an ``at_r`` implementation      -> ``NT_DATA_MISSING`` (it has no MG-08
+      form; TM-66);
+    * ``intraday`` with no session clause -> ``NT_DATA_MISSING`` (MG-05's
+      flat cannot be scheduled without naming the session);
+    * no ``target_expiry``            -> ``NT_DATA_MISSING`` (TG-08).
+
+    Contradictory declarations raise ``ValueError`` instead: an unknown
+    holding class, an unknown BE form, a session flat on a swing/position plan
+    (TM-67), a position plan with a non-``never`` BE (TM-33), or a ladder longer
+    than the class's attested length.
+    """
+    if holding_class is None or (
+            isinstance(holding_class, str) and not holding_class.strip()):
+        return ManagementPlan(
+            holding_class="",
+            blockers=(MANAGEMENT_UNDECLARED_CODE,),
+            entry=entry, stop=stop, terminal_target=terminal_target)
+
+    hc = read_holding_class(holding_class)
+    policy = HOLDING_CLASS_POLICIES[hc]
+    blockers: list[str] = []
+
+    be_form: str | None = None
+    if be_mode is None:
+        blockers.append(MANAGEMENT_UNDECLARED_CODE)
+    else:
+        be_form = mg08_be_mode(
+            be_mode.value if isinstance(be_mode, BEMode) else be_mode)
+        if be_form is None:
+            blockers.append(MANAGEMENT_MISSING_CODE)
+        elif not policy.admits_be(be_form):
+            raise ValueError(
+                f"{hc}: break-even {be_form!r} is not admitted; position "
+                f"trades never move to break-even (TM-33)")
+
+    flat = resolve_session_flat(hc, session_clause)
+    if policy.session_flat and flat is None:
+        blockers.append(MANAGEMENT_MISSING_CODE)
+
+    if target_expiry is None:
+        blockers.append(MANAGEMENT_MISSING_CODE)
+    elif not isinstance(target_expiry, TargetExpiry):
+        raise ValueError(
+            f"target_expiry must be a TargetExpiry, got "
+            f"{type(target_expiry).__name__}")
+
+    if ladder is not None:
+        if not isinstance(ladder, ManagementLadder):
+            raise ValueError(
+                f"ladder must be a ManagementLadder, got "
+                f"{type(ladder).__name__}")
+        if policy.max_levels is not None and len(ladder.levels) > policy.max_levels:
+            raise ValueError(
+                f"{hc}: ladder has {len(ladder.levels)} levels, more than the "
+                f"{policy.max_levels} attested for the class (MG-11)")
+        direction = None
+        if entry is not None and stop is not None:
+            direction = "long" if float(stop) < float(entry) else "short"
+        try:
+            ladder.validate(entry=entry, direction=direction,
+                            terminal_target=terminal_target,
+                            level_prices=level_prices)
+        except ValueError:
+            # A ladder that is not executable is an inadmissible input, not a
+            # partially usable plan (P0-04).
+            blockers.append(MANAGEMENT_MISSING_CODE)
+
+    unique = tuple(dict.fromkeys(blockers))
+    if unique:
+        return ManagementPlan(
+            holding_class=hc, blockers=unique,
+            entry=entry, stop=stop, terminal_target=terminal_target)
+    return ManagementPlan(
+        holding_class=hc, ladder=ladder, be_mode=be_form,
+        session_flat=flat, target_expiry=target_expiry,
+        entry=entry, stop=stop, terminal_target=terminal_target)
+
+
 @dataclass
 class StrategyConfig:
     #: One declared fixed-fractional risk budget, shared with the setup and the
@@ -661,6 +1560,12 @@ class StrategyConfig:
     #: labelled repo default (the corpus ladder needs the first-IRL object,
     #: P1-09/P1-15); ``None`` reads the one implied by the numeric fields.
     ladder_mode: str | None = None
+    #: P1-15: the required holding class (V33/MG-11) and the declared session
+    #: flat (MG-05).  ``None`` is the legacy path -- no class is declared, so no
+    #: management plan is built and no session flat is enforced.  It is not a
+    #: default class: the plan builder refuses an undeclared V33.
+    holding_class: str | None = None
+    session_flat_clause: str | None = None
     max_daily_loss_r: float = 0.0     # stop new entries after this daily R loss (0=off)
     # P0-13: the window gate must also cover the bar the order actually fills
     # on.  These mirror ``SetupConfig.session_gate``/``market`` so
@@ -701,6 +1606,12 @@ class StrategyConfig:
             extra["execution_model_id"] = self.execution_model_id
         if self.model_identity_gate:
             extra["model_identity_gate"] = True
+        # P1-15: V33/MG-05 are declarations too, so they join the digest.  An
+        # undeclared holding class adds nothing (the legacy path is unchanged).
+        if self.holding_class is not None:
+            extra["holding_class"] = self.declared_holding_class()
+        if self.session_flat_clause is not None:
+            extra["session_flat_clause"] = self.session_flat_clause
         return _config_hash(
             self.variant_config,
             be_mode=self.declared_be_mode(),
@@ -728,6 +1639,10 @@ class StrategyConfig:
         # simulated fill (P0-19; MG-01/MG-08/V31).
         self.declared_ladder_mode()
         self.declared_be_mode()
+        # P1-15: V33 and MG-05 are validated up front; a session flat on a
+        # non-intraday class is a category error (TM-67), not an ignored flag.
+        self.declared_holding_class()
+        self.declared_session_flat()
         # P1-11: one model/period identity, declared together or not at all.
         # The simulator may only report a trade under a family the run named;
         # ``model_identity_gate`` refuses the empty identity instead of falling
@@ -766,6 +1681,17 @@ class StrategyConfig:
             self.breakeven_at_r, self.t1_move_be,
             self.declared_ladder_mode() != "off")
         return _declared_choice(self.be_mode, BE_MODES, "be_mode", implied)
+
+    def declared_holding_class(self) -> str | None:
+        """The declared V33 holding class, or ``None`` for the legacy path."""
+        if self.holding_class is None:
+            return None
+        return read_holding_class(self.holding_class)
+
+    def declared_session_flat(self) -> SessionFlat | None:
+        """The declared MG-05 session flat, or ``None`` when not applicable."""
+        return resolve_session_flat(self.declared_holding_class(),
+                                    self.session_flat_clause)
 
 
 @dataclass
@@ -812,6 +1738,9 @@ class Trade:
     #: the pre-P1-11 path declared none; it is never a defaulted family.
     execution_model_id: str = ""
     narrative_order: str = ""
+    #: P1-15: the declared V33 holding class (empty on the legacy path).  It
+    #: selects the management policy, so it travels with the trade record.
+    holding_class: str = ""
 
 
 @dataclass
@@ -883,6 +1812,7 @@ def simulate_cisd(
         "refused_target_too_near": 0,
         "refused_target_wrong_side": 0,
         "refused_fill_outside_window": 0,
+        "exits_session_flat": 0,
     }
     mode = cfg.entry_mode
     if mode not in ENTRY_MODES:
@@ -890,6 +1820,11 @@ def simulate_cisd(
     # One declared management plan per run (P0-19; MG-01/MG-08/V31).
     ladder_mode = cfg.declared_ladder_mode()
     be_mode = cfg.declared_be_mode()
+    # P1-15: MG-05's session flat is declared once.  ``None`` is the legacy
+    # path (no holding class declared); an intraday run that declares a clause
+    # is flat at that session's close regardless of score.
+    holding_class = cfg.declared_holding_class() or ""
+    session_flat = cfg.declared_session_flat()
 
     # result.cisds is already time-ordered; use only information at c.end
     for c in result.cisds:
@@ -1089,6 +2024,13 @@ def simulate_cisd(
         atr_entry = float(atr[max(0, entry_idx - 1)]) if len(atr) else 0.0
         if not np.isfinite(atr_entry) or atr_entry <= 0:
             atr_entry = risk
+        # MG-05: the trade's flat deadline is the declared flat instant on the
+        # entry bar's NY calendar date.  Rebuilt per date (DST-safe); an entry
+        # at/after the clock is already at its deadline and the loop flattens it
+        # on the first resolvable bar.
+        flat_deadline = (session_flat_deadline(dates.iloc[entry_idx],
+                                               session_flat)
+                         if session_flat is not None else None)
         if exit_idx is None:
             end_idx = min(n - 1, entry_idx + cfg.max_bars)
             sl_current = c.sl
@@ -1125,6 +2067,17 @@ def simulate_cisd(
                         if open_[k] <= tp:
                             exit_price, exit_idx, reason = open_[k], k, "gap_tp"
                             break
+
+                # MG-05: the session flat overrides every score.  It is checked
+                # before the stop/target resolution of this bar, so a position
+                # open at the flat instant cannot survive into a later bar.
+                if flat_deadline is not None:
+                    bar_local = _as_new_york(dates.iloc[k])
+                    if bar_local is not None and bar_local >= flat_deadline:
+                        exit_price, exit_idx = float(close[k]), k
+                        reason = "session_flat"
+                        stats["exits_session_flat"] += 1
+                        break
 
                 # One declared same-bar convention, shared with the broker
                 # (P0-18): if the bar touches both, the stop is assumed first.
@@ -1254,6 +2207,7 @@ def simulate_cisd(
             narrative_order=str(
                 features.get("narrative_order")
                 or cfg.narrative_order or ""),
+            holding_class=holding_class,
         ))
         eq_points.append((dates.iloc[exit_idx], equity))
 

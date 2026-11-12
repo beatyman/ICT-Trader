@@ -7,7 +7,9 @@ The execution model is deliberately conservative:
 * stop exits fill at the worse of trigger and market, with slippage;
 * if a bar touches both stop and target, the intrabar path is unknown — the
   broker closes at the stop before the target can be assumed;
-* the time stop exits at the next strategy-bar close.
+* the time stop exits at the next strategy-bar close;
+* an intraday broker that declares a holding class and session clause is flat
+  at that session's NY clock (MG-05), closing 100% regardless of score.
 
 One position per symbol, a gross notional cap, a daily loss circuit breaker and
 a hard 0.5% default equity risk keep the demo from producing fantasy PnL.
@@ -30,7 +32,10 @@ from ..strategy import (
     DEFAULT_SELL_TAX_BPS,
     RR_MODE_FLOORS,
     CostModel,
+    read_holding_class,
+    resolve_session_flat,
     same_bar_exit,
+    session_flat_due,
 )
 
 log = logging.getLogger(__name__)
@@ -165,9 +170,18 @@ class ExecutionResult:
 
 
 class PaperBroker:
-    def __init__(self, settings: Settings, metrics: Metrics) -> None:
+    def __init__(self, settings: Settings, metrics: Metrics, *,
+                 holding_class: str | None = None,
+                 session_flat_clause: str | None = None) -> None:
         self.settings = settings
         self.metrics = metrics
+        # P1-15: the declared holding class (V33) and session flat (MG-05).
+        # ``None``/``None`` is the legacy broker: no management clock runs.  An
+        # intraday class with a clause flattens at that session's close.
+        self.holding_class = (None if holding_class is None
+                              else read_holding_class(holding_class))
+        self.session_flat = resolve_session_flat(self.holding_class,
+                                                 session_flat_clause)
         self.initial_equity = float(settings.initial_equity)
         self.realized = 0.0
         self.fees = 0.0
@@ -366,6 +380,33 @@ class PaperBroker:
         if position is not None:
             await self._close(position, price, "time")
 
+    async def enforce_session_flat(self, symbol: str, now: datetime,
+                                   price: float) -> bool:
+        """MG-05: flatten when the declared session clock is due.
+
+        The clock is the declared ``clause`` on ``America/New_York`` (05:00 for
+        London, 11:00 for NY AM), so the flat is DST-safe and identical to the
+        backtest's ``session_flat_deadline`` rule.  It overrides every score:
+        the position is closed at market with reason ``session_flat`` and no
+        partial remains.  A broker with no declared holding class/flat, or a
+        non-positive mark, does nothing and returns ``False``.
+        """
+        if self.session_flat is None:
+            return False
+        position = self.positions.get(symbol.upper())
+        if position is None:
+            return False
+        if not (price is not None and float(price) > 0):
+            return False
+        if not session_flat_due(now, self.session_flat):
+            return False
+        await self._close(position, float(price), "session_flat")
+        self.metrics.event(
+            "WARN", "risk",
+            f"session flat {self.session_flat.clause} · {symbol.upper()}",
+            exit_reason="session_flat")
+        return True
+
     async def _close(self, position: Position, raw_fill: float, reason: str) -> None:
         if position.symbol not in self.positions:
             return
@@ -445,6 +486,11 @@ class PaperBroker:
                 "open_risk_pct": round(100.0 * self.open_risk / equity, 2) if equity else 0.0,
                 "gross_exposure": round(self.gross_exposure, 2),
                 "halted": self._halted_reason or None,
+            },
+            "management": {
+                "holding_class": self.holding_class,
+                "session_flat": (None if self.session_flat is None
+                                 else self.session_flat.to_public()),
             },
             "positions": [p.to_public() for p in self.positions.values()],
             "trades": trades,

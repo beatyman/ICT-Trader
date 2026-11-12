@@ -47,6 +47,15 @@ A veto returns one :class:`VetoDecision` with exactly one §12 code (A3) and the
 failing guard's inputs.  A refusal never re-authors a price (§15.5): it only
 withholds size or caps an already-sized plan via :func:`apply_veto`.
 
+P1-15 adds the management plan.  ``TargetLevel`` now carries the TG-08 expiry
+it was stated with, ``RiskPlan`` records that statement, and
+:func:`management_plan_for` carries a risk plan onto one
+:class:`~ict_trader.strategy.ManagementPlan`: the V33 holding class, the MG-08
+break-even form, the MG-05 session flat, the MG-01/MG-02 level ladder and the
+TG-08 target expiry.  The plan is a frozen value (MG-09); a refused risk plan
+refuses the management plan with the same §12 code, and a missing declaration
+is ``NT_VARIANT_UNDECLARED`` / ``NT_DATA_MISSING`` -- never a default.
+
 P0-04 remains in force: a refused plan carries no size and no target ladder.
 P0-18 remains in force: the (gross, net) pair comes from the one shared
 :class:`~ict_trader.strategy.CostModel`; this module has no private fee basis.
@@ -84,9 +93,22 @@ from ict_trader.strategy import (
     RR_MODE,
     RR_MODE_FLOORS,
     WEIGHTED_RR_FLOOR,
+    BEMode,
     CostModel,
+    HoldingClass,
+    HoldingClassPolicy,
+    LadderLevel,
+    LadderPermission,
+    ManagementLadder,
+    ManagementPlan,
     MinimumDistanceFloor,
     RiskBand,
+    SessionFlat,
+    TargetExpiry,
+    build_management_plan,
+    mg08_be_mode,
+    read_holding_class,
+    resolve_session_flat,
     rr_floor,
     validate_risk_pct,
 )
@@ -181,6 +203,10 @@ class TargetLevel:
     known_at: int | None = None
     state: str = "intact"
     tf: str = "base"
+    #: TG-08: the expiry stated with the target.  ``None`` means the plan did
+    #: not state one, and a management plan built from it refuses rather than
+    #: inventing a session close (P1-15).
+    expires_at: str | None = None
 
     def __post_init__(self) -> None:
         if not math.isfinite(float(self.price)):
@@ -191,6 +217,8 @@ class TargetLevel:
             raise ValueError(
                 f"unknown target state {self.state!r}; "
                 f"declare one of {TARGET_STATES}")
+        if self.expires_at is not None and not str(self.expires_at).strip():
+            raise ValueError("expires_at, when stated, must not be empty")
 
     def is_known_at(self, signal_bar: int) -> bool:
         """CB-07: usable only once ``known_at <= signal_bar``."""
@@ -205,12 +233,17 @@ class TargetLevel:
         return (float(self.price), self.known_at)
 
     def to_public(self) -> dict:
-        return {
+        out = {
             "price": float(self.price),
             "known_at": self.known_at,
             "state": self.state,
             "tf": self.tf,
         }
+        # TG-08: the expiry appears only when it was stated, so a legacy
+        # ``(price, known_at)`` payload keeps its published shape.
+        if self.expires_at is not None:
+            out["expires_at"] = self.expires_at
+        return out
 
 
 def _coerce_target_level(pool: object) -> TargetLevel:
@@ -236,11 +269,14 @@ def _coerce_target_level(pool: object) -> TargetLevel:
         tf = getattr(pool, "tf", "base") or "base"
     if price is None:
         raise ValueError(f"target payload {pool!r} carries no price")
+    expires_at = (pool.get("expires_at") if isinstance(pool, Mapping)
+                  else getattr(pool, "expires_at", None))
     return TargetLevel(
         float(price),
         None if known_at is None else int(known_at),
         str(state),
         str(tf),
+        None if expires_at is None else str(expires_at),
     )
 
 
@@ -270,6 +306,10 @@ class RiskPlan:
     value_per_unit: float = DEFAULT_VALUE_PER_UNIT
     lot_step: float = DEFAULT_LOT_STEP
     min_distance_mode: str = DEFAULT_MIN_DISTANCE_FLOOR.mode
+    #: TG-08: the expiry stated with the plan.  ``None`` is an incomplete plan
+    #: for management purposes; the realtime/management surface refuses it
+    #: instead of inventing a session close.
+    target_expiry: TargetExpiry | None = None
 
     @property
     def target_level(self) -> TargetLevel | None:
@@ -528,7 +568,8 @@ def build_risk_plan(direction: str, entry: float, atr: float,
                     value_per_unit: float = DEFAULT_VALUE_PER_UNIT,
                     lot_step: float = DEFAULT_LOT_STEP,
                     min_distance: MinimumDistanceFloor | None = None,
-                    risk_band: RiskBand | None = None) -> RiskPlan:
+                    risk_band: RiskBand | None = None,
+                    target_expiry: TargetExpiry | None = None) -> RiskPlan:
     """Build a fail-closed plan from the declared risk algebra (P1-13).
 
     ``pools`` accepts bare prices (legacy, ``known_at`` unknown) and level
@@ -537,6 +578,11 @@ def build_risk_plan(direction: str, entry: float, atr: float,
     level must carry ``known_at``; a level known after that bar is excluded
     (TG-03) and a level without a knowledge time refuses the plan with
     ``NT_DATA_MISSING``.
+
+    ``target_expiry`` is TG-08's required statement: the accepted targets carry
+    it as ``expires_at`` and the plan records it.  It is optional here only so
+    pre-P1-15 callers keep working; the management surface refuses a plan that
+    omitted it.
 
     The declared ``rr_mode`` gates the nearest target: ``none`` makes the ratio
     an output and therefore disables both the RR and the R-distance gates.  The
@@ -547,6 +593,10 @@ def build_risk_plan(direction: str, entry: float, atr: float,
         raise ValueError(
             f"unknown rr_mode {rr_mode!r}; "
             f"declare one of {tuple(RR_MODE_FLOORS)}")
+    if target_expiry is not None and not isinstance(target_expiry, TargetExpiry):
+        raise ValueError(
+            f"target_expiry must be a TargetExpiry, got "
+            f"{type(target_expiry).__name__}")
     band = DEFAULT_RISK_BAND if risk_band is None else risk_band
     floor = (DEFAULT_MIN_DISTANCE_FLOOR
              if min_distance is None else min_distance)
@@ -565,6 +615,7 @@ def build_risk_plan(direction: str, entry: float, atr: float,
         "value_per_unit": value,
         "lot_step": step,
         "min_distance_mode": floor.mode,
+        "target_expiry": target_expiry,
     }
 
     def refuse(stop: float | None, sl_atr: float,
@@ -646,7 +697,14 @@ def build_risk_plan(direction: str, entry: float, atr: float,
         return refuse(stop, sl_atr, (NT_SIZE_UNSOLVABLE,))
 
     # The full admissible ladder, nearest first; the ladder mode - not this
-    # module - decides how many rungs a plan uses (P0-05, [RE:C-17]).
+    # module - decides how many rungs a plan uses (P0-05, [RE:C-17]).  TG-08:
+    # the plan's stated expiry travels with every accepted target.
+    stated_expiry = (None if target_expiry is None
+                     else target_expiry.deadline)
+    target_levels = tuple(
+        replace(level, expires_at=stated_expiry)
+        if stated_expiry is not None else level
+        for level in valid)
     return RiskPlan(
         stop=stop,
         targets=tuple(level.price for level in valid),
@@ -655,8 +713,56 @@ def build_risk_plan(direction: str, entry: float, atr: float,
         quantity=qty,
         sl_atr=sl_atr,
         blockers=(),
-        target_levels=tuple(valid),
+        target_levels=target_levels,
         **declarations)
+
+
+# --------------------------------------------------------------------------- #
+# P1-15 management plan (SYSTEM_SPEC §9.6: MG-01/02/05/08/09, TG-08, V33)
+# --------------------------------------------------------------------------- #
+#: The rule ids this surface implements.  They are exposed so a plan card and an
+#: audit trail can name what was applied without importing the spec.
+MANAGEMENT_RULE_IDS: tuple[str, ...] = (
+    "MG-01", "MG-02", "MG-05", "MG-08", "MG-09", "TG-08")
+
+#: The V33/V31 identifiers a management plan reads.
+MANAGEMENT_HOLDING_CLASS_ID = "V33"
+MANAGEMENT_BE_MODE_ID = "MG-08"
+
+
+def management_plan_for(
+    plan: RiskPlan,
+    *,
+    entry: float,
+    holding_class: HoldingClass | str | None,
+    be_mode: BEMode | str | None,
+    session_clause: str | None = None,
+    ladder: ManagementLadder | None = None,
+    level_prices: Sequence[float] | None = None,
+) -> ManagementPlan:
+    """Carry a P1-13 risk plan onto a P1-15 management plan.
+
+    No price is authored here: the stop and the terminal target are the risk
+    plan's own values and the entry is the fill the caller observed.  A refused
+    risk plan refuses the management plan with the same §12 code(s), and TG-08
+    is enforced by reading the plan's stated ``target_expiry`` -- a plan without
+    one blocks with ``NT_DATA_MISSING`` instead of borrowing a session close.
+    """
+    if plan.blockers:
+        return ManagementPlan(
+            holding_class="" if holding_class is None else str(holding_class),
+            blockers=tuple(plan.blockers))
+    return build_management_plan(
+        holding_class=holding_class,
+        ladder=ladder,
+        be_mode=be_mode,
+        session_clause=session_clause,
+        target_expiry=plan.target_expiry,
+        entry=float(entry),
+        stop=plan.stop,
+        terminal_target=(float(plan.targets[-1]) if plan.targets else None),
+        level_prices=level_prices,
+    )
 
 
 # --------------------------------------------------------------------------- #
