@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import argparse
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Literal
@@ -779,6 +779,40 @@ def _previous_day_levels(df: pd.DataFrame) -> list[tuple[float, str]]:
     return list(uniq.keys())
 
 
+#: Repo §13.6 "500-bar present-mode cut".  A display constant only: the
+#: inventory returned by :func:`analyze` is complete, so no eligible array or
+#: sweep can disappear before selection (P0-14).
+PRESENT_WINDOW_BARS = 500
+
+
+def presentation_view(result: ICTResult, *,
+                      bars: int = PRESENT_WINDOW_BARS) -> ICTResult:
+    """Return the chart/CSV view of ``result`` with the present-mode window.
+
+    The 500-bar cut is a presentation rule, never a selection rule: it is
+    applied here (and only here) so ``analyze`` can keep the full array/sweep
+    inventory (P0-14, A1, §7.3).  ``historical`` mode has no window, so the
+    result is returned unchanged.  The input is never mutated.
+    """
+    if result.config.mode != "present":
+        return result
+    cutoff = max(0, len(result.bars) - max(int(bars), 0))
+    return replace(
+        result,
+        events=[e for e in result.events if int(e.index) >= cutoff],
+        fvgs=[f for f in result.fvgs if int(f.created) >= cutoff],
+        order_blocks=[o for o in result.order_blocks if int(o.created) >= cutoff],
+        liquidity=[l for l in result.liquidity if int(l.created) >= cutoff],
+        gaps=[g for g in result.gaps if int(g.left) >= cutoff],
+        cisds=[c for c in result.cisds if int(c.end) >= cutoff],
+        htf_cisds=[c for c in result.htf_cisds if int(c.end) >= cutoff],
+        sessions=[s for s in result.sessions if int(s.end) >= cutoff],
+        smts=[s for s in result.smts if int(s.end) >= cutoff],
+        key_levels=[k for k in result.key_levels if int(k.known_at) >= cutoff],
+        sweeps=[s for s in result.sweeps if int(s.reclaim_bar) >= cutoff],
+    )
+
+
 def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
             smt_df: pd.DataFrame | None = None) -> ICTResult:
     cfg = config or ICTConfig()
@@ -822,21 +856,11 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
 
     dealing = detect_dealing_range(df, swings, swing_len=cfg.swing_len)
 
-    # Pine "Present" mode: old structures are not drawn/emitted.
-    if cfg.mode == "present":
-        cutoff = max(0, len(df) - 500)
-        events = [e for e in events if e.index >= cutoff]
-        fvgs = [f for f in fvgs if f.created >= cutoff]
-        obs = [o for o in obs if o.created >= cutoff]
-        liq = [l for l in liq if l.created >= cutoff]
-        gaps = [g for g in gaps if g.left >= cutoff]
-        cisds = [c for c in cisds if c.end >= cutoff]
-        htf_cisds = [c for c in htf_cisds if c.end >= cutoff]
-        sessions = [s for s in sessions if s.end >= cutoff]
-        smts = [s for s in smts if s.end >= cutoff]
-        key_levels = [k for k in key_levels if k.known_at >= cutoff]
-        sweeps = [s for s in sweeps if s.reclaim_bar >= cutoff]
-
+    # The 500-bar "present" cut is a *presentation* window (repo §13.6), not a
+    # selection rule.  ``analyze`` therefore returns the full inventory: setup
+    # selection, target selection and the array lifecycle must be able to see
+    # an eligible array or sweep older than the visible window (P0-14, A1,
+    # §7.3).  ``presentation_view`` applies the cut for chart/CSV output.
     return ICTResult(
         bars=df, swings=swings, events=events, fvgs=fvgs, order_blocks=obs,
         pd_arrays=pd_arrays,
@@ -848,6 +872,9 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
 
 
 def signals_frame(result: ICTResult) -> pd.DataFrame:
+    # CSV export is a presentation surface, so the present-mode window applies
+    # here rather than to the inventory returned by ``analyze`` (P0-14).
+    result = presentation_view(result)
     rows: list[dict] = []
     for ev in result.events:
         rows.append({
@@ -929,6 +956,9 @@ def _latest_by_direction(items: Iterable, max_n: int, directions: tuple[str, ...
 # Plotting
 # ---------------------------------------------------------------------------
 def plot(result: ICTResult, out: str | Path, title: str = "ICT Concepts", bars: int | None = None) -> Path:
+    # The chart is a presentation surface: apply the 500-bar present-mode
+    # window here instead of truncating the inventory in ``analyze`` (P0-14).
+    result = presentation_view(result)
     cfg = result.config
     n = len(result.bars)
     bars = bars or cfg.plot_bars

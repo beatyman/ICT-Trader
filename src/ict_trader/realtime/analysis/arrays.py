@@ -13,6 +13,12 @@ A zero-height "zone" is a **line**, not an array.  Rather than invent a height
 for it, the lifecycle records it as an invalid array (``is_active=False`` and
 ``invalidated_at == formed_at``).  CISD lines therefore use one symmetric type
 id (``CISD``) in both directions; direction is carried by ``direction``.
+
+``build_ict_arrays`` returns the **full inventory**.  A per-kind cap is a
+presentation rule (a chart can only draw so many boxes), never a selection
+rule: silently dropping the ninth active FVG would remove an eligible entry
+array before §7.3 could choose it.  :func:`present_ict_arrays` is the only
+place the visible caps are applied (P0-14, A1, §7.3).
 """
 from __future__ import annotations
 
@@ -80,8 +86,13 @@ def _direction(value: str) -> str:
     return "bullish" if value == "bull" else "bearish"
 
 
-def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str,
-                     max_inactive: int = 3) -> list[ICTArray]:
+def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[ICTArray]:
+    """Build the complete array inventory for ``frame``.
+
+    The returned list is the selection inventory: every constructed array is
+    present, including active arrays older than the newest per type.  Use
+    :func:`present_ict_arrays` when the caller only needs a drawable view.
+    """
     if frame is None or len(frame) < 8:
         return []
     df = frame.reset_index(drop=True).copy()
@@ -150,12 +161,36 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str,
         add("DEALING_RANGE", "neutral", dealing.top, dealing.bottom,
             ms[dealing.known_at], anchor=dealing.ce)
 
+    return arrays
+
+
+#: Repo presentation caps: how many arrays of each type a chart/dashboard view
+#: may draw.  They are deliberately not used by :func:`build_ict_arrays`
+#: (P0-14): a cap is a display decision, not a selection decision.
+PRESENTATION_CAPS: dict[str, int] = {
+    "FVG": 8, "IFVG": 8, "OB": 8, "CISD": 5, "DEALING_RANGE": 1,
+}
+
+
+def present_ict_arrays(arrays: list[ICTArray], *,
+                       caps: dict[str, int] | None = None,
+                       max_inactive: int = 3) -> list[ICTArray]:
+    """Return the drawable presentation view of a full inventory.
+
+    Only this function applies the per-kind caps (``PRESENTATION_CAPS`` by
+    default) and the small tail of inactive arrays.  A type absent from
+    ``caps`` is shown in full, so a future array family cannot be silently
+    dropped by an incomplete presentation table.  Selection must always read
+    :func:`build_ict_arrays` directly (P0-14, §7.3).
+    """
+    limits = PRESENTATION_CAPS if caps is None else caps
     active = [a for a in arrays if a.is_active]
-    inactive = [a for a in arrays if not a.is_active][-max_inactive:]
-    limits = {
-        "FVG": 8, "IFVG": 8, "OB": 8, "CISD": 5, "DEALING_RANGE": 1,
-    }
+    inactive = ([a for a in arrays if not a.is_active][-max_inactive:]
+                if max_inactive > 0 else [])
     selected: list[ICTArray] = []
-    for kind, limit in limits.items():
-        selected.extend([a for a in active if a.array_type == kind][-limit:])
+    # Preserve construction order between families while capping within one.
+    for kind in dict.fromkeys(a.array_type for a in active):
+        subset = [a for a in active if a.array_type == kind]
+        limit = limits.get(kind)
+        selected.extend(subset if limit is None else subset[-max(int(limit), 0):])
     return selected + inactive

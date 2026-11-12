@@ -198,8 +198,44 @@ def hidden_ob_evidence(frame: Any, end_idx: int, *, limit: int = 3,
     return out
 
 
+#: AS-04 requires the IFVG side tag's mode to be **declared**, never inferred
+#: from whichever implementation happens to run.  The repo declares
+#: ``by_position``: the side is the dealing-range half containing the IFVG CE.
+#: ``valid_ifvg_context`` encodes the same reading, so the emitted ``side`` and
+#: the context verdict cannot disagree (P0-14, AS-01..AS-04).
+IFVG_SIDE_MODE = "by_position"
+IFVG_SIDE_MODES = ("by_type", "by_position", "by_role")
+
+_POSITION_SIDES = {
+    "premium": "premium", "deep_premium": "premium", "above_range": "premium",
+    "discount": "discount", "deep_discount": "discount", "below_range": "discount",
+}
+
+
+def ifvg_side(direction: str, pd_zone: str, *,
+              side_mode: str = IFVG_SIDE_MODE) -> str:
+    """Return the IFVG side tag under the declared ``side_mode`` (AS-04).
+
+    Only the declared mode is implemented: labelling a position reading as
+    ``by_type``/``by_role`` would silently swap AS-01/AS-02 for AS-03 on the
+    arrays where they disagree, so an unsupported mode is refused.
+    """
+    if side_mode not in IFVG_SIDE_MODES:
+        raise ValueError(f"unknown IFVG side_mode: {side_mode!r}")
+    if side_mode != "by_position":
+        raise ValueError(f"undeclared IFVG side_mode: {side_mode!r}")
+    if str(direction).strip().lower() not in ("bullish", "bearish"):
+        return "unknown"
+    return _POSITION_SIDES.get(str(pd_zone), "unknown")
+
+
 def ifvg_evidence(ifvgs: list[dict], dealing_range: Any = None) -> dict | None:
-    """Annotate the latest IFVG with its doc-502 context and CE entry price."""
+    """Annotate the latest IFVG with its doc-502 context and CE entry price.
+
+    The side tag carries the declared ``side_mode`` with it (AS-04), so a
+    reader can tell a by-position label from the by-type/by-role alternatives
+    that the corpus also attests (P0-14).
+    """
     from .pda_confluence import ifvg_ce, valid_ifvg_context
 
     if not ifvgs:
@@ -216,6 +252,8 @@ def ifvg_evidence(ifvgs: list[dict], dealing_range: Any = None) -> dict | None:
     return {
         "direction": best.get("direction"), "top": best.get("top"),
         "bottom": best.get("bottom"), "ce": ce, "pd_zone": zone,
+        "side": ifvg_side(str(best.get("direction", "")), zone),
+        "side_mode": IFVG_SIDE_MODE,
         "tradable": bool(ok), "reasons": list(reasons),
     }
 
