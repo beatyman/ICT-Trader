@@ -45,17 +45,177 @@ from .stats import mean_interval, n_for_margin, wilson_interval
 TARGET_MISSING_CODE = "NT_DATA_MISSING"
 TARGET_TOO_NEAR_CODE = "NT_TARGET_TOO_NEAR"
 
-#: §12 refusal code for a fill bar outside the declared window (P0-13,
-#: EN-04/§8.2).  The signal bar passing the window gate is not enough when the
-#: entry fills on a later bar: a fill after the window has closed is not that
-#: model's trade.  Defined here (and re-exported by ``setup``) so the code has
-#: one spelling, matching the plan-gate codes above.
-NT_FILL_OUTSIDE_WINDOW = "NT_FILL_OUTSIDE_WINDOW"
+
+# --------------------------------------------------------------------------- #
+# Declared accounting register (P0-18, A4/A7)
+# --------------------------------------------------------------------------- #
+#: One register entry per accounting parameter.  Every surface -- the backtest,
+#: the setup gate, the realtime settings, the paper broker and the risk plan --
+#: reads these values; no module keeps a private copy.  ``label`` is the
+#: provenance label required by §14.1-6: these are ``repo`` choices, not corpus
+#: doctrine.
+@dataclass(frozen=True, slots=True)
+class RegisterEntry:
+    name: str
+    value: float | int | str
+    label: str
+    source: str
+
+
+ACCOUNTING_REGISTER: dict[str, RegisterEntry] = {
+    "risk_pct": RegisterEntry("risk_pct", 0.005, "repo",
+                              "RK-07 / spec §13.8"),
+    "commission_bps": RegisterEntry("commission_bps", 10.0, "repo",
+                                    "GS-08 / RM R9 (one round trip)"),
+    "slippage_bps": RegisterEntry("slippage_bps", 2.0, "repo",
+                                  "GS-08 / RM R9 (per side)"),
+    "sell_tax_bps": RegisterEntry("sell_tax_bps", 0.0, "repo",
+                                  "GS-08 / RM R9 (exit only)"),
+    "max_trades_per_day": RegisterEntry("max_trades_per_day", 4, "repo",
+                                        "RE:RM-19 (unit = fills/day)"),
+    "rr_mode": RegisterEntry("rr_mode", "filter_2_1", "repo",
+                             "RE:RM-15 / V28"),
+    "net_rr_floor": RegisterEntry("net_rr_floor", 2.0, "repo",
+                                  "RE:RM-16 / GS-08"),
+}
+
+
+def declared(name: str) -> RegisterEntry:
+    """Return the one register entry for ``name`` (KeyError if undeclared)."""
+    return ACCOUNTING_REGISTER[name]
+
+
+DEFAULT_RISK_PCT = float(declared("risk_pct").value)
+DEFAULT_COMMISSION_BPS = float(declared("commission_bps").value)
+DEFAULT_SLIPPAGE_BPS = float(declared("slippage_bps").value)
+DEFAULT_SELL_TAX_BPS = float(declared("sell_tax_bps").value)
+DEFAULT_MAX_TRADES_PER_DAY = int(declared("max_trades_per_day").value)
+DEFAULT_RR_MODE = str(declared("rr_mode").value)
+NET_RR_FLOOR = float(declared("net_rr_floor").value)
+
+#: One floor per declared ``RR_MODE`` (RE:RM-15 / V28).  These are the only
+#: admissible gross-RR floors: no gate may carry a private 1.2 / 2.0 / 2.5.
+RR_MODE_FLOORS: dict[str, float] = {
+    "floor_3_1": 3.0,
+    "floor_session_1_5": 1.5,
+    "filter_2_1": 2.0,
+    "none": 0.0,
+}
+
+
+def rr_floor(mode: str = DEFAULT_RR_MODE) -> float:
+    """The declared gross-RR floor for ``mode`` (ValueError if undeclared)."""
+    try:
+        return RR_MODE_FLOORS[mode]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown RR mode {mode!r}; declare one of {tuple(RR_MODE_FLOORS)}"
+        ) from exc
+
+
+MIN_RR = rr_floor(DEFAULT_RR_MODE)
+
+#: Declared fixed-R target multiple (a target size, not an RR gate).
+DEFAULT_FIXED_R = 2.0
+
+#: Declared same-bar convention.  No corpus rule fixes an intrabar path, so the
+#: repo declares one: when a bar touches both the stop and the target, the stop
+#: is assumed to have been hit first.  It is conservative and, more
+#: importantly, identical in the backtest and the paper broker (P0-18).
+SAME_BAR_TIE_BREAK = "stop_first"
+
+
+def _direction_sign(direction: str) -> int:
+    if direction in {"long", "bull"}:
+        return 1
+    if direction in {"short", "bear"}:
+        return -1
+    raise ValueError(f"unknown direction {direction!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class CostModel:
+    """The one execution-cost basis in the package (P0-18, GS-08, RM R9).
+
+    ``commission_bps`` is **one round trip** (so each leg pays half),
+    ``slippage_bps`` is per side, and ``sell_tax_bps`` applies to the exit
+    notional only.  ``net_rr`` is the documented repo formula::
+
+        net = (reward - cost) / (risk + cost)
+        cost = entry * per_leg + exit * (per_leg + sell_tax)
+        per_leg = commission_bps / 2 + slippage_bps
+
+    ``for_filled_prices`` is the variant used by a simulator whose fill price
+    already embeds slippage; it charges commission and tax only, so slippage is
+    not counted twice.  It is still the same declared basis, not a second one.
+    """
+
+    commission_bps: float = DEFAULT_COMMISSION_BPS
+    slippage_bps: float = DEFAULT_SLIPPAGE_BPS
+    sell_tax_bps: float = DEFAULT_SELL_TAX_BPS
+
+    def __post_init__(self) -> None:
+        for name in ("commission_bps", "slippage_bps", "sell_tax_bps"):
+            if float(getattr(self, name)) < 0:
+                raise ValueError(f"{name} must be >= 0")
+
+    @property
+    def per_leg_bps(self) -> float:
+        return float(self.commission_bps) / 2.0 + float(self.slippage_bps)
+
+    def cost(self, entry: float, exit_price: float) -> float:
+        """Round-trip cost in price units for one unit of the instrument."""
+        per_leg = self.per_leg_bps
+        return (abs(float(entry)) * per_leg / 10_000.0
+                + abs(float(exit_price))
+                * (per_leg + float(self.sell_tax_bps)) / 10_000.0)
+
+    def sell_tax(self, exit_price: float) -> float:
+        return abs(float(exit_price)) * float(self.sell_tax_bps) / 10_000.0
+
+    def gross_rr(self, entry: float, stop: float, target: float,
+                 direction: str) -> float:
+        """Corpus RR (RM-14): ``reward / risk``, direction-invariant."""
+        _direction_sign(direction)
+        risk = abs(float(entry) - float(stop))
+        if risk <= 0:
+            return 0.0
+        return abs(float(target) - float(entry)) / risk
+
+    def net_rr(self, entry: float, stop: float, target: float,
+               direction: str) -> tuple[float, float]:
+        """Return ``(gross_rr, net_rr)`` from this one cost basis."""
+        _direction_sign(direction)
+        risk = abs(float(entry) - float(stop))
+        reward = abs(float(target) - float(entry))
+        if risk <= 0:
+            return 0.0, 0.0
+        cost = self.cost(entry, target)
+        return reward / risk, (reward - cost) / (risk + cost)
+
+    def realized_r(self, entry: float, stop: float, exit_price: float,
+                   direction: str) -> float:
+        """Realised net PnL divided by the initial risk (the backtest's R)."""
+        sign = _direction_sign(direction)
+        risk = abs(float(entry) - float(stop))
+        if risk <= 0:
+            return 0.0
+        gross = (float(exit_price) - float(entry)) * sign
+        return (gross - self.cost(entry, exit_price)) / risk
+
+    def for_filled_prices(self) -> "CostModel":
+        """Same basis for a fill that already embeds per-side slippage."""
+        return CostModel(self.commission_bps, 0.0, self.sell_tax_bps)
+
+
+#: The one default cost basis shared by every surface.
+DEFAULT_COST_MODEL = CostModel()
 
 
 def net_rr(entry: float, stop: float, target: float, direction: str,
-           commission_bps: float = 10.0, slippage_bps: float = 2.0,
-           sell_tax_bps: float = 0.0) -> tuple[float, float]:
+           commission_bps: float = DEFAULT_COMMISSION_BPS,
+           slippage_bps: float = DEFAULT_SLIPPAGE_BPS,
+           sell_tax_bps: float = DEFAULT_SELL_TAX_BPS) -> tuple[float, float]:
     """Return (gross_RR, net_RR); the one implementation in the package.
 
     Formula (``docs/GOOD_SETUP_CRITERIA.md`` GS-08)::
@@ -78,41 +238,71 @@ def net_rr(entry: float, stop: float, target: float, direction: str,
     the plan card printed net RR 1.60 while the GS-08 gate on the same plan
     said 1.09.
     """
-    risk = abs(float(entry) - float(stop))
-    reward = abs(float(target) - float(entry))
-    if direction not in {"long", "short", "bull", "bear"}:
-        raise ValueError(f"unknown direction {direction!r}")
-    if risk <= 0:
-        return 0.0, 0.0
-    per_leg = float(commission_bps) / 2.0 + float(slippage_bps)
-    cost = abs(float(entry)) * per_leg / 10_000 + \
-        abs(float(target)) * (per_leg + float(sell_tax_bps)) / 10_000
-    return reward / risk, (reward - cost) / (risk + cost)
+    return CostModel(commission_bps, slippage_bps,
+                     sell_tax_bps).net_rr(entry, stop, target, direction)
+
+
+def same_bar_exit(direction: str, high: float, low: float, stop: float,
+                  target: float) -> str | None:
+    """Resolve one bar against stop and target under the declared convention.
+
+    Returns ``"stop"``, ``"target"`` or ``None``.  When both are touched the
+    stop wins (``SAME_BAR_TIE_BREAK``), so the backtest simulator and the paper
+    broker cannot disagree about the same bar.  Accepts both the backtest's
+    ``bull``/``bear`` and the broker's ``long``/``short`` vocabulary.
+    """
+    sign = _direction_sign(direction)
+    if sign > 0:
+        hit_stop = float(low) <= float(stop)
+        hit_target = float(high) >= float(target)
+    else:
+        hit_stop = float(high) >= float(stop)
+        hit_target = float(low) <= float(target)
+    if hit_stop:
+        return "stop"
+    if hit_target:
+        return "target"
+    return None
+
+#: §12 refusal code for a fill bar outside the declared window (P0-13,
+#: EN-04/§8.2).  The signal bar passing the window gate is not enough when the
+#: entry fills on a later bar: a fill after the window has closed is not that
+#: model's trade.  Defined here (and re-exported by ``setup``) so the code has
+#: one spelling, matching the plan-gate codes above.
+NT_FILL_OUTSIDE_WINDOW = "NT_FILL_OUTSIDE_WINDOW"
 
 
 @dataclass
 class StrategyConfig:
-    risk_pct: float = 0.01          # fraction of equity risked per trade
+    #: One declared fixed-fractional risk budget, shared with the setup and the
+    #: realtime settings (P0-18, RK-07).
+    risk_pct: float = DEFAULT_RISK_PCT  # fraction of equity risked per trade
     #: Retained for API compatibility.  Targets are authored by setup's declared
     #: ``target_mode``; the plan gate never manufactures one from this value.
-    rr: float = 2.0
+    rr: float = DEFAULT_FIXED_R
     max_bars: int = 40              # time stop
     min_grade: int = 4              # 3=C, 4=B-, 5=B+, 6=A, 7=A+
     min_confluence: int = 3         # sweep / PDA / volume / session / target / SMT
     require_htf: bool = False       # require HTF CISD same direction
     t_plus_1: bool = False          # A-share T+1: cannot exit on entry day
-    sell_tax_bps: float = 0.0       # A-share stamp duty on sell
+    sell_tax_bps: float = DEFAULT_SELL_TAX_BPS  # A-share stamp duty on sell
     allow_long: bool = True
     allow_short: bool = True
     # Charged as (entry+exit)*commission_bps/2, i.e. ONE round-trip of
     # commission_bps, so a venue that charges X bps PER SIDE must be passed
     # 2*X here (Binance futures taker 5 bps/side -> commission_bps=10).
-    commission_bps: float = 5.0
-    slippage_bps: float = 2.0
+    commission_bps: float = DEFAULT_COMMISSION_BPS
+    slippage_bps: float = DEFAULT_SLIPPAGE_BPS
     entry_delay: int = 1            # bars after confirmation
-    max_trades_per_day: int = 4
+    #: Declared daily budget and unit (fills per calendar date).  One value for
+    #: every surface (P0-18, RE:RM-19).
+    max_trades_per_day: int = DEFAULT_MAX_TRADES_PER_DAY
     max_concurrent: int = 5
-    min_rr: float = 1.2             # plan-gate floor from the actual fill (TG-11)
+    #: Declared gross-RR gate mode (RE:RM-15 / V28).  ``min_rr`` is an explicit
+    #: numeric override; ``None`` reads the floor of ``rr_mode`` so no surface
+    #: carries a private 1.2 / 2.0 / 2.5.
+    rr_mode: str = DEFAULT_RR_MODE
+    min_rr: float | None = None
     breakeven_at_r: float = 0.0     # move SL to entry at this favourable R
     min_displacement_atr: float = 0.0
     entry_mode: str = "next_open"   # next_open | retest_key
@@ -139,6 +329,20 @@ class StrategyConfig:
     # caller can declare it too.  ``none`` always passes and is the default.
     session_gate: str = "none"
     market: str = "other"
+
+    def __post_init__(self) -> None:
+        if self.rr_mode not in RR_MODE_FLOORS:
+            raise ValueError(
+                f"unknown rr_mode {self.rr_mode!r}; "
+                f"declare one of {tuple(RR_MODE_FLOORS)}")
+        if self.min_rr is not None and float(self.min_rr) < 0:
+            raise ValueError("min_rr must be >= 0")
+
+    def rr_floor(self) -> float:
+        """The declared gate floor: explicit ``min_rr`` else the mode's floor."""
+        if self.min_rr is not None:
+            return float(self.min_rr)
+        return rr_floor(self.rr_mode)
 
 
 @dataclass
@@ -209,6 +413,13 @@ def simulate_cisd(
     symbol: str = "",
 ) -> BacktestResult:
     cfg = config or StrategyConfig()
+    # One declared cost basis for the gate, the realised R and every partial
+    # leg (P0-18).  The simulator's *entry* already embeds slippage, so the
+    # realised-PnL model is ``for_filled_prices()``; the gate reports both
+    # ratios from that same model.
+    cost_model = CostModel(cfg.commission_bps, cfg.slippage_bps,
+                           cfg.sell_tax_bps)
+    filled_cost = cost_model.for_filled_prices()
     n = len(df)
     open_ = df["open"].to_numpy(float)
     high = df["high"].to_numpy(float)
@@ -372,7 +583,12 @@ def simulate_cisd(
         if not target_reward > 0:
             stats["refused_target_wrong_side"] += 1
             continue
-        if target_reward / risk < cfg.min_rr:
+        # The declared gross-RR mode floor (RE:RM-15 / V28).  Gross RR is the
+        # corpus gate (RM-14); the cost basis is still the one shared model and
+        # the net ratio is reported alongside it.
+        gross_rr, net_rr_value = cost_model.net_rr(entry, c.sl, tp,
+                                                   c.direction)
+        if gross_rr < cfg.rr_floor():
             stats["refused_target_too_near"] += 1
             continue
 
@@ -480,21 +696,15 @@ def simulate_cisd(
                             exit_price, exit_idx, reason = open_[k], k, "gap_tp"
                             break
 
-                if c.direction == "bull":
-                    hit_sl = low[k] <= sl_current
-                    hit_tp = high[k] >= tp
-                else:
-                    hit_sl = high[k] >= sl_current
-                    hit_tp = low[k] <= tp
-                if hit_sl and hit_tp:
+                # One declared same-bar convention, shared with the broker
+                # (P0-18): if the bar touches both, the stop is assumed first.
+                resolution = same_bar_exit(c.direction, high[k], low[k],
+                                           sl_current, tp)
+                if resolution == "stop":
                     exit_price, exit_idx = sl_current, k
                     reason = "trail" if trail_active and sl_current != c.sl else "sl"
                     break
-                if hit_sl:
-                    exit_price, exit_idx = sl_current, k
-                    reason = "trail" if trail_active and sl_current != c.sl else "sl"
-                    break
-                if hit_tp:
+                if resolution == "target":
                     exit_price, exit_idx, reason = tp, k, "tp"
                     break
                 # partial take-profit on the first leg; the runner keeps the
@@ -541,16 +751,13 @@ def simulate_cisd(
 
         assert exit_price is not None and exit_idx is not None
         busy_until = exit_idx
-        # exit cost: commission + A-share sell stamp duty
+        # Realised R uses the same declared cost basis as ``net_rr``; the fill
+        # already embeds slippage, so ``filled_cost`` charges commission + tax.
         def leg_r(px: float) -> float:
-            g = (px - entry) if c.direction == "bull" else (entry - px)
-            t = px * cfg.sell_tax_bps / 10000.0
-            return (g - (entry + px) * (cfg.commission_bps / 10000.0) / 2 - t) / risk
+            return filled_cost.realized_r(entry, c.sl, px, c.direction)
 
-        gross = (exit_price - entry) if c.direction == "bull" else (entry - exit_price)
-        tax = exit_price * cfg.sell_tax_bps / 10000.0
-        net = gross - (entry + exit_price) * (cfg.commission_bps / 10000.0) / 2 - tax
-        r = net / risk
+        tax = filled_cost.sell_tax(exit_price)
+        r = filled_cost.realized_r(entry, c.sl, exit_price, c.direction)
         if t1_filled and t1_price is not None:
             # blend the two legs by size; both legs pay their own exit cost
             frac = min(max(cfg.t1_fraction, 0.0), 1.0)
@@ -564,7 +771,8 @@ def simulate_cisd(
         features.update({
             "grade": int(c.grade),
             "confluence": int(conf),
-            "entry_rr": float(abs(tp - entry) / risk),
+            "entry_rr": float(gross_rr),
+            "entry_net_rr": float(net_rr_value),
             "risk_atr": float(risk / atr_entry) if atr_entry > 0 else 0.0,
         })
         trades.append(Trade(
@@ -739,15 +947,15 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--out", default="output/ict/trades.csv")
     ap.add_argument("--metrics", default="output/ict/strategy_metrics.json")
-    ap.add_argument("--rr", type=float, default=2.0)
+    ap.add_argument("--rr", type=float, default=DEFAULT_FIXED_R)
     ap.add_argument("--max-bars", type=int, default=40)
     ap.add_argument("--breakeven-at-r", type=float, default=0.0)
     ap.add_argument("--t-plus-1", action="store_true")
-    ap.add_argument("--sell-tax-bps", type=float, default=0.0)
+    ap.add_argument("--sell-tax-bps", type=float, default=DEFAULT_SELL_TAX_BPS)
     ap.add_argument("--min-grade", type=int, default=4)
     ap.add_argument("--min-confluence", type=int, default=3)
     ap.add_argument("--min-displacement", type=float, default=0.0)
-    ap.add_argument("--risk-pct", type=float, default=0.01)
+    ap.add_argument("--risk-pct", type=float, default=DEFAULT_RISK_PCT)
     ap.add_argument("--max-concurrent", type=int, default=5)
     ap.add_argument("--require-htf", action="store_true")
     ap.add_argument("--no-short", action="store_true")

@@ -15,6 +15,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..strategy import (
+    DEFAULT_COMMISSION_BPS,
+    DEFAULT_FIXED_R,
+    DEFAULT_MAX_TRADES_PER_DAY,
+    DEFAULT_RISK_PCT,
+    DEFAULT_RR_MODE,
+    DEFAULT_SLIPPAGE_BPS,
+    RR_MODE_FLOORS,
+)
+
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 # In a source checkout the package root is the repo; in an installed Docker
 # image it lives under site-packages, while /app (or the caller's cwd) is the
@@ -157,15 +167,19 @@ class Settings:
     min_confluence: int = 2
     use_key_targets: bool = False
     target_mode: str = "fixed"
-    rr: float = 2.0
+    rr: float = DEFAULT_FIXED_R
+    #: Declared RR gate mode (RE:RM-15 / V28); the broker reads its floor.
+    rr_mode: str = DEFAULT_RR_MODE
     setup_min_confidence: float = 0.65
     max_bars: int = 40
-    commission_bps: float = 10.0         # round trip (5 bps/side)
-    slippage_bps: float = 2.0            # per fill
+    commission_bps: float = DEFAULT_COMMISSION_BPS  # round trip (5 bps/side)
+    slippage_bps: float = DEFAULT_SLIPPAGE_BPS      # per fill
     initial_equity: float = 100_000.0
-    risk_pct: float = 0.005             # 0.5% equity risked per trade
+    risk_pct: float = DEFAULT_RISK_PCT      # 0.5% equity risked per trade
     max_position_pct: float = 0.30      # spot notional cap per position
     max_open_positions: int = 5
+    #: Declared daily budget (fills per calendar date); one value everywhere.
+    max_trades_per_day: int = DEFAULT_MAX_TRADES_PER_DAY
     max_daily_loss_pct: float = 0.03
     paper_trade: bool = True             # hard safety: execution is simulated
 
@@ -222,6 +236,9 @@ class Settings:
             )
         if self.deepseek_effort not in {"low", "high", "max"}:
             raise ValueError("DEEPSEEK_EFFORT must be low, high or max")
+        if self.rr_mode not in RR_MODE_FLOORS:
+            raise ValueError(
+                f"rr_mode must be one of {tuple(RR_MODE_FLOORS)}")
         self.deepseek_max_tokens = max(256, int(self.deepseek_max_tokens))
         self.deepseek_timeout = max(10.0, float(self.deepseek_timeout))
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -283,6 +300,8 @@ class Settings:
             "paper_trade": self.paper_trade,
             "bootstrap_bars": self.bootstrap_bars,
             "risk_pct": self.risk_pct,
+            "max_trades_per_day": self.max_trades_per_day,
+            "rr_mode": self.rr_mode,
             "setup_min_confidence": self.setup_min_confidence,
             "analysis_scan_seconds": self.analysis_scan_seconds,
             "ict_setup_enabled": self.ict_setup_enabled,
@@ -362,15 +381,18 @@ class Settings:
             min_confluence=_env_int("ICT_MIN_CONFLUENCE", 2),
             use_key_targets=_env_bool("ICT_USE_KEY_TARGETS", False),
             target_mode=_env_str("ICT_TARGET_MODE", "fixed"),
-            rr=_env_float("ICT_RR", 2.0),
+            rr=_env_float("ICT_RR", DEFAULT_FIXED_R),
+            rr_mode=_env_str("ICT_RR_MODE", DEFAULT_RR_MODE).lower(),
             setup_min_confidence=_env_float("SETUP_MIN_CONFIDENCE", 0.65),
             max_bars=_env_int("ICT_MAX_BARS", 40),
-            commission_bps=_env_float("COMMISSION_BPS", 10.0),
-            slippage_bps=_env_float("SLIPPAGE_BPS", 2.0),
+            commission_bps=_env_float("COMMISSION_BPS", DEFAULT_COMMISSION_BPS),
+            slippage_bps=_env_float("SLIPPAGE_BPS", DEFAULT_SLIPPAGE_BPS),
             initial_equity=_env_float("INITIAL_EQUITY", 100_000.0),
-            risk_pct=_env_float("RISK_PCT", 0.005),
+            risk_pct=_env_float("RISK_PCT", DEFAULT_RISK_PCT),
             max_position_pct=_env_float("MAX_POSITION_PCT", 0.30),
             max_open_positions=_env_int("MAX_OPEN_POSITIONS", 5),
+            max_trades_per_day=_env_int("MAX_TRADES_PER_DAY",
+                                        DEFAULT_MAX_TRADES_PER_DAY),
             max_daily_loss_pct=_env_float("MAX_DAILY_LOSS_PCT", 0.03),
             paper_trade=_env_bool("PAPER_TRADE", True),
             dashboard_host=_env_str("DASHBOARD_HOST", "127.0.0.1"),

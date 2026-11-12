@@ -4,6 +4,7 @@ from ict_trader.realtime.analysis.feature_snapshot import FeatureSnapshot, TFVie
 from ict_trader.realtime.analysis.mtf import aggregate_mtf
 from ict_trader.realtime.analysis.fvg_state import update_fvg_states, fvg_quality
 from ict_trader.realtime.analysis.risk import build_risk_plan
+from ict_trader.strategy import NET_RR_FLOOR
 
 def snap(bias="bearish"):
     views = {tf: TFView(tf, bias, "BOS", 100, 1, 1.0) for tf in ("1D","4H","1H","15m")}
@@ -23,4 +24,10 @@ def test_fvg_state_expires_and_quality():
 
 def test_risk_plan_has_positive_net_rr():
     plan=build_risk_plan("long",100,2,{"level":98},{"price":98},[108])
-    assert plan.stop < 100 and plan.net_rr >= 2 and plan.quantity > 0
+    assert plan.stop < 100
+    # The floor is the one declared repo net floor, not an undeclared 2.0
+    # written into the test (P0-18 / RE-T8).  Net RR is repo, never doctrine.
+    assert plan.net_rr >= NET_RR_FLOOR
+    # ... and the corpus gross ratio is reported alongside it (RM-14).
+    assert plan.gross_rr > plan.net_rr
+    assert plan.quantity > 0

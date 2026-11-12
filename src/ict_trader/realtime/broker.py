@@ -25,6 +25,13 @@ from .config import Settings
 from .metrics import Metrics, summarize_trades
 from .models import interval_ms, ms_to_datetime, utc_ms
 from .strategy_runner import TradeSignal
+from ..strategy import (
+    DEFAULT_RR_MODE,
+    DEFAULT_SELL_TAX_BPS,
+    RR_MODE_FLOORS,
+    CostModel,
+    same_bar_exit,
+)
 
 log = logging.getLogger(__name__)
 
@@ -231,9 +238,21 @@ class PaperBroker:
             return ExecutionResult(False, "long price order invalid")
         if signal.direction == "short" and not (signal.target < fill < signal.stop):
             return ExecutionResult(False, "short price order invalid")
-        measured_rr = abs(signal.target - fill) / risk_per_unit
-        if measured_rr < 1.2:
-            return ExecutionResult(False, f"RR {measured_rr:.2f} below floor")
+        # P0-18: one RR formula and one cost basis, shared with the backtest and
+        # the plan card.  Gross RR is the corpus gate (RM-14); its floor is the
+        # declared RR mode's floor, never a private 1.2.  The net ratio is
+        # reported from the same cost model.
+        rr_mode = getattr(self.settings, "rr_mode", DEFAULT_RR_MODE)
+        floor = RR_MODE_FLOORS.get(rr_mode, RR_MODE_FLOORS[DEFAULT_RR_MODE])
+        cost = CostModel(self.settings.commission_bps,
+                         self.settings.slippage_bps, DEFAULT_SELL_TAX_BPS)
+        measured_rr, measured_net_rr = cost.net_rr(
+            fill, signal.stop, signal.target, signal.direction)
+        if measured_rr < floor:
+            return ExecutionResult(
+                False,
+                f"RR {measured_rr:.2f} below floor {floor:g} "
+                f"(net {measured_net_rr:.2f})")
 
         equity = self.equity
         qty_risk = equity * self.settings.risk_pct / risk_per_unit
@@ -286,8 +305,10 @@ class PaperBroker:
                             close: float) -> None:
         """Conservative closed-bar trigger.
 
-        The intrabar path is unknown.  If both the stop and target are inside
-        the bar the stop is always assumed to be hit first.
+        The intrabar path is unknown, so the *one* declared same-bar convention
+        is used: when the bar touches both the stop and the target, the stop is
+        assumed to have been hit first.  ``strategy.same_bar_exit`` is that
+        declaration; the backtest simulator calls the same helper (P0-18).
         """
         position = self.positions.get(symbol.upper())
         if position is None:
@@ -301,16 +322,12 @@ class PaperBroker:
             else:
                 position.mfe = max(position.mfe, (position.entry - low) / risk)
                 position.mae = min(position.mae, (position.entry - high) / risk)
-        if position.direction == "long":
-            if low <= position.stop:
-                await self._close(position, position.stop, "stop")
-            elif high >= position.target:
-                await self._close(position, position.target, "target")
-        else:
-            if high >= position.stop:
-                await self._close(position, position.stop, "stop")
-            elif low <= position.target:
-                await self._close(position, position.target, "target")
+        resolution = same_bar_exit(position.direction, high, low,
+                                   position.stop, position.target)
+        if resolution == "stop":
+            await self._close(position, position.stop, "stop")
+        elif resolution == "target":
+            await self._close(position, position.target, "target")
 
     async def on_price(self, symbol: str, price: float) -> None:
         position = self.positions.get(symbol.upper())
@@ -323,20 +340,15 @@ class PaperBroker:
             position.mfe = max(position.mfe, favorable)
             position.mae = min(position.mae, favorable)
 
-        reason = ""
-        fill = price
-        if position.direction == "long":
-            if price <= position.stop:
-                reason, fill = "stop", min(position.stop, price)
-            elif price >= position.target:
-                reason, fill = "target", position.target
-        else:
-            if price >= position.stop:
-                reason, fill = "stop", max(position.stop, price)
-            elif price <= position.target:
-                reason, fill = "target", position.target
-        if reason:
-            await self._close(position, fill, reason)
+        resolution = same_bar_exit(position.direction, price, price,
+                                   position.stop, position.target)
+        if resolution == "stop":
+            fill = (min(position.stop, price)
+                    if position.direction == "long"
+                    else max(position.stop, price))
+            await self._close(position, fill, "stop")
+        elif resolution == "target":
+            await self._close(position, position.target, "target")
 
     def increment_bar(self, symbol: str, bar_open_time: int, bar_close: float) -> list[str]:
         """Advance the time stop; returns symbols closed on this bar."""

@@ -36,7 +36,10 @@ from .context import (BiasState, SwingIndex, candle2_closure, candle3_closure,
                       dealing_range, in_session, ote_from_signal, parse_bias,
                       serialize_bias)
 from .pd_arrays import count_path_liquidity, near_arrays
-from .strategy import (NT_FILL_OUTSIDE_WINDOW, StrategyConfig, simulate_cisd)
+from .strategy import (DEFAULT_COMMISSION_BPS, DEFAULT_FIXED_R,
+                       DEFAULT_MAX_TRADES_PER_DAY, DEFAULT_RISK_PCT,
+                       DEFAULT_SELL_TAX_BPS, DEFAULT_SLIPPAGE_BPS, MIN_RR,
+                       NT_FILL_OUTSIDE_WINDOW, StrategyConfig, simulate_cisd)
 from .indicators import (add_indicators, align_htf, ichimoku, macd,
                          mark_htf_known_at, resample_cn_4h, resample_htf)
 from .quality import Displacement, measure_displacement, score_setup
@@ -68,6 +71,15 @@ DEFAULT_GATE_STRENGTH = "hard_veto"
 #: on the bias timeframe.
 _BIAS_PIVOT_LEFT = 5
 
+#: One declared value per bias-tier score, imported by both parsers and the
+#: config so SetupConfig / setup.main / cli.py cannot disagree (P0-18, TB-T11).
+DEFAULT_MIN_1D_SCORE = 2
+DEFAULT_MIN_4H_SCORE = 2
+DEFAULT_MIN_15M_SCORE = 1
+
+#: BTC 15m study profile's fixed-R *target* (not an RR gate floor).
+BTC_15M_FIXED_R = 2.5
+
 
 @dataclass
 class SetupConfig:
@@ -83,9 +95,9 @@ class SetupConfig:
     require_15m_cloud: bool = True
     require_15m_macd: bool = True
     require_15m_hist_rising: bool = True
-    min_1d_score: int = 2
-    min_4h_score: int = 2
-    min_15m_score: int = 1
+    min_1d_score: int = DEFAULT_MIN_1D_SCORE
+    min_4h_score: int = DEFAULT_MIN_4H_SCORE
+    min_15m_score: int = DEFAULT_MIN_15M_SCORE
     # Deprecated boolean alias.  ``None`` (the default) means "not declared";
     # an explicit True/False is mapped to the declared gate strength in
     # ``__post_init__`` so old callers keep their meaning without keeping the
@@ -102,7 +114,7 @@ class SetupConfig:
     # explicitly labelled repo mode; it is not the default.  An undeclared value
     # refuses at construction instead of silently falling back to fixed+2R.
     target_mode: str = DEFAULT_TARGET_MODE  # fixed | liquidity | hybrid | dol | htf_dol
-    min_target_rr: float = 2.0       # plan-gate floor, applied at the fill (TG-11)
+    min_target_rr: float = MIN_RR    # declared gross-RR floor, applied at the fill (TG-11)
     # Deprecated, retained for API/CLI compatibility.  The invented ceiling
     # silently dropped valid far targets and is no longer applied (P0-05).
     max_target_rr: float | None = None
@@ -115,13 +127,16 @@ class SetupConfig:
     fvg_min_width_atr: float = 0.0
     allow_short: bool = False
     # Fixed-R target used only when target_mode declares "fixed"/"hybrid".
-    rr: float = 2.0
+    rr: float = DEFAULT_FIXED_R
     max_bars: int = 40
     breakeven_at_r: float = 0.0
     t_plus_1: bool = False
-    sell_tax_bps: float = 5.0
-    risk_pct: float = 0.01
+    sell_tax_bps: float = DEFAULT_SELL_TAX_BPS
+    risk_pct: float = DEFAULT_RISK_PCT
     max_concurrent: int = 5
+    #: Declared daily budget (fills per calendar date), forwarded to the
+    #: simulator so the wired backtest and the live settings agree (P0-18).
+    max_trades_per_day: int = DEFAULT_MAX_TRADES_PER_DAY
     entry_mode: str = "next_open"
     retest_max_bars: int = 20
     retest_tolerance_atr: float = 0.0
@@ -130,8 +145,8 @@ class SetupConfig:
     max_daily_loss_r: float = 0.0
     # Execution costs, forwarded to StrategyConfig by run_one.  ``commission_bps``
     # is ONE round trip; Binance futures taker 5 bps/side -> 10.
-    commission_bps: float = 5.0
-    slippage_bps: float = 2.0
+    commission_bps: float = DEFAULT_COMMISSION_BPS
+    slippage_bps: float = DEFAULT_SLIPPAGE_BPS
     t1_at_r: float = 0.0             # partial scale-out level (0 = off)
     t1_fraction: float = 0.5
     t1_move_be: bool = True
@@ -198,7 +213,7 @@ def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
             min_grade=max(cfg.min_grade, 4),
             min_confluence=max(cfg.min_confluence, 3),
             min_disp_body_ratio=max(cfg.min_disp_body_ratio, 0.65),
-            min_target_rr=max(cfg.min_target_rr, 2.0),
+            min_target_rr=max(cfg.min_target_rr, MIN_RR),
         )
     if cfg.quality_profile == "high_rr":
         # A/B result (BTC/ETH/SOL 15m, 2020-2026): grade>=4 and confluence>=3
@@ -230,7 +245,7 @@ def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
             cfg,
             min_disp_atr=max(cfg.min_disp_atr, 1.45),
             min_stop_atr=max(cfg.min_stop_atr, 1.4),
-            rr=max(cfg.rr, 2.5),
+            rr=max(cfg.rr, BTC_15M_FIXED_R),
         )
     return cfg
 
@@ -1075,6 +1090,7 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
                         t1_at_r=cfg.t1_at_r, t1_fraction=cfg.t1_fraction,
                         t1_move_be=cfg.t1_move_be, t1_at_eq=cfg.t1_at_eq,
                         max_concurrent=cfg.max_concurrent,
+                        max_trades_per_day=cfg.max_trades_per_day,
                         min_rr=cfg.min_target_rr,
                         entry_mode=cfg.entry_mode,
                         retest_max_bars=cfg.retest_max_bars,
@@ -1091,24 +1107,35 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
     return r.trades, {"signals": len(sigs), **r.metrics}
 
 
-def main() -> None:
+def _parser() -> argparse.ArgumentParser:
+    """The setup CLI parser.
+
+    Extracted so the default parity test can read it without running a
+    backtest (P0-18, TB-T11).  Every accounting default is a declared constant;
+    the flags themselves are unchanged.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", required=True)
     ap.add_argument("--daily-csv", default=None)
     ap.add_argument("--market", choices=["cn", "hk", "crypto", "other"], default="cn")
     ap.add_argument("--out", default="output/ict/setup_trades.csv")
     ap.add_argument("--metrics", default="output/ict/setup_metrics.json")
-    ap.add_argument("--rr", type=float, default=2.0)
+    ap.add_argument("--rr", type=float, default=DEFAULT_FIXED_R)
     ap.add_argument("--max-bars", type=int, default=40)
     ap.add_argument("--breakeven-at-r", type=float, default=0.0)
     ap.add_argument("--t-plus-1", action="store_true")
-    ap.add_argument("--sell-tax-bps", type=float, default=5.0)
+    ap.add_argument("--sell-tax-bps", type=float, default=DEFAULT_SELL_TAX_BPS)
+    ap.add_argument("--commission-bps", type=float, default=DEFAULT_COMMISSION_BPS)
+    ap.add_argument("--slippage-bps", type=float, default=DEFAULT_SLIPPAGE_BPS)
+    ap.add_argument("--risk-pct", type=float, default=DEFAULT_RISK_PCT)
+    ap.add_argument("--max-trades-per-day", type=int,
+                    default=DEFAULT_MAX_TRADES_PER_DAY)
     ap.add_argument("--min-grade", type=int, default=3)
     ap.add_argument("--min-confluence", type=int, default=2)
     ap.add_argument("--allow-short", action="store_true")
-    ap.add_argument("--min-1d-score", type=int, default=2)
-    ap.add_argument("--min-4h-score", type=int, default=2)
-    ap.add_argument("--min-15m-score", type=int, default=1)
+    ap.add_argument("--min-1d-score", type=int, default=DEFAULT_MIN_1D_SCORE)
+    ap.add_argument("--min-4h-score", type=int, default=DEFAULT_MIN_4H_SCORE)
+    ap.add_argument("--min-15m-score", type=int, default=DEFAULT_MIN_15M_SCORE)
     ap.add_argument("--strict", action="store_true",
                     help="deprecated alias for --gate-strength hard_veto")
     ap.add_argument("--gate-strength", choices=list(GATE_STRENGTHS),
@@ -1120,7 +1147,7 @@ def main() -> None:
     ap.add_argument("--origin-filter", choices=["any", "both", "sweep", "fvg"], default="any")
     ap.add_argument("--sweep-reclaim-bars", type=int, default=3)
     ap.add_argument("--use-key-targets", action="store_true")
-    ap.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid", "dol", "htf_dol"], default=DEFAULT_TARGET_MODE)
+    ap.add_argument("--target-mode", choices=list(TARGET_MODES), default=DEFAULT_TARGET_MODE)
     ap.add_argument("--entry-mode", choices=["next_open", "retest_key", "fvg_ce", "ob_me", "ote"], default="next_open")
     ap.add_argument("--retest-max-bars", type=int, default=20)
     ap.add_argument("--retest-tolerance-atr", type=float, default=0.0)
@@ -1151,14 +1178,22 @@ def main() -> None:
     ap.add_argument("--min-disp-atr", type=float, default=0.0)
     ap.add_argument("--min-disp-multiple", type=float, default=0.0)
     ap.add_argument("--min-setup-score", type=float, default=0.0)
-    ap.add_argument("--min-target-rr", type=float, default=2.0)
+    ap.add_argument("--min-target-rr", type=float, default=MIN_RR)
     ap.add_argument("--max-target-rr", type=float, default=None,
                     help="deprecated and ignored: there is no upper RR ceiling (P0-05)")
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> None:
+    args = _parser().parse_args()
     cfg = SetupConfig(rr=args.rr, max_bars=args.max_bars, min_grade=args.min_grade,
                       min_confluence=args.min_confluence, allow_short=args.allow_short,
                       market=args.market, breakeven_at_r=args.breakeven_at_r,
                       t_plus_1=args.t_plus_1, sell_tax_bps=args.sell_tax_bps,
+                      commission_bps=args.commission_bps,
+                      slippage_bps=args.slippage_bps,
+                      risk_pct=args.risk_pct,
+                      max_trades_per_day=args.max_trades_per_day,
                       min_1d_score=args.min_1d_score, min_4h_score=args.min_4h_score,
                       min_15m_score=args.min_15m_score,
                       gate_strength="hard_veto" if args.strict else args.gate_strength,

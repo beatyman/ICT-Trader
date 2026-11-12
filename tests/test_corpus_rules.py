@@ -339,26 +339,31 @@ def test_backtest_help_renders_without_percent_formatting_error():
 
 
 # --------------------------------------------------------------------------- #
-# Reproducibility: the CLI backtest is not the library default config
+# Reproducibility: every bias parser reads the one declared default (P0-18)
 # --------------------------------------------------------------------------- #
-def test_cli_vs_library_defaults_are_documented():
-    """`cli backtest` and `SetupConfig()` disagree on two HTF scores.
+def test_bias_parameter_defaults_agree_across_all_surfaces():
+    """SetupConfig, ``setup.main`` and ``cli`` share one declaration (TB-T11).
 
-    Library defaults are min_1d_score=2 / min_15m_score=1; the CLI parser uses
-    3 / 0.  That changes the trade count materially (ETH 15m: 65 vs 21 trades),
-    so it is pinned here instead of being discovered again later.  Changing
-    either side is a deliberate product decision, not a refactor.
+    The old test pinned a disagreement (library 2 / setup CLI 2 / cli 3) as if
+    it were a product decision.  P0-18 makes the value a single imported
+    constant instead, so the three surfaces cannot drift again.
     """
     import argparse
 
     import ict_trader.cli as cli_module
+    import ict_trader.setup as setup_module
     from ict_trader.setup import SetupConfig
 
+    lib = SetupConfig()
+    setup_args = setup_module._parser().parse_args(["--csv", "x.csv"])
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd")
     cli_module._add_setup_args(sub.add_parser("backtest"))
-    args = ap.parse_args(["backtest", "--csv", "x.csv"])
-    cfg = cli_module._setup_config(args)
-    lib = SetupConfig()
-    assert (lib.min_1d_score, lib.min_15m_score) == (2, 1)
-    assert (cfg.min_1d_score, cfg.min_15m_score) == (3, 0)
+    cli_args = ap.parse_args(["backtest", "--csv", "x.csv"])
+    for name, declared in (
+            ("min_1d_score", setup_module.DEFAULT_MIN_1D_SCORE),
+            ("min_4h_score", setup_module.DEFAULT_MIN_4H_SCORE),
+            ("min_15m_score", setup_module.DEFAULT_MIN_15M_SCORE)):
+        values = {getattr(lib, name), getattr(setup_args, name),
+                  getattr(cli_args, name)}
+        assert values == {declared}, (name, values)

@@ -21,6 +21,11 @@ to pass the gate on a nearer setup (TG-07).
 ``STOP_POLICY``/``stop_from_anchor`` live in :mod:`ict_trader.cisd` because that
 is the wired call site and the backtest must remain importable without the
 optional realtime stack; they are re-exported here as the public risk API.
+
+P0-18 accounting: this module carries no private RR formula, cost basis or
+``risk_pct`` default.  It reads the one declared cost model and the declared net
+RR floor from :mod:`ict_trader.strategy`, exactly like the backtest and the
+broker, so ``plan.net_rr`` and the plan card are the same quantity.
 """
 from __future__ import annotations
 
@@ -31,9 +36,19 @@ from ict_trader.cisd import (  # re-exported: the one declared stop policy
     StopPolicy,
     stop_from_anchor,
 )
+from ict_trader.strategy import (
+    DEFAULT_COST_MODEL,
+    DEFAULT_RISK_PCT,
+    NET_RR_FLOOR,
+    CostModel,
+)
 
 #: §12 code: the stop policy produced no usable anchor (fail-closed, §1.5, A3).
 STOP_ANCHOR_UNRESOLVED = "NT_STOP_ANCHOR_UNRESOLVED"
+
+#: The declared repo net-RR blocker name (net RR is repo, RE:RM-16).  The
+#: numeric suffix is derived from the one declared floor, never typed twice.
+NET_RR_BLOCKER = f"net_rr_below_{NET_RR_FLOOR:g}"
 
 
 class StopAnchorUnresolved(ValueError):
@@ -126,8 +141,15 @@ def structural_stop(direction: str, entry: float, atr: float,
 def build_risk_plan(direction: str, entry: float, atr: float,
                     sweep: dict | None, structure: dict | None,
                     pools: list[float], *, equity: float = 100_000,
-                    risk_pct: float = 0.005, fee_bps: float = 7.0) -> RiskPlan:
-    """Build a fail-closed plan: any blocker means zero size, empty ladder."""
+                    risk_pct: float = DEFAULT_RISK_PCT,
+                    cost: CostModel | None = None) -> RiskPlan:
+    """Build a fail-closed plan: any blocker means zero size, empty ladder.
+
+    The net RR is computed by the one shared :class:`CostModel` (P0-18) and
+    compared with the declared ``NET_RR_FLOOR``; the blocker name is derived
+    from that floor.  There is no private ``fee_bps`` basis here.
+    """
+    model = DEFAULT_COST_MODEL if cost is None else cost
     if atr <= 0:
         return RiskPlan(None, (), 0, 0, 0, 0, ("atr_invalid",))
     try:
@@ -144,11 +166,9 @@ def build_risk_plan(direction: str, entry: float, atr: float,
         return RiskPlan(stop, (), 0, 0, 0, sl_atr, tuple(blockers + ["no_liquidity_target"]))
     tp1 = valid[0] - 0.1 * atr if direction == "long" else valid[0] + 0.1 * atr
     risk = abs(entry - stop)
-    gross = abs(tp1 - entry) / risk
-    fees_r = (abs(entry) + abs(tp1)) * (fee_bps / 10_000.0) / risk
-    net = gross - fees_r
-    if net < 2.0:
-        blockers.append("net_rr_below_2")
+    gross, net = model.net_rr(entry, stop, tp1, direction)
+    if net < NET_RR_FLOOR:
+        blockers.append(NET_RR_BLOCKER)
     if blockers:
         # Fail-closed: a blocked plan is never sized and never carries a ladder.
         return RiskPlan(stop, (), gross, net, 0.0, sl_atr, tuple(blockers))

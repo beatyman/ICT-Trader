@@ -12,8 +12,13 @@ import pandas as pd
 from .concepts import ICTConfig, analyze, atr as atr_series, load_csv, plot, signals_frame
 from .journal import COLUMNS, process_summary
 from .rules import audit as audit_rules
-from .setup import SetupConfig, build_setup, run_one
-from .strategy import net_rr
+from .setup import (DEFAULT_MIN_15M_SCORE, DEFAULT_MIN_1D_SCORE,
+                    DEFAULT_MIN_4H_SCORE, DEFAULT_TARGET_MODE, TARGET_MODES,
+                    SetupConfig, build_setup, run_one)
+from .strategy import (DEFAULT_COMMISSION_BPS, DEFAULT_FIXED_R,
+                       DEFAULT_MAX_TRADES_PER_DAY, DEFAULT_RISK_PCT,
+                       DEFAULT_SELL_TAX_BPS, DEFAULT_SLIPPAGE_BPS, MIN_RR,
+                       NET_RR_FLOOR, net_rr)
 from .walk_forward import purged_walk_forward
 
 
@@ -109,8 +114,11 @@ def _setup_config(args) -> SetupConfig:
         min_sweep_strength=args.min_sweep_strength,
         min_stop_atr=args.min_stop_atr,
         allow_short=getattr(args, "allow_short", False),
-        commission_bps=getattr(args, "commission_bps", 5.0),
-        slippage_bps=getattr(args, "slippage_bps", 2.0),
+        commission_bps=getattr(args, "commission_bps", DEFAULT_COMMISSION_BPS),
+        slippage_bps=getattr(args, "slippage_bps", DEFAULT_SLIPPAGE_BPS),
+        risk_pct=getattr(args, "risk_pct", DEFAULT_RISK_PCT),
+        max_trades_per_day=getattr(args, "max_trades_per_day",
+                                   DEFAULT_MAX_TRADES_PER_DAY),
         t1_at_r=getattr(args, "t1_at_r", 0.0),
         t1_fraction=getattr(args, "t1_fraction", 0.5),
         t1_move_be=not getattr(args, "t1_no_be", False),
@@ -146,19 +154,16 @@ def cmd_plan(args) -> None:
     if latest is not None:
         risk = abs(latest.level - latest.sl)
         risk_atr = risk / last_atr
-        # A stop closer than the execution noise cannot be honoured: the plan
-        # is not executable, however good the rest of the card looks.
-        if args.target_mode == "dol":
-            target = latest.target
-            if target is None:
-                rejected = "no_dol_target"
-        else:
-            measured_ok = (latest.target is not None
-                           and risk > 0
-                           and abs(latest.target - latest.level) / risk >= args.min_target_rr)
-            target = latest.target if measured_ok else (
-                latest.level + (2 * risk if latest.direction == "bull" else -2 * risk)
-            )
+        # The target is authored by the setup's declared ``target_mode``.  The
+        # card never substitutes an RR-derived target when it is missing or too
+        # near: that would re-author a price the gate refused (P0-05/P0-18).
+        target = latest.target
+        if target is None:
+            rejected = "target_missing"
+        elif args.target_mode != "dol" and (
+                risk <= 0
+                or abs(target - latest.level) / risk < args.min_target_rr):
+            rejected = "target_too_near"
         entry_distance_atr = abs(price - latest.level) / last_atr
         max_dist = args.max_entry_distance_atr * last_atr
         if rejected is None:
@@ -336,9 +341,9 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
     p.add_argument("--market", choices=["cn", "hk", "us", "crypto", "other"], default="cn")
     p.add_argument("--min-grade", type=int, default=3)
     p.add_argument("--min-confluence", type=int, default=2)
-    p.add_argument("--min-1d-score", type=int, default=3)
-    p.add_argument("--min-4h-score", type=int, default=2)
-    p.add_argument("--min-15m-score", type=int, default=0)
+    p.add_argument("--min-1d-score", type=int, default=DEFAULT_MIN_1D_SCORE)
+    p.add_argument("--min-4h-score", type=int, default=DEFAULT_MIN_4H_SCORE)
+    p.add_argument("--min-15m-score", type=int, default=DEFAULT_MIN_15M_SCORE)
     p.add_argument("--allow-no-sweep", action="store_true")
     p.add_argument("--origin-mode", choices=["strict_sweep", "pine"], default="strict_sweep",
                    help="pine allows a CISD origin from sweep or FVG delivery (Pine validOrigin)")
@@ -346,22 +351,26 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="research filter on the CISD origin mixture")
     p.add_argument("--sweep-reclaim-bars", type=int, default=3,
                    help="bars allowed for price to close back through a swept level")
-    p.add_argument("--target-mode", choices=["fixed", "liquidity", "hybrid", "dol"], default="fixed",
+    p.add_argument("--target-mode", choices=list(TARGET_MODES), default=DEFAULT_TARGET_MODE,
                    help="fixed R, nearest liquidity, liquidity fallback, or true draw-on-liquidity")
     p.add_argument("--min-setup-score", type=float, default=0.0)
-    p.add_argument("--min-target-rr", type=float, default=2.0,
-                   help="reject a measured target below this RR and use the fixed R target")
-    p.add_argument("--max-target-rr", type=float, default=6.0)
+    p.add_argument("--min-target-rr", type=float, default=MIN_RR,
+                   help="declared gross-RR floor: reject a measured target below it")
+    p.add_argument("--max-target-rr", type=float, default=None,
+                   help="deprecated and ignored: there is no upper RR ceiling (P0-05)")
     p.add_argument("--min-disp-body", type=float, default=0.0)
     p.add_argument("--min-disp-atr", type=float, default=0.0)
     p.add_argument("--min-disp-multiple", type=float, default=0.0)
-    p.add_argument("--rr", type=float, default=2.0)
+    p.add_argument("--rr", type=float, default=DEFAULT_FIXED_R)
     p.add_argument("--max-bars", type=int, default=40)
     p.add_argument("--breakeven-at-r", type=float, default=0.0)
     p.add_argument("--t-plus-1", action="store_true")
-    p.add_argument("--sell-tax-bps", type=float, default=5.0)
-    p.add_argument("--commission-bps", type=float, default=5.0)
-    p.add_argument("--slippage-bps", type=float, default=2.0)
+    p.add_argument("--sell-tax-bps", type=float, default=DEFAULT_SELL_TAX_BPS)
+    p.add_argument("--commission-bps", type=float, default=DEFAULT_COMMISSION_BPS)
+    p.add_argument("--slippage-bps", type=float, default=DEFAULT_SLIPPAGE_BPS)
+    p.add_argument("--risk-pct", type=float, default=DEFAULT_RISK_PCT)
+    p.add_argument("--max-trades-per-day", type=int,
+                   default=DEFAULT_MAX_TRADES_PER_DAY)
     p.add_argument("--allow-short", action="store_true",
                    help="also trade bearish CISD setups (default: long only)")
     p.add_argument("--t1-at-r", type=float, default=0.0,
@@ -372,7 +381,8 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="keep the runner's original stop instead of moving it to break-even")
     p.add_argument("--t1-at-eq", action="store_true",
                    help="take the first leg at the dealing-range EQ (doc 631) instead of --t1-at-r")
-    p.add_argument("--min-net-rr", type=float, default=2.0)
+    p.add_argument("--min-net-rr", type=float, default=NET_RR_FLOOR,
+                   help="repo net-RR audit floor (net RR is not corpus doctrine)")
     p.add_argument("--strict-audit", action="store_true",
                    help="require killzone + DOL + sweep + net RR for a TRADE")
     p.add_argument("--fvg-min-atr", type=float, default=0.25)
