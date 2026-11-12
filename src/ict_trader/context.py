@@ -1935,6 +1935,206 @@ def window_status(ts, *, instrument: str | None = None,
 
 
 # --------------------------------------------------------------------------- #
+# P1-16 — the enclosing killzone occurrence and its close instant
+# (EN-03/EN-04, GT-06)
+# --------------------------------------------------------------------------- #
+#: Provenance of the fill deadline.  GT-06 says a pending limit is cancelled at
+#: the **enclosing killzone close**, and R39 restates it for a resting limit;
+#: both are corpus rows, so the deadline is a clock, never a bar count.
+FILL_DEADLINE_RULE_ID = "GT-06"
+FILL_DEADLINE_SOURCE = (
+    "corpus [GT-06; RE:EX-16; LT-M06] cancel unfilled limits at the enclosing "
+    "killzone close (killzone.md R39, trade_management.md TM-43)")
+
+
+def _local_window_instant(day: date, clock: dtime,
+                          zone: str) -> pd.Timestamp | None:
+    """One window clock on ``day`` as an absolute instant (DST-safe).
+
+    ``ambiguous="NaT"`` / ``nonexistent="shift_forward"`` are the repo's one
+    naive-localization convention (the same one ``in_session`` and the MG-05
+    flat use).  A clock the DST fold cannot place returns ``None`` instead of
+    silently landing an hour off.
+    """
+    try:
+        naive = pd.Timestamp.combine(day, clock)
+        stamp = naive.tz_localize(zone, ambiguous="NaT",
+                                  nonexistent="shift_forward")
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(stamp) else stamp
+
+
+@dataclass(frozen=True, slots=True)
+class WindowOccurrence:
+    """One dated occurrence of a declared window, with its close instant.
+
+    A window row is a wall-clock span (``07:00-10:00``); an *occurrence* is that
+    span on a particular day, which is what a fill deadline and a per-window
+    attempt budget need.  ``start``/``close`` are absolute instants in the
+    window's own zone, rebuilt on the occurrence's calendar date: a
+    cross-midnight row (``19:00-00:00``) therefore closes on the next day, and a
+    DST transition cannot move the wall clock.
+
+    ``key`` is the once-per-window reset key.  It carries the occurrence's start
+    date, so the budget for tomorrow's NY AM is new while the budget for the
+    same occurrence is shared (the 19:00 bar and a bar after midnight belong to
+    the same Asian occurrence).
+    """
+
+    window: str
+    kind: WindowKind
+    zone: str
+    start: pd.Timestamp
+    close: pd.Timestamp
+    source: str
+
+    def __post_init__(self) -> None:
+        name = str(self.window).strip()
+        if not name:
+            raise ValueError("a window occurrence must name its window")
+        object.__setattr__(self, "window", name)
+        object.__setattr__(self, "kind",
+                           WindowKind(str(self.kind).strip().lower()))
+        object.__setattr__(self, "zone", _validate_window_zone(self.zone))
+        start = pd.Timestamp(self.start)
+        close = pd.Timestamp(self.close)
+        if pd.isna(start) or pd.isna(close):
+            raise ValueError(
+                f"{name}: occurrence instants must be valid timestamps")
+        if start.tzinfo is None or close.tzinfo is None:
+            raise ValueError(
+                f"{name}: occurrence instants must be timezone-aware absolutes")
+        if not start < close:
+            raise ValueError(
+                f"{name}: the occurrence must start before it closes "
+                f"({start.isoformat()} -> {close.isoformat()})")
+        object.__setattr__(self, "start", start)
+        object.__setattr__(self, "close", close)
+        source = str(self.source).strip()
+        if not source:
+            raise ValueError(f"{name}: an occurrence must carry provenance")
+        object.__setattr__(self, "source", source)
+
+    @property
+    def key(self) -> str:
+        """The once-per-window reset key (window name + occurrence date)."""
+        return f"{self.window}@{self.start.date().isoformat()}"
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "window": self.window,
+            "kind": self.kind.value,
+            "zone": self.zone,
+            "start": self.start.isoformat(),
+            "close": self.close.isoformat(),
+            "key": self.key,
+            "source": self.source,
+        }
+
+
+def window_occurrence(ts, window: WindowSpec, *, market: str = "other",
+                      input_tz: str | None = None) -> WindowOccurrence | None:
+    """The occurrence of ``window`` that contains ``ts`` (``None`` outside).
+
+    The calendar date is taken from ``ts`` on the window's own clock.  For a
+    cross-midnight row a time before ``end`` belongs to the previous day's
+    occurrence (``01:00`` inside ``19:00-02:00`` started yesterday at 19:00).
+    Nothing is fabricated: a stamp the declared clock cannot place, or one that
+    does not satisfy the half-open membership after the instants are rebuilt,
+    returns ``None``.
+    """
+    if not isinstance(window, WindowSpec):
+        raise TypeError(
+            f"window must be a WindowSpec, got {type(window).__name__}")
+    local = _stamp_in_zone(ts, window.zone, market, input_tz)
+    if local is None or not window.contains(local.time()):
+        return None
+    start_day = local.date()
+    close_day = start_day
+    if window.start > window.end:
+        # The row crosses midnight; which side of it are we on?
+        if local.time() < window.end:
+            start_day = start_day - timedelta(days=1)
+        else:
+            close_day = start_day + timedelta(days=1)
+    start = _local_window_instant(start_day, window.start, window.zone)
+    close = _local_window_instant(close_day, window.end, window.zone)
+    if start is None or close is None or not (start <= local < close):
+        return None
+    return WindowOccurrence(window=window.name, kind=window.kind,
+                            zone=window.zone, start=start, close=close,
+                            source=window.source)
+
+
+def enclosing_killzone(ts, *, instrument: str | None = None,
+                       market: str = "other",
+                       input_tz: str | None = None) -> WindowSpec | None:
+    """The one declared killzone containing ``ts`` (``None`` outside every one).
+
+    The read path is the one window table (:func:`resolved_windows`), so an
+    instrument-scoped override is honoured without a second clock (GT-08).  GT-06
+    names *the* enclosing killzone; if the declared table ever had two
+    overlapping killzones the reference is ambiguous, so that is a table error
+    (``ValueError``) rather than a silent pick.
+    """
+    hits = []
+    for row in resolved_windows(instrument=instrument):
+        if row.kind is not WindowKind.KILLZONE:
+            continue
+        local = _stamp_in_zone(ts, row.zone, market, input_tz)
+        if local is not None and row.contains(local.time()):
+            hits.append(row)
+    if len(hits) > 1:
+        raise ValueError(
+            "the declared window table has overlapping killzones at "
+            f"{ts!r}: {[row.name for row in hits]}; GT-06 names the enclosing "
+            "killzone, so the overlap must be resolved in the table")
+    return hits[0] if hits else None
+
+
+def killzone_occurrence(ts, *, instrument: str | None = None,
+                        market: str = "other",
+                        input_tz: str | None = None) -> WindowOccurrence | None:
+    """The enclosing killzone of ``ts`` as a dated occurrence (P1-16).
+
+    This is the one read a session guard needs: the occurrence's ``key`` is the
+    attempt-budget bucket and its ``close`` is the order's fill deadline.  A
+    signal outside every declared killzone has neither, so the guard refuses it
+    rather than inventing a window (EN-05/LT-B02).
+    """
+    row = enclosing_killzone(ts, instrument=instrument, market=market,
+                             input_tz=input_tz)
+    if row is None:
+        return None
+    return window_occurrence(ts, row, market=market, input_tz=input_tz)
+
+
+def window_close_reached(ts, close, *, zone: str = NY, market: str = "other",
+                         input_tz: str | None = None) -> bool | None:
+    """Whether ``ts`` is at or past a window's half-open close instant.
+
+    ``close`` is an absolute instant produced by :func:`window_occurrence`;
+    ``ts`` is converted into ``zone`` (the window's zone) using the same market
+    convention as :func:`in_session`.  Under the declared half-open boundary
+    (V13) the close instant itself is outside the window, so a bar stamped
+    exactly at the close is already too late for a fill.  ``None`` means the
+    stamp could not be read, which the caller must treat as "not reached" rather
+    than as an expired order.
+    """
+    if close is None:
+        return None
+    deadline = pd.Timestamp(close)
+    if deadline.tzinfo is None:
+        raise ValueError(
+            f"a window close must be timezone-aware, got {close!r}")
+    local = _stamp_in_zone(ts, zone, market, input_tz)
+    if local is None:
+        return None
+    return bool(local >= deadline)
+
+
+# --------------------------------------------------------------------------- #
 # P1-10 — the Judas window object (J-C5, LT-J03)
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)

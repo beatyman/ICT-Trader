@@ -11,6 +11,10 @@ Execution:
   * the declared window gate applies to the **fill bar**, not only to the
     signal bar: a fill outside the window is refused with
     ``NT_FILL_OUTSIDE_WINDOW`` (P0-13, EN-04/§8.2)
+  * P1-16 session guards: an unfilled order is cancelled at the enclosing
+    killzone's close instant (``NT_FILL_TIMEOUT``, GT-06) rather than after a
+    bar count, and a second attempt in the same window occurrence is refused
+    with ``NT_ONE_ATTEMPT_USED`` (EN-04/LT-B09)
   * stop at the CISD invalidation level
   * target supplied by the setup's declared ``target_mode``; a signal with no
     target, or a target below the RR floor at the actual fill, is refused rather
@@ -38,7 +42,9 @@ import pandas as pd
 
 from .concepts import ICTConfig, ICTResult, analyze, fetch_futu, load_csv
 from .config import config_hash as _config_hash
-from .context import (PO3PeriodContract, in_session, resolve_model_identity)
+from .context import (FILL_DEADLINE_SOURCE, PO3PeriodContract, in_session,
+                      killzone_occurrence, resolve_model_identity,
+                      window_close_reached)
 from .stats import mean_interval, n_for_margin, wilson_interval
 from .variants import VariantConfig
 
@@ -1500,6 +1506,140 @@ def build_management_plan(
         entry=entry, stop=stop, terminal_target=terminal_target)
 
 
+# --------------------------------------------------------------------------- #
+# P1-16 session guards (EN-03/EN-04, GT-06)
+# --------------------------------------------------------------------------- #
+# The corpus states two session rules the checkout lacked:
+#
+# * **fill deadline** -- an unfilled order is cancelled at the enclosing
+#   killzone's close (GT-06; killzone.md R39; trade_management.md TM-43).  The
+#   pre-P1-16 simulator bounded a retest by a *bar count*
+#   (``retest_max_bars``); a bar count is not a clock and can outlive the
+#   window, so under the guard the deadline is the occurrence's close instant.
+# * **one attempt per window** -- EN-04/LT-B09: one attempt per window, and a
+#   stop-out ends the window, with the softer variant allowing 1-2.  The corpus
+#   attests no third value; the run declares 1 or 2 and an undeclared budget is
+#   a refusal, never a default.
+#
+# Neither rule invents a window: the window is the enclosing killzone row of
+# the one P1-10 table (``context.killzone_occurrence``).  A signal outside every
+# declared killzone has no occurrence, so the guard refuses it instead of
+# fabricating a deadline (EN-05/LT-B02).
+
+#: EN-04/§13.7: the corpus attests one attempt per window and the softer 1-2.
+#: No other value is admissible; the pair is the whole option set.
+ATTEMPTS_PER_WINDOW: tuple[int, ...] = (1, 2)
+ATTEMPT_LIMIT_SOURCE = (
+    "corpus (single) [LT-B09; EN-04] one attempt per window; softer variant 1-2")
+
+#: §12 codes the session guards refuse with.
+NT_ONE_ATTEMPT_USED = "NT_ONE_ATTEMPT_USED"
+NT_FILL_TIMEOUT = "NT_FILL_TIMEOUT"
+NT_OUT_OF_WINDOW = "NT_OUT_OF_WINDOW"
+
+
+def resolve_attempt_limit(session_guard: bool,
+                          max_attempts_per_window: int | None) -> int | None:
+    """The one declared per-window attempt budget (EN-04/LT-B09).
+
+    ``None`` is legal only while the guard is off: an active guard without a
+    declared budget is the undeclared fork §14.1-2 refuses, so it raises instead
+    of choosing the modal one.  A declared value must be exactly one of
+    :data:`ATTEMPTS_PER_WINDOW`; ``1-2`` is a corpus range, not permission to
+    pick 3.
+    """
+    if max_attempts_per_window is None:
+        if session_guard:
+            raise ValueError(
+                "session_guard requires a declared max_attempts_per_window; the "
+                f"corpus attests {ATTEMPTS_PER_WINDOW} (EN-04/LT-B09) and the "
+                "run must choose one")
+        return None
+    if isinstance(max_attempts_per_window, bool):
+        raise ValueError(
+            "max_attempts_per_window must be one of "
+            f"{ATTEMPTS_PER_WINDOW}, not a boolean")
+    try:
+        limit = int(max_attempts_per_window)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "max_attempts_per_window must be one of "
+            f"{ATTEMPTS_PER_WINDOW}, got {max_attempts_per_window!r}") from None
+    if limit not in ATTEMPTS_PER_WINDOW:
+        raise ValueError(
+            f"max_attempts_per_window={max_attempts_per_window!r} is not "
+            f"attested; the corpus attests {ATTEMPTS_PER_WINDOW} (EN-04/LT-B09)")
+    return limit
+
+
+@dataclass
+class WindowAttemptBudget:
+    """The per-window attempt counter (EN-04/LT-B09), keyed by occurrence.
+
+    The key is :attr:`context.WindowOccurrence.key` -- the window name plus the
+    occurrence's start date -- so a new window is a new bucket with no explicit
+    reset step, while every bar of one occurrence shares the same budget.  The
+    budget counts the attempts that reached the market (a setup plan on the
+    setup surface, a fill in the simulator); it is never incremented for a
+    signal refused by an earlier gate.
+    """
+
+    limit: int
+    _used: dict[str, int] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.limit, bool) or self.limit not in ATTEMPTS_PER_WINDOW:
+            raise ValueError(
+                f"a window attempt budget of {self.limit!r} is not attested; "
+                f"the corpus attests {ATTEMPTS_PER_WINDOW} (EN-04/LT-B09)")
+
+    def used(self, key: str) -> int:
+        """The attempts already admitted in ``key``'s window occurrence."""
+        return int(self._used.get(str(key), 0))
+
+    def remaining(self, key: str) -> int:
+        """How many attempts ``key``'s window still permits."""
+        return max(int(self.limit) - self.used(key), 0)
+
+    def exhausted(self, key: str) -> bool:
+        """True once the occurrence's declared attempts are spent."""
+        return self.used(key) >= int(self.limit)
+
+    def use(self, key: str) -> int:
+        """Record one admitted attempt and return its 1-based number.
+
+        Using a spent occurrence raises instead of recording an unattested
+        third attempt: the budget is the corpus's 1 or 1-2 (EN-04/LT-B09), and
+        a caller that reached here always checked :meth:`exhausted` first.
+        """
+        key = str(key)
+        if self.exhausted(key):
+            raise ValueError(
+                f"window {key!r} already used its {self.limit} attempt(s) "
+                "(EN-04/LT-B09)")
+        self._used[key] = self.used(key) + 1
+        return self._used[key]
+
+    def reset(self, key: str | None = None) -> None:
+        """Release one occurrence (or all) -- an explicit, audited reset.
+
+        Guards do not need this to roll into the next window (the key changes),
+        but a run that re-uses a frame or a *session* reset may call it.  A
+        refused attempt is never released silently.
+        """
+        if key is None:
+            self._used.clear()
+        else:
+            self._used.pop(str(key), None)
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "limit": int(self.limit),
+            "limit_source": ATTEMPT_LIMIT_SOURCE,
+            "used": dict(sorted(self._used.items())),
+        }
+
+
 @dataclass
 class StrategyConfig:
     #: One declared fixed-fractional risk budget, shared with the setup and the
@@ -1573,6 +1713,17 @@ class StrategyConfig:
     # caller can declare it too.  ``none`` always passes and is the default.
     session_gate: str = "none"
     market: str = "other"
+    #: P1-16: enforce the session guards.  On, an order's fill deadline is the
+    #: enclosing killzone's close instant (GT-06/R39) instead of the
+    #: ``retest_max_bars`` bar count, an entry outside every declared killzone is
+    #: refused (EN-05), and one declared attempt budget applies per window
+    #: occurrence (EN-04/LT-B09).  Off is the pre-P1-16 compatibility path.
+    session_guard: bool = False
+    #: P1-16: the *declared* attempts per window occurrence.  The corpus attests
+    #: 1 (modal) and the softer 1-2; no other value is admissible, and ``None``
+    #: is legal only while the guard is off (the guard refuses an undeclared
+    #: budget rather than defaulting to one).
+    max_attempts_per_window: int | None = None
     #: The run's declared variants (P1-01, §14.1-3/A7).  Empty by design: an
     #: undeclared fork is never guessed by the simulator; a read refuses.
     variant_config: VariantConfig = field(default_factory=VariantConfig)
@@ -1612,6 +1763,13 @@ class StrategyConfig:
             extra["holding_class"] = self.declared_holding_class()
         if self.session_flat_clause is not None:
             extra["session_flat_clause"] = self.session_flat_clause
+        # P1-16: the declared guard and its budget decide whether an order is
+        # cancelled at a clock and whether a second attempt is admissible, so
+        # they join the digest.  Off/undeclared adds nothing (legacy unchanged).
+        if self.session_guard:
+            extra["session_guard"] = True
+        if self.max_attempts_per_window is not None:
+            extra["max_attempts_per_window"] = int(self.max_attempts_per_window)
         return _config_hash(
             self.variant_config,
             be_mode=self.declared_be_mode(),
@@ -1643,6 +1801,13 @@ class StrategyConfig:
         # non-intraday class is a category error (TM-67), not an ignored flag.
         self.declared_holding_class()
         self.declared_session_flat()
+        # P1-16: the attempted budget is a declared corpus option set (1 or 1-2),
+        # validated before a bar is read.  An active guard with no budget
+        # refuses here instead of defaulting to the modal one.
+        object.__setattr__(
+            self, "max_attempts_per_window",
+            resolve_attempt_limit(self.session_guard,
+                                  self.max_attempts_per_window))
         # P1-11: one model/period identity, declared together or not at all.
         # The simulator may only report a trade under a family the run named;
         # ``model_identity_gate`` refuses the empty identity instead of falling
@@ -1768,6 +1933,14 @@ def simulate_cisd(
     config: StrategyConfig | None = None,
     symbol: str = "",
 ) -> BacktestResult:
+    """Simulate the admitted CISDs under the declared execution rules.
+
+    P1-16: with ``session_guard`` on, the order's fill deadline is the enclosing
+    killzone's **close instant** (GT-06; killzone.md R39), not a bar count, and
+    one declared attempt budget applies per window occurrence (EN-04/LT-B09).
+    Both are read from the one P1-10 window table; no deadline is invented and
+    a signal outside every declared killzone is refused rather than given one.
+    """
     cfg = config or StrategyConfig()
     # One declared cost basis for the gate, the realised R and every partial
     # leg (P0-18).  The simulator's *entry* already embeds slippage, so the
@@ -1812,6 +1985,9 @@ def simulate_cisd(
         "refused_target_too_near": 0,
         "refused_target_wrong_side": 0,
         "refused_fill_outside_window": 0,
+        "refused_one_attempt_used": 0,
+        "refused_fill_timeout": 0,
+        "refused_out_of_window": 0,
         "exits_session_flat": 0,
     }
     mode = cfg.entry_mode
@@ -1825,6 +2001,11 @@ def simulate_cisd(
     # is flat at that session's close regardless of score.
     holding_class = cfg.declared_holding_class() or ""
     session_flat = cfg.declared_session_flat()
+    # P1-16: the guard is opt-in and fail closed.  The budget is keyed by
+    # killzone occurrence, so a new window starts a fresh bucket without an
+    # explicit reset; the fill deadline is the occurrence's close instant.
+    attempt_guard = (WindowAttemptBudget(cfg.max_attempts_per_window)
+                     if cfg.session_guard else None)
 
     # result.cisds is already time-ordered; use only information at c.end
     for c in result.cisds:
@@ -1832,16 +2013,30 @@ def simulate_cisd(
         t = c.end
         if t + cfg.entry_delay >= n:
             continue
-        if mode == "next_open" and t + cfg.entry_delay <= busy_until:
+        # P1-16: resolve the enclosing killzone occurrence once, before the
+        # overlap pre-checks, so a spent window's named refusal is not masked
+        # by ``busy_until``.  Nothing is refused here (GT-02 keeps the window
+        # gate after the signal's own gates); the value is reused below.
+        guard_occurrence = (
+            killzone_occurrence(dates.iloc[t], market=cfg.market)
+            if attempt_guard is not None else None)
+        spent_window = (attempt_guard is not None
+                        and guard_occurrence is not None
+                        and attempt_guard.exhausted(guard_occurrence.key))
+        if (mode == "next_open" and not spent_window
+                and t + cfg.entry_delay <= busy_until):
             stats["skipped_busy"] += 1
             continue
-        if mode == "retest_key" and t + cfg.retest_max_bars <= busy_until:
+        if (mode == "retest_key" and not spent_window
+                and t + cfg.retest_max_bars <= busy_until):
             stats["skipped_busy"] += 1
             continue
-        if mode == "fvg_ce" and t + cfg.retest_max_bars <= busy_until:
+        if (mode == "fvg_ce" and not spent_window
+                and t + cfg.retest_max_bars <= busy_until):
             stats["skipped_busy"] += 1
             continue
-        if mode in {"ob_me", "ote"} and t + cfg.retest_max_bars <= busy_until:
+        if (mode in {"ob_me", "ote"} and not spent_window
+                and t + cfg.retest_max_bars <= busy_until):
             stats["skipped_busy"] += 1
             continue
         if c.direction == "bull" and not cfg.allow_long:
@@ -1868,6 +2063,20 @@ def simulate_cisd(
             stats["skipped_risk"] += 1
             continue
 
+        # P1-16: the session guards read the signal bar's enclosing killzone
+        # occurrence from the one P1-10 table.  A signal outside every declared
+        # killzone has no attempt bucket and no fill deadline, so it is not this
+        # model's setup under the guard (EN-05/LT-B02); no window is invented.
+        occurrence = guard_occurrence
+        if attempt_guard is not None:
+            if occurrence is None:
+                stats["refused_out_of_window"] += 1
+                continue
+            if attempt_guard.exhausted(occurrence.key):
+                stats["refused_one_attempt_used"] += 1
+                continue
+        fill_deadline = None if occurrence is None else occurrence.close
+
         if mode in {"retest_key", "fvg_ce", "ob_me", "ote"}:
             entry_idx = None
             raw_entry = None
@@ -1882,8 +2091,19 @@ def simulate_cisd(
                 stats["skipped_gap"] += 1
                 continue
             start = max(t + 1, t + cfg.entry_delay)
-            stop_at = min(n, t + cfg.retest_max_bars + 1)
+            # P1-16: under the guard the order's life is the enclosing killzone
+            # occurrence, not a bar count.  The loop stops *before* the close
+            # instant (half-open V13), so a bar stamped at the close cannot fill.
+            deadline_hit = False
+            stop_at = n
+            if fill_deadline is None:
+                stop_at = min(n, t + cfg.retest_max_bars + 1)
             for k in range(start, stop_at):
+                if fill_deadline is not None and window_close_reached(
+                        dates.iloc[k], fill_deadline, zone=occurrence.zone,
+                        market=cfg.market) is True:
+                    deadline_hit = True
+                    break
                 if k <= busy_until:
                     continue
                 a = atr[k] if not np.isnan(atr[k]) and atr[k] > 0 else 0.0
@@ -1899,11 +2119,26 @@ def simulate_cisd(
                     entry_idx = k
                     break
             if entry_idx is None:
-                stats["not_triggered"] += 1
+                if deadline_hit:
+                    # GT-06/R39: the resting limit was cancelled at the close.
+                    stats["refused_fill_timeout"] += 1
+                else:
+                    stats["not_triggered"] += 1
                 continue
         else:
             entry_idx = t + cfg.entry_delay
             raw_entry = open_[entry_idx]
+
+        # P1-16: an ``next_open`` order must fill strictly before the enclosing
+        # killzone close.  The bar stamped at the close is already outside the
+        # half-open window (V13), so the order is cancelled there with
+        # ``NT_FILL_TIMEOUT`` rather than opened late (GT-06/R39).
+        if (fill_deadline is not None and mode == "next_open"
+                and window_close_reached(dates.iloc[int(entry_idx)],
+                                         fill_deadline, zone=occurrence.zone,
+                                         market=cfg.market) is True):
+            stats["refused_fill_timeout"] += 1
+            continue
 
         # P0-13: the window gate must read the *fill* bar, not the signal bar.
         # ``next_open`` fills one bar after the signal, and a retest can fill
@@ -1960,6 +2195,11 @@ def simulate_cisd(
         # The daily budget is spent only by a plan that survives every
         # pre-trade refusal above.
         day_counts[day] = day_counts.get(day, 0) + 1
+        # P1-16: an attempt is spent only by an order that reached the market
+        # (a fill).  A plan refused by a gate above never consumes the window's
+        # budget, so the refusal audit and the counter cannot disagree.
+        if attempt_guard is not None:
+            attempt_guard.use(occurrence.key)
 
         # A-share T+1: the first bar on a later trading day is the earliest exit
         entry_day = dates.iloc[entry_idx].date()
@@ -2159,6 +2399,20 @@ def simulate_cisd(
             "entry_net_rr": float(net_rr_value),
             "risk_atr": float(risk / atr_entry) if atr_entry > 0 else 0.0,
         })
+        # P1-16: the window occurrence, the attempt budget and the fill deadline
+        # travel with the trade, so a review can see which clock cancelled an
+        # unfilled order and which attempt this fill was (A2/A3).
+        if attempt_guard is not None:
+            features.update({
+                "session_guard": True,
+                "session_window": occurrence.window,
+                "session_window_key": occurrence.key,
+                "session_window_close": occurrence.close.isoformat(),
+                "attempt_limit": attempt_guard.limit,
+                "attempt_number": attempt_guard.used(occurrence.key),
+                "attempt_limit_source": ATTEMPT_LIMIT_SOURCE,
+                "fill_deadline_source": FILL_DEADLINE_SOURCE,
+            })
         trades.append(Trade(
             symbol=symbol,
             direction=c.direction,

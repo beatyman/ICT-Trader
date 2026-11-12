@@ -39,7 +39,7 @@ from .context import (BiasDirection, BiasState, BiasStateStore,
                       DAILY_BIAS_FAMILIES, DAILY_BIAS_FAMILY_SPECS,
                       DAILY_POLARITY_SOURCES,
                       DAY_BOUNDARY_OPTIONS, DailyBiasReading, DailyMSSEvent,
-                      DayBoundary, LastDailyMSSLock,
+                      DayBoundary, FILL_DEADLINE_SOURCE, LastDailyMSSLock,
                       DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
                       MACRO_GATE_NAMES, MidnightOpen, SwingIndex,
                       MODEL_IDENTITY_FIELDS, ModelIdentity,
@@ -50,10 +50,10 @@ from .context import (BiasDirection, BiasState, BiasStateStore,
                       WEEKLY_ANCHOR_OPTIONS, WEEKLY_ANCHOR_SOURCES,
                       WEEKLY_PROBABILITY_SOURCE, WEEKLY_PROBABILITY_STATUS,
                       WeekOpen, WeeklyAnchor, WeeklyGateResult, WeeklyIndex,
-                      WeeklyState, bias_vocabulary_readings,
+                      WeeklyState, WindowOccurrence, bias_vocabulary_readings,
                       candle2_closure, candle3_closure, daily_open_polarity,
                       dealing_range, declare_week_open, in_dead_zone,
-                      in_named_non_window, in_session,
+                      in_named_non_window, in_session, killzone_occurrence,
                       midnight_open_from_anchor, neutral_blocks, neutral_weight,
                       open_vs_daily_ce, ote_from_signal, outside_day_bias,
                       parse_bias, parse_daily_bias_family, parse_day_clock,
@@ -62,14 +62,18 @@ from .context import (BiasDirection, BiasState, BiasStateStore,
                       resolve_weekly_anchor,
                       serialize_bias, structure_location_from_range,
                       validate_bias_vocabulary, validate_neutral_handling,
-                      weekly_anchor_bias, weekly_bias_gate)
+                      weekly_anchor_bias, weekly_bias_gate,
+                      window_close_reached)
 from .pd_arrays import count_path_liquidity, near_arrays
-from .strategy import (BE_MODES, DEFAULT_COMMISSION_BPS, DEFAULT_ENTRY_MODE,
+from .strategy import (ATTEMPT_LIMIT_SOURCE, BE_MODES,
+                       DEFAULT_COMMISSION_BPS, DEFAULT_ENTRY_MODE,
                        DEFAULT_FIXED_R, DEFAULT_MAX_TRADES_PER_DAY,
                        DEFAULT_RISK_PCT, DEFAULT_SELL_TAX_BPS,
                        DEFAULT_SLIPPAGE_BPS, ENTRY_MODES, LADDER_MODES, MIN_RR,
-                       NT_FILL_OUTSIDE_WINDOW, StrategyConfig, resolve_be_mode,
-                       resolve_ladder_mode, simulate_cisd)
+                       NT_FILL_OUTSIDE_WINDOW, NT_FILL_TIMEOUT,
+                       NT_ONE_ATTEMPT_USED, NT_OUT_OF_WINDOW,
+                       StrategyConfig, WindowAttemptBudget, resolve_attempt_limit,
+                       resolve_be_mode, resolve_ladder_mode, simulate_cisd)
 from .indicators import (add_indicators, align_htf, ichimoku, macd,
                          mark_htf_known_at, resample_cn_4h, resample_htf)
 from .quality import Displacement, measure_displacement, score_setup
@@ -280,6 +284,19 @@ class SetupConfig:
     #: signal bar and a ``next_open`` fill.  ``False`` keeps the pre-P1-10
     #: compatibility path (the window objects are still available to callers).
     dead_zone_gate: bool = False
+    #: P1-16: enforce the session guards on the emitted plans.  On, a plan is an
+    #: attempt in its enclosing killzone occurrence (EN-04/LT-B09); a second
+    #: plan in the same occurrence refuses with ``NT_ONE_ATTEMPT_USED`` and a
+    #: ``next_open`` fill stamped at or after the occurrence's close refuses with
+    #: ``NT_FILL_TIMEOUT`` (GT-06/R39) instead of opening late.  A plan outside
+    #: every declared killzone refuses with ``NT_OUT_OF_WINDOW`` -- the guard
+    #: never invents a window.  ``False`` keeps the pre-P1-16 legacy path.
+    session_guard: bool = False
+    #: P1-16: the declared attempts per window occurrence.  The corpus attests 1
+    #: (modal) and the softer 1-2; no other value is admissible.  ``None`` is
+    #: legal only while the guard is off: the guard refuses an undeclared budget
+    #: rather than choosing one.
+    max_attempts_per_window: int | None = None
     pd_gate: bool = False
     pd_buy_max: float = 0.5
     pd_sell_min: float = 0.5
@@ -435,6 +452,12 @@ class SetupConfig:
             extra["execution_model_id"] = self.execution_model_id
         if self.model_identity_gate:
             extra["model_identity_gate"] = True
+        # P1-16: the guard and its declared attempt budget change whether a plan
+        # is emitted, so they join the digest; off/undeclared adds nothing.
+        if self.session_guard:
+            extra["session_guard"] = True
+        if self.max_attempts_per_window is not None:
+            extra["max_attempts_per_window"] = int(self.max_attempts_per_window)
         return _config_hash(
             self.variant_config,
             bias_primitive=self.bias_primitive,
@@ -550,6 +573,13 @@ class SetupConfig:
         # Validate an explicit declaration against the numeric behaviour.
         self.ladder_mode_of()
         self.be_mode_of()
+        # P1-16: the attempt budget is the corpus's declared option set (1 or
+        # 1-2), validated before a bar is read.  An active guard with no budget
+        # refuses instead of defaulting to the modal one.
+        object.__setattr__(
+            self, "max_attempts_per_window",
+            resolve_attempt_limit(self.session_guard,
+                                  self.max_attempts_per_window))
 
     def bias_primitive_label(self) -> str:
         """The §14.1-6 provenance label of the operative bias primitive."""
@@ -1736,6 +1766,8 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     htf_zones = (_htf_fvg_zones(df, daily, cfg, day_boundary, pre.raw_1d)
                  if cfg.htf_fvg else [])
     daily_bias = _daily_bias_series(df, daily, cfg, day_boundary, pre.raw_1d)
+    attempt_guard = (WindowAttemptBudget(cfg.max_attempts_per_window)
+                     if cfg.session_guard else None)
     out: list[CISD] = []
     for c in result.cisds:
         t = c.end
@@ -1999,6 +2031,65 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                                 f"{fill_non_window!r} (LT-K12)"),
                     )
                     continue
+
+        # P1-16: the session guards read the signal bar's enclosing killzone
+        # occurrence from the one P1-10 table.  A plan outside every declared
+        # killzone has no occurrence, so it has no attempt bucket and no fill
+        # deadline: it is refused rather than given an invented window
+        # (EN-05/LT-B02).  The budget is only spent when a plan is emitted
+        # below, so a signal refused by a later gate does not consume it.
+        window_occurrence_value: WindowOccurrence | None = None
+        if attempt_guard is not None:
+            window_occurrence_value = killzone_occurrence(
+                df["date"].iloc[t], market=cfg.market)
+            if window_occurrence_value is None:
+                _record_refusal(
+                    refusals, code=NT_OUT_OF_WINDOW,
+                    direction=c.direction, signal_bar=int(t),
+                    gate="session_guard",
+                    detail=("the signal bar is outside every declared killzone: "
+                            "under the session guard no window is invented, so "
+                            "there is no attempt budget and no fill deadline "
+                            "(EN-05/LT-B02)"),
+                )
+                continue
+            if attempt_guard.exhausted(window_occurrence_value.key):
+                _record_refusal(
+                    refusals, code=NT_ONE_ATTEMPT_USED,
+                    direction=c.direction, signal_bar=int(t),
+                    gate="session_guard",
+                    session_window=window_occurrence_value.window,
+                    session_window_key=window_occurrence_value.key,
+                    session_window_close=window_occurrence_value.close.isoformat(),
+                    attempt_limit=attempt_guard.limit,
+                    attempts_used=attempt_guard.used(
+                        window_occurrence_value.key),
+                    detail=(f"one attempt already used in "
+                            f"{window_occurrence_value.window!r} "
+                            f"({window_occurrence_value.key}); the declared "
+                            f"budget is {attempt_guard.limit} per window "
+                            "occurrence (EN-04/LT-B09)"),
+                )
+                continue
+            fill_bar = _next_open_fill_bar(cfg, t)
+            if (fill_bar is not None and fill_bar < len(df)
+                    and window_close_reached(
+                        df["date"].iloc[fill_bar],
+                        window_occurrence_value.close,
+                        zone=window_occurrence_value.zone,
+                        market=cfg.market) is True):
+                _record_refusal(
+                    refusals, code=NT_FILL_TIMEOUT,
+                    direction=c.direction, signal_bar=int(t),
+                    fill_bar=int(fill_bar), gate="session_guard",
+                    session_window=window_occurrence_value.window,
+                    session_window_key=window_occurrence_value.key,
+                    session_window_close=window_occurrence_value.close.isoformat(),
+                    detail=("the next_open fill is stamped at or after the "
+                            "enclosing killzone close: the resting order is "
+                            "cancelled there (GT-06/R39)"),
+                )
+                continue
 
         pd_pos = None
         dr = pre.swings.dealing_range(t, cfg.pd_lookback)
@@ -2386,6 +2477,24 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                     entry_hint = None
             else:
                 entry_hint = None
+            if attempt_guard is not None and window_occurrence_value is not None:
+                # The plan is the attempt on this surface: spend the budget and
+                # carry the occurrence, the budget and the deadline with the
+                # setup so a review can audit the guard (A2/A3).
+                attempt_number = attempt_guard.use(window_occurrence_value.key)
+                quality_parts.update({
+                    "session_guard": True,
+                    "session_window": window_occurrence_value.window,
+                    "session_window_key": window_occurrence_value.key,
+                    "session_window_start": (
+                        window_occurrence_value.start.isoformat()),
+                    "session_window_close": (
+                        window_occurrence_value.close.isoformat()),
+                    "attempt_limit": attempt_guard.limit,
+                    "attempt_number": attempt_number,
+                    "attempt_limit_source": ATTEMPT_LIMIT_SOURCE,
+                    "fill_deadline_source": FILL_DEADLINE_SOURCE,
+                })
             out.append(replace(c, target=target, quality=quality,
                                quality_parts=quality_parts, entry_hint=entry_hint))
     return out
@@ -2424,6 +2533,11 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
                         # entries cannot fill after the window closes either.
                         session_gate=cfg.session_gate,
                         market=cfg.market,
+                        # P1-16: the same guard and declared budget the setup
+                        # surface applied travel into the simulator, so the
+                        # emitted plans and the fills share one declaration.
+                        session_guard=cfg.session_guard,
+                        max_attempts_per_window=cfg.max_attempts_per_window,
                         # P1-01: the simulator reads the same declared register
                         # as the setup surface; no private variant copy (A7).
                         variant_config=cfg.variant_config,
@@ -2517,6 +2631,15 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--dead-zone-gate", action="store_true",
                     help="refuse entries in the 05:00-07:00 NY dead zone and "
                          "at the named non-windows 06:30/12:00 (P1-10)")
+    ap.add_argument("--session-guard", action="store_true",
+                    help="one declared attempt per killzone occurrence "
+                         "(NT_ONE_ATTEMPT_USED) and fill deadline at the "
+                         "killzone close (NT_FILL_TIMEOUT) — P1-16")
+    ap.add_argument("--max-attempts-per-window", type=int, default=None,
+                    choices=[1, 2],
+                    help="declared attempts per window occurrence; the corpus "
+                         "attests 1 (modal) and the softer 1-2 (EN-04/LT-B09). "
+                         "Required by --session-guard; no default is chosen")
     ap.add_argument("--pd-gate", action="store_true")
     ap.add_argument("--ote-gate", action="store_true")
     ap.add_argument("--ote-min", type=float, default=0.62)
@@ -2601,7 +2724,9 @@ def main() -> None:
                       max_target_rr=args.max_target_rr,
                       daily_bias_filter=args.daily_bias_filter,
                       htf_structure_gate=args.htf_structure_gate,
-                      dead_zone_gate=args.dead_zone_gate)
+                      dead_zone_gate=args.dead_zone_gate,
+                      session_guard=args.session_guard,
+                      max_attempts_per_window=args.max_attempts_per_window)
     trades, m = run_one(args.csv, cfg, daily_path=args.daily_csv)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([t.__dict__ for t in trades]).to_csv(args.out, index=False, encoding="utf-8-sig")
