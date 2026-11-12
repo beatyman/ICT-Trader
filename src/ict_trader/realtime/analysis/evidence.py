@@ -7,11 +7,81 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...context import (BiasState, DEFAULT_NEUTRAL_HANDLING, parse_bias,
+                        validate_neutral_handling)
+
+
+#: V15 ``sweep direction vs bias``: the corpus attests three mutually exclusive
+#: readings and the repo used to hardcode the first one with no declaration.
+#: ``sweep_sets_direction`` is the labelled repo default; the other two require
+#: the caller to supply the bias they compare against.
+SWEEP_DIRECTION_MODES = ("sweep_sets_direction", "oppose_bias",
+                         "match_daily_bias")
+DEFAULT_SWEEP_DIRECTION_MODE = "sweep_sets_direction"
+
+SWEEP_DIRECTION_SOURCES: dict[str, dict[str, str]] = {
+    "sweep_sets_direction": {
+        "label": "repo",
+        "source": "V15 reading 1 (sweep side sets the trade side)"},
+    "oppose_bias": {
+        "label": "repo",
+        "source": "V15 reading 2 (sweep must oppose the prevailing bias)"},
+    "match_daily_bias": {
+        "label": "repo",
+        "source": "V15 reading 3 (sweep must match the daily bias)"},
+}
+
+
+def _validate_sweep_mode(mode: str) -> str:
+    value = str(mode).strip().lower()
+    if value not in SWEEP_DIRECTION_MODES:
+        raise ValueError(
+            f"unknown sweep_direction_mode {mode!r}; declare one of "
+            f"{SWEEP_DIRECTION_MODES} (V15)")
+    return value
+
+
+def _bias_gate(direction: str, bias: object, *, mode: str,
+               what: str) -> bool:
+    """Apply the declared V15 reading against a supplied bias state."""
+    if bias is None:
+        raise ValueError(
+            f"sweep_direction_mode={mode!r} requires a {what} bias; the "
+            "declared reading cannot be evaluated without it (V15)")
+    state = parse_bias(bias)
+    side = parse_bias(direction)
+    if mode == "oppose_bias":
+        # A neutral bias neither opposes nor matches, so it never satisfies
+        # "must oppose": the reading fails closed (BI-06 no_trade).
+        opposing = BiasState.BEAR if side is BiasState.BULL else BiasState.BULL
+        return state is opposing
+    return state is side
+
 
 def extract_sweep(sweeps: list[dict], *, direction: str,
-                  source_kline_open_time: int) -> dict | None:
+                  source_kline_open_time: int,
+                  sweep_direction_mode: str = DEFAULT_SWEEP_DIRECTION_MODE,
+                  bias: object = None,
+                  daily_bias: object = None) -> dict | None:
+    """The one recent sweep that satisfies the declared V15 reading.
+
+    The sweep *side* is always the counter-side of the trade (long ⇒ an SSL
+    sweep, short ⇒ a BSL sweep).  Which bias that sweep must agree with is a
+    declared fork: ``sweep_sets_direction`` (the labelled repo default) needs
+    no bias input; ``oppose_bias`` requires ``bias`` and rejects a sweep that
+    agrees with it; ``match_daily_bias`` requires ``daily_bias`` and rejects a
+    sweep that disagrees with it.  A missing context refuses instead of falling
+    back to the unlabelled reading.
+    """
+    mode = _validate_sweep_mode(sweep_direction_mode)
     want_type = "SSL" if direction == "long" else "BSL"
     want_bias = "bullish" if direction == "long" else "bearish"
+    if mode == "oppose_bias":
+        if not _bias_gate(direction, bias, mode=mode, what="prevailing"):
+            return None
+    elif mode == "match_daily_bias":
+        if not _bias_gate(direction, daily_bias, mode=mode, what="daily"):
+            return None
     candidates = [
         s for s in sweeps
         if s.get("sweep_type") == want_type
@@ -31,6 +101,7 @@ def extract_sweep(sweeps: list[dict], *, direction: str,
         "extreme": float(s.get("sweep_price") or s["level"]),
         "reclaim_atr": float(s.get("reclaim_strength", 0.0)),
         "expires_at": int(s["expires_at"]),
+        "sweep_direction_mode": mode,
     }
 
 
@@ -274,7 +345,8 @@ def rvol_evidence(frame: Any, end_idx: int, *, window: int = 20) -> float | None
 _HTF_PIVOT_LEFT = 5
 
 
-def htf_bias_evidence(frame: Any, end_idx: int) -> dict | None:
+def htf_bias_evidence(frame: Any, end_idx: int, *,
+                      neutral_handling: str = DEFAULT_NEUTRAL_HANDLING) -> dict | None:
     """HH/HL bias for the 4H and 1D tiers, from **closed** buckets only.
 
     The bias primitive is :func:`ict_trader.context.structure_bias` (BI-01:
@@ -282,10 +354,18 @@ def htf_bias_evidence(frame: Any, end_idx: int) -> dict | None:
     different, repo rule and is deliberately not used here (P0-09); it is
     named ``pivot_bos_bias`` in :mod:`.structure`.
 
+    ``neutral_handling`` is the one declared BI-06/BI-07 choice; it is accepted
+    here so the boundary validates it, while the returned bias stays the raw
+    reading (a consumer applies the handling through
+    :func:`ict_trader.context.neutral_blocks` / ``neutral_weight``).  The two
+    alternative handlings are therefore no longer decided independently by
+    setup, this module and ``mtf``.
+
     A left-labelled resample bucket is knowable only at its close, so the
     still-forming bucket is dropped before the swings are built: its partial
     OHLC must never reach the bias attached to a signal (P0-01, CB-01/CB-07).
     """
+    validate_neutral_handling(neutral_handling)
     import pandas as pd
     from ...concepts import find_pivots
     from ...context import structure_bias

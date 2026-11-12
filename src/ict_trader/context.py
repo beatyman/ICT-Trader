@@ -103,6 +103,42 @@ def serialize_bias(value: object) -> str:
     return parse_bias(value).value
 
 
+#: BI-06/BI-07: the one declared neutral handling read by every bias consumer.
+#:
+#: The corpus attests more than one handling, so the choice is declared rather
+#: than inferred from the caller.  ``no_trade`` is the BI-06 default ("neutral
+#: days should be skipped"): a neutral reading blocks a directional setup.
+#: ``score_half`` is the attested scoring variant (neutral counts ``0.5``), and
+#: ``narrative_only`` keeps the reading informational so it never vetoes.
+NEUTRAL_HANDLINGS = ("no_trade", "score_half", "narrative_only")
+DEFAULT_NEUTRAL_HANDLING = "no_trade"
+
+
+def validate_neutral_handling(handling: str) -> str:
+    """Return the declared neutral handling or raise (BI-06/BI-07)."""
+    value = str(handling).strip().lower()
+    if value not in NEUTRAL_HANDLINGS:
+        raise ValueError(
+            f"unknown neutral_handling {handling!r}; declare one of "
+            f"{NEUTRAL_HANDLINGS} (BI-06/BI-07)")
+    return value
+
+
+def neutral_blocks(handling: str = DEFAULT_NEUTRAL_HANDLING) -> bool:
+    """Whether a neutral read blocks a directional setup under ``handling``."""
+    return validate_neutral_handling(handling) == "no_trade"
+
+
+def neutral_weight(handling: str = DEFAULT_NEUTRAL_HANDLING) -> float:
+    """The score a neutral read contributes under ``handling`` (BI-06)."""
+    value = validate_neutral_handling(handling)
+    if value == "no_trade":
+        return 0.0
+    if value == "score_half":
+        return 0.5
+    return 1.0  # narrative_only: the read is recorded, never a veto
+
+
 @dataclass(frozen=True)
 class DealingRange:
     high: float
@@ -412,9 +448,11 @@ class SwingIndex:
     every call, which is O(swings) inside a per-signal loop (measured: 3.6 s of
     a 12.8 s ``build_setup`` on 20k BTC 15m bars).  The zigzag list is ordered
     by bar index and ``confirmed_at`` grows with it, so "the last N confirmed
-    swings at bar t" is a binary search instead of a scan.  Results are
-    identical to the functions above - ``tests/test_context.py`` checks every
-    bar against them.
+    swings at bar t" is a binary search instead of a scan.
+
+    The pure functions above are the reference implementation.  No test in this
+    checkout proves bar-by-bar equivalence between the two, so this class makes
+    no such claim (P0-19 removed a docstring that asserted one).
     """
 
     def __init__(self, swings: Iterable) -> None:
@@ -522,13 +560,17 @@ def ote_retracement(swings: Iterable, entry: float, direction: str) -> float | N
 
 def candle2_closure(prior_high: float, prior_low: float,
                     cur_high: float, cur_low: float, cur_close: float) -> str | None:
-    """ICT Candle-2 fake-break closure (E1).
+    """Repo Candle-2 fake-break closure (labelled ``repo``; not a corpus rule).
 
     A bullish C2 sweeps the prior low and closes back inside the prior range
     (above the prior low); a bearish C2 sweeps the prior high and closes back
     inside (below the prior high).  ``None`` when neither happens.
 
-    This is a daily/HTF bias filter, not a standalone entry.
+    This is a repo bias-filter primitive, not a standalone entry, and the
+    corpus's only readable daily Candle-2 rule ("a strong close through the
+    prior delivering candles") is explicitly insufficient alone
+    (``daily_bias.md`` §7.3-5).  The label is part of the declaration: no
+    caller may present it as an ICT bias rule (§14.1-6).
     """
     if cur_low < prior_low and cur_close > prior_low:
         return "bull"
@@ -540,7 +582,7 @@ def candle2_closure(prior_high: float, prior_low: float,
 def candle3_closure(prior_high: float, prior_low: float,
                     c2_open: float, c2_close: float, c2_high: float, c2_low: float,
                     c3_open: float, c3_close: float) -> str | None:
-    """ICT Candle-3 reversal (E1).
+    """Repo Candle-3 reversal (labelled ``repo``; not a corpus rule).
 
     C2 fails when the next bar (C3) engulfs C2's body and closes through it.
     The returned direction is the *new* bias (opposite of the failed C2):

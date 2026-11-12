@@ -32,14 +32,18 @@ import pandas as pd
 
 from .cisd import CISD
 from .concepts import ICTConfig, analyze, detect_fvgs, find_pivots, load_csv
-from .context import (BiasState, SwingIndex, candle2_closure, candle3_closure,
-                      dealing_range, in_session, ote_from_signal, parse_bias,
-                      serialize_bias)
+from .context import (BiasState, DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
+                      SwingIndex, candle2_closure, candle3_closure,
+                      dealing_range, in_session, neutral_blocks, neutral_weight,
+                      ote_from_signal, parse_bias, serialize_bias,
+                      validate_neutral_handling)
 from .pd_arrays import count_path_liquidity, near_arrays
-from .strategy import (DEFAULT_COMMISSION_BPS, DEFAULT_FIXED_R,
-                       DEFAULT_MAX_TRADES_PER_DAY, DEFAULT_RISK_PCT,
-                       DEFAULT_SELL_TAX_BPS, DEFAULT_SLIPPAGE_BPS, MIN_RR,
-                       NT_FILL_OUTSIDE_WINDOW, StrategyConfig, simulate_cisd)
+from .strategy import (BE_MODES, DEFAULT_COMMISSION_BPS, DEFAULT_ENTRY_MODE,
+                       DEFAULT_FIXED_R, DEFAULT_MAX_TRADES_PER_DAY,
+                       DEFAULT_RISK_PCT, DEFAULT_SELL_TAX_BPS,
+                       DEFAULT_SLIPPAGE_BPS, ENTRY_MODES, LADDER_MODES, MIN_RR,
+                       NT_FILL_OUTSIDE_WINDOW, StrategyConfig, resolve_be_mode,
+                       resolve_ladder_mode, simulate_cisd)
 from .indicators import (add_indicators, align_htf, ichimoku, macd,
                          mark_htf_known_at, resample_cn_4h, resample_htf)
 from .quality import Displacement, measure_displacement, score_setup
@@ -81,11 +85,86 @@ DEFAULT_MIN_15M_SCORE = 1
 BTC_15M_FIXED_R = 2.5
 
 
+# --------------------------------------------------------------------------- #
+# Declared bias/gate defaults (P0-19: declaration, not an implicit default)
+# --------------------------------------------------------------------------- #
+#: V01: the bias primitive.  The repo's operative default is an
+#: Ichimoku/Tenkan/MACD stack, which is **not** one of the five attestations in
+#: V01; it is kept only as an explicitly labelled ``repo`` primitive.  The
+#: corpus-shaped primitives are the HH/HL structure read (BI-01) and the repo
+#: Candle-2/3 closure filter (itself labelled ``repo`` in V01 terms).
+BIAS_PRIMITIVES = ("indicator_stack", "structure_read", "daily_candle", "none")
+DEFAULT_BIAS_PRIMITIVE = "indicator_stack"
+
+#: Per-primitive provenance, read by the CLI help and the quality record.
+BIAS_PRIMITIVE_SOURCES: dict[str, dict[str, str]] = {
+    "indicator_stack": {
+        "label": "repo",
+        "v01": "outside V01",
+        "source": "Ichimoku/Tenkan/MACD; absent from V01 and SYSTEM_SPEC §13"},
+    "structure_read": {
+        "label": "corpus",
+        "v01": "structure read",
+        "source": "BI-01 HH/HL vs LH/LL"},
+    "daily_candle": {
+        "label": "repo",
+        "v01": "candle colour (repo implementation: Candle-2/3 closure)",
+        "source": "Candle-2/3 closure is repo, not a corpus daily-bias rule"},
+    "none": {
+        "label": "repo",
+        "v01": "no primitive selected",
+        "source": "no directional bias gate (declared absence)"},
+}
+
+#: BI-07: gate strength is declared at the config surface; the two corpus-shaped
+#: directional gates keep their repo defaults in one place so every surface can
+#: state them instead of inheriting an implicit string.
+HTF_STRUCTURE_GATES = ("none", "aligned")
+DAILY_BIAS_FILTERS = ("none", "c2", "c3")
+BIAS_GATE_DEFAULTS = {
+    "bias_primitive": DEFAULT_BIAS_PRIMITIVE,  # repo default (V01)
+    "htf_structure_gate": "none",              # corpus-shaped gate, declared off
+    "daily_bias_filter": "none",               # corpus-shaped gate, declared off
+}
+
+#: The daily filter is implemented on the **1D** frame, so its name is true.  The
+#: primitive is still a repo rule (Candle-2/3), never corpus doctrine.
+DAILY_BIAS_FILTER_LABEL = "repo"
+DAILY_BIAS_FILTER_TF = "1D"
+
+#: TF-02: sub-4H is execution only, so a stack that uses 1H as a bias/confirm
+#: tier is a **repo fork** and must say so.  The fork name is recorded on every
+#: emitted setup instead of being implied by the stack string.
+BIAS_TF_FORKS = ("corpus_4h_or_higher", "repo_sub4h_confirm")
+DEFAULT_BIAS_TF_FORK = "corpus_4h_or_higher"
+
+#: Declared named stacks.  An unknown stack refuses instead of silently
+#: resolving to the default (the old ``.get(stack, default)`` fallback).
+STACKS = ("1d_4h_15m", "1d_1h_15m", "1d_15m", "4h_15m", "4h_1h_15m")
+DEFAULT_STACK = "1d_4h_15m"
+
+
+@dataclass(frozen=True)
+class StackSpec:
+    bias_tf: str
+    confirm_tf: str | None
+    min_bias: int
+    min_confirm: int
+    #: V02/TF-02 declaration: ``repo_sub4h_confirm`` when ``confirm_tf`` is 1H.
+    bias_tf_fork: str = DEFAULT_BIAS_TF_FORK
+
+
 @dataclass
 class SetupConfig:
     market: str = "cn"
     min_grade: int = 3
     min_confluence: int = 2
+    #: V01 bias primitive.  The default is the repo indicator stack; it is not
+    #: allowed to run as an unlabelled default, so the choice (and its repo
+    #: provenance) travels with the config and every emitted setup (P0-19).
+    bias_primitive: str = DEFAULT_BIAS_PRIMITIVE
+    #: BI-06/BI-07 neutral handling, one declaration for setup/evidence/mtf.
+    neutral_handling: str = DEFAULT_NEUTRAL_HANDLING
     require_1d_cloud: bool = True
     require_1d_macd: bool = True
     require_1d_tk: bool = True
@@ -130,6 +209,9 @@ class SetupConfig:
     rr: float = DEFAULT_FIXED_R
     max_bars: int = 40
     breakeven_at_r: float = 0.0
+    #: Declared break-even trigger (MG-08/V31).  ``None`` reads the one implied
+    #: by the fields; an explicit value must agree with them.
+    be_mode: str | None = None
     t_plus_1: bool = False
     sell_tax_bps: float = DEFAULT_SELL_TAX_BPS
     risk_pct: float = DEFAULT_RISK_PCT
@@ -137,7 +219,9 @@ class SetupConfig:
     #: Declared daily budget (fills per calendar date), forwarded to the
     #: simulator so the wired backtest and the live settings agree (P0-18).
     max_trades_per_day: int = DEFAULT_MAX_TRADES_PER_DAY
-    entry_mode: str = "next_open"
+    #: Declared entry-price member (RE:EX-03); ``next_open`` is the labelled
+    #: repo default, not an attested menu price.
+    entry_mode: str = DEFAULT_ENTRY_MODE
     retest_max_bars: int = 20
     retest_tolerance_atr: float = 0.0
     trail_activate_r: float = 0.0
@@ -151,6 +235,9 @@ class SetupConfig:
     t1_fraction: float = 0.5
     t1_move_be: bool = True
     t1_at_eq: bool = False           # doc 631: first leg at the dealing-range EQ
+    #: Declared first-partial coordinate system (MG-01/V31); ``None`` reads the
+    #: one implied by ``t1_at_r``/``t1_at_eq``.
+    ladder_mode: str | None = None
     session_gate: str = "none"  # none | auto | london | ny_am | ny_pm | cn | hk
     pd_gate: bool = False
     pd_buy_max: float = 0.5
@@ -170,11 +257,13 @@ class SetupConfig:
     regime_vol_gate: str = "none"    # none | low | normal | high
     max_inducements: int = -1
     quality_profile: str = "standard"  # standard | high_value
-    stack: str = "1d_4h_15m"  # 1d_4h_15m | 1d_1h_15m | 1d_15m | 4h_15m | 4h_1h_15m
-    daily_bias_filter: str = "none"  # none | c2 | c3 (E1: Candle 2/3 daily bias)
+    stack: str = DEFAULT_STACK
+    #: Repo Candle-2/3 closure filter, implemented on the **1D** frame so the
+    #: name is true.  The primitive is repo, not corpus (daily_bias §7.3-5).
+    daily_bias_filter: str = BIAS_GATE_DEFAULTS["daily_bias_filter"]
     # none | aligned: the gate reads HH/HL vs LH/LL on ``spec.bias_tf``, never
     # on the base/entry frame (TF-01/TF-02, P0-09).
-    htf_structure_gate: str = "none"
+    htf_structure_gate: str = BIAS_GATE_DEFAULTS["htf_structure_gate"]
     # Declared admission strength (V11, P0-17).  ``hard_veto`` is the §8.1
     # conjunction; ``score`` is the legacy repo count and must be explicit.
     gate_strength: str = DEFAULT_GATE_STRENGTH
@@ -194,6 +283,81 @@ class SetupConfig:
             # strength, but it can no longer be the implicit default.
             strength = "score" if self.use_score else "hard_veto"
         object.__setattr__(self, "gate_strength", strength)
+        # P0-19: every default that decides a direction is a declared enum, not
+        # an implicit string/number.  Unknown values refuse here, before a bar
+        # is read.
+        if self.bias_primitive not in BIAS_PRIMITIVES:
+            raise ValueError(
+                f"unknown bias_primitive {self.bias_primitive!r}; "
+                f"declare one of {BIAS_PRIMITIVES} (V01)")
+        if self.htf_structure_gate not in HTF_STRUCTURE_GATES:
+            raise ValueError(
+                f"unknown htf_structure_gate {self.htf_structure_gate!r}; "
+                f"declare one of {HTF_STRUCTURE_GATES}")
+        if self.daily_bias_filter not in DAILY_BIAS_FILTERS:
+            raise ValueError(
+                f"unknown daily_bias_filter {self.daily_bias_filter!r}; "
+                f"declare one of {DAILY_BIAS_FILTERS}")
+        if self.entry_mode not in ENTRY_MODES:
+            raise ValueError(
+                f"unknown entry_mode {self.entry_mode!r}; "
+                f"declare one of {ENTRY_MODES} (RE:EX-03)")
+        if self.stack not in STACKS:
+            raise ValueError(f"unknown stack {self.stack!r}; declare one of {STACKS}")
+        # A declared bias primitive must be the gate the config actually runs.
+        if self.bias_primitive == "structure_read" and self.htf_structure_gate != "aligned":
+            raise ValueError(
+                "bias_primitive='structure_read' requires htf_structure_gate="
+                "'aligned' (BI-01); the corpus-shaped gate is not optional "
+                "when it is declared the operative primitive")
+        if self.bias_primitive == "daily_candle" and self.daily_bias_filter == "none":
+            raise ValueError(
+                "bias_primitive='daily_candle' requires daily_bias_filter in "
+                f"{DAILY_BIAS_FILTERS[1:]}; the declared primitive would "
+                "otherwise be inactive")
+        validate_neutral_handling(self.neutral_handling)
+        resolve_ladder_mode(self.t1_at_r, self.t1_at_eq)
+        resolve_be_mode(self.breakeven_at_r, self.t1_move_be,
+                        self.ladder_mode_of() != "off")
+        # Validate an explicit declaration against the numeric behaviour.
+        self.ladder_mode_of()
+        self.be_mode_of()
+
+    def bias_primitive_label(self) -> str:
+        """The §14.1-6 provenance label of the operative bias primitive."""
+        return BIAS_PRIMITIVE_SOURCES[self.bias_primitive]["label"]
+
+    def ladder_mode_of(self) -> str:
+        """The declared first-partial coordinate system (MG-01/V31)."""
+        implied = resolve_ladder_mode(self.t1_at_r, self.t1_at_eq)
+        if self.ladder_mode is None:
+            return implied
+        declared = str(self.ladder_mode).strip().lower()
+        if declared not in LADDER_MODES:
+            raise ValueError(
+                f"unknown ladder_mode {self.ladder_mode!r}; "
+                f"declare one of {LADDER_MODES}")
+        if declared != implied:
+            raise ValueError(
+                f"declared ladder_mode {declared!r} contradicts the configured "
+                f"behaviour {implied!r}")
+        return declared
+
+    def be_mode_of(self) -> str:
+        """The one declared break-even trigger (MG-08/V31)."""
+        implied = resolve_be_mode(self.breakeven_at_r, self.t1_move_be,
+                                  self.ladder_mode_of() != "off")
+        if self.be_mode is None:
+            return implied
+        declared = str(self.be_mode).strip().lower()
+        if declared not in BE_MODES:
+            raise ValueError(
+                f"unknown be_mode {self.be_mode!r}; declare one of {BE_MODES}")
+        if declared != implied:
+            raise ValueError(
+                f"declared be_mode {declared!r} contradicts the configured "
+                f"behaviour {implied!r}")
+        return declared
 
 
 def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
@@ -402,24 +566,26 @@ def _daily_htf(base: pd.DataFrame, daily: pd.DataFrame, close_hour: int = 15) ->
                                "macd", "macd_signal", "macd_hist"])
 
 
-@dataclass(frozen=True)
-class StackSpec:
-    bias_tf: str
-    confirm_tf: str | None
-    min_bias: int
-    min_confirm: int
-
-
 def _stack_spec(cfg: SetupConfig) -> StackSpec:
-    """Resolve the named multi-timeframe stack without hard-coding 1D/4H."""
+    """Resolve the named multi-timeframe stack without hard-coding 1D/4H.
+
+    The 1H confirm stacks are the declared V02/TF-02 repo fork, not an
+    unlabelled default: their ``bias_tf_fork`` is ``repo_sub4h_confirm``.  An
+    unknown stack name refuses instead of silently becoming the default.
+    """
+    if cfg.stack not in STACKS:
+        raise ValueError(
+            f"unknown stack {cfg.stack!r}; declare one of {STACKS}")
     stacks = {
         "1d_4h_15m": StackSpec("1D", "4h", cfg.min_1d_score, cfg.min_4h_score),
-        "1d_1h_15m": StackSpec("1D", "1h", cfg.min_1d_score, cfg.min_4h_score),
+        "1d_1h_15m": StackSpec("1D", "1h", cfg.min_1d_score, cfg.min_4h_score,
+                               "repo_sub4h_confirm"),
         "1d_15m": StackSpec("1D", None, cfg.min_1d_score, 0),
         "4h_15m": StackSpec("4h", None, cfg.min_4h_score, 0),
-        "4h_1h_15m": StackSpec("4h", "1h", cfg.min_4h_score, cfg.min_4h_score),
+        "4h_1h_15m": StackSpec("4h", "1h", cfg.min_4h_score, cfg.min_4h_score,
+                               "repo_sub4h_confirm"),
     }
-    return stacks.get(cfg.stack, stacks["1d_4h_15m"])
+    return stacks[cfg.stack]
 
 
 class _BoxIndex:
@@ -757,16 +923,21 @@ def _htf_fvg_delivery(zones: list[tuple[float, float, int, str, str]],
 
 
 def _daily_bias_series(df: pd.DataFrame, daily: pd.DataFrame | None,
-                       cfg: SetupConfig, spec: StackSpec) -> list[str | None]:
-    """E1: bias-TF Candle-2/3 state, right-aligned to the base bars.
+                       cfg: SetupConfig) -> list[str | None]:
+    """Repo Candle-2/3 closure filter, right-aligned to the base bars.
 
-    Each base bar sees only the most recently *closed* bias-TF bar (``searchsorted
-    side="right"`` minus one), so the filter never uses an in-progress daily/4H bar.
+    The filter is implemented on the **1D (daily)** frame whether or not the
+    stack's bias tier is daily, so the name ``daily_bias_filter`` matches the
+    behaviour.  It is a repo primitive (``Candle-2`` closure is not a corpus
+    daily-bias rule; daily_bias §7.3-5), labelled ``repo``.
+
+    Each base bar sees only the most recently *closed* daily bar (``searchsorted
+    side="right"`` minus one), so the filter never uses an in-progress bar.
     Returns a list aligned to ``len(df)`` of ``"bull"``/``"bear"``/``None``.
     """
-    if cfg.daily_bias_filter not in {"c2", "c3"}:
+    if cfg.daily_bias_filter not in DAILY_BIAS_FILTERS[1:]:
         return [None] * len(df)
-    d = _raw_htf(df, daily, spec.bias_tf, cfg.market)
+    d = _raw_htf(df, daily, DAILY_BIAS_FILTER_TF, cfg.market)
     if d is None or len(d) < 2:
         return [None] * len(df)
     d = d.reset_index(drop=True)
@@ -774,21 +945,24 @@ def _daily_bias_series(df: pd.DataFrame, daily: pd.DataFrame | None,
     bias: list[str | None] = [None] * n
     mode = cfg.daily_bias_filter
     for i in range(n):
-        if i < 1:
-            continue
-        prev = d.iloc[i - 1]
-        cur = d.iloc[i]
         if mode == "c2":
+            if i < 1:
+                continue
+            prev = d.iloc[i - 1]
+            cur = d.iloc[i]
             bias[i] = candle2_closure(
                 float(prev["high"]), float(prev["low"]),
                 float(cur["high"]), float(cur["low"]), float(cur["close"]))
         else:
             if i < 2:
                 continue
+            # The reference bar is the bar *before* C2; using ``i-1`` here made
+            # C2 "sweep" its own low/high and the C3 filter could never print.
+            prior = d.iloc[i - 2]
             c2 = d.iloc[i - 1]
             c3 = d.iloc[i]
             bias[i] = candle3_closure(
-                float(prev["high"]), float(prev["low"]),
+                float(prior["high"]), float(prior["low"]),
                 float(c2["open"]), float(c2["close"]),
                 float(c2["high"]), float(c2["low"]),
                 float(c3["open"]), float(c3["close"]))
@@ -841,7 +1015,7 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     pre = _SetupPrecompute(df, result, cfg, daily, spec)
     close, high, low, atr14 = pre.close, pre.high, pre.low, pre.atr14
     htf_zones = _htf_fvg_zones(df, daily, cfg) if cfg.htf_fvg else []
-    daily_bias = _daily_bias_series(df, daily, cfg, spec)
+    daily_bias = _daily_bias_series(df, daily, cfg)
     out: list[CISD] = []
     for c in result.cisds:
         t = c.end
@@ -850,15 +1024,22 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
         if c.grade < cfg.min_grade or sum(bool(v) for v in c.checks.values()) < cfg.min_confluence:
             continue
         bias_dir = daily_bias[t]
-        if cfg.daily_bias_filter != "none" and (
+        if cfg.daily_bias_filter in DAILY_BIAS_FILTERS[1:] and (
                 bias_dir is None or parse_bias(bias_dir) is not parse_bias(c.direction)):
             continue
         # P0-09: the HTF gate reads structure on spec.bias_tf, not on the
-        # base/entry frame.  ``neutral`` never permits a direction (BI-06).
+        # base/entry frame.  P0-19/BI-06: neutral is resolved by the one
+        # declared handling instead of being a third ad-hoc branch.
         htf_struct = pre.bias_structure(t)
-        if (cfg.htf_structure_gate == "aligned"
-                and parse_bias(htf_struct) is not parse_bias(c.direction)):
-            continue
+        htf_state = parse_bias(htf_struct)
+        neutral_factor = 1.0
+        if cfg.htf_structure_gate == "aligned":
+            if htf_state is BiasState.NEUTRAL:
+                if neutral_blocks(cfg.neutral_handling):
+                    continue
+                neutral_factor = neutral_weight(cfg.neutral_handling)
+            elif htf_state is not parse_bias(c.direction):
+                continue
         if cfg.session_gate != "none":
             if not in_session(df, t, cfg.market, cfg.session_gate):
                 continue
@@ -907,15 +1088,24 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
 
         _, chosen_ob = pre.ob[c.direction].nearest(c.level, t)
 
-        if not pre.bars_ok(t):
-            continue
-        d1_checks, h4_checks, m15_checks = pre.htf_checks(t, c.direction, cfg)
+        # P0-19/V01: the declared bias primitive selects the operative gate.
+        # ``indicator_stack`` is the labelled repo default; a corpus-shaped
+        # primitive (structure_read / daily_candle) was already applied above,
+        # so the indicator conjunction must not run as an undeclared extra gate.
+        indicator_gate = cfg.bias_primitive == "indicator_stack"
+        if indicator_gate:
+            if not pre.bars_ok(t):
+                continue
+            d1_checks, h4_checks, m15_checks = pre.htf_checks(t, c.direction, cfg)
+        else:
+            d1_checks, h4_checks, m15_checks = [], [], []
         # P0-17: admission is the §8.1 conjunction under the declared gate
         # strength.  Under the default ``hard_veto`` a single failing check
         # rejects the setup; the old 2-of-3 score is only available when
         # ``gate_strength="score"`` is declared explicitly.
         gate = cfg.gate_strength
-        if (_admit(d1_checks, gate, spec.min_bias)
+        if not indicator_gate or (
+                _admit(d1_checks, gate, spec.min_bias)
                 and _admit(h4_checks, gate, spec.min_confirm)
                 and _admit(m15_checks, gate, cfg.min_15m_score)):
             # result.sweeps is sorted by reclaim_bar, so the window is a slice.
@@ -966,11 +1156,20 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 volume=bool(c.checks.get("volume")),
                 session=bool(c.checks.get("session")),
             )
+            # BI-06/BI-07: the declared neutral handling decides the weight; a
+            # neutral read is never silently treated as either aligned or
+            # opposing.
+            quality = float(quality) * neutral_factor
             if quality < cfg.min_setup_score:
                 continue
             best_sweep = max(recent_sweeps, key=lambda s: s.strength) if recent_sweeps else None
             quality_parts.update({
                 "stack": cfg.stack,
+                "bias_tf_fork": spec.bias_tf_fork,
+                "bias_primitive": cfg.bias_primitive,
+                "bias_primitive_label": BIAS_PRIMITIVE_SOURCES[
+                    cfg.bias_primitive]["label"],
+                "neutral_handling": cfg.neutral_handling,
                 "gate_strength": gate,
                 "bias_tf": spec.bias_tf,
                 "confirm_tf": spec.confirm_tf,
@@ -996,6 +1195,9 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 "disp_body_multiple": float(disp.body_multiple),
                 "disp_volume_ratio": float(disp.volume_ratio),
                 "daily_bias": serialize_bias(bias_dir),
+                "daily_bias_filter": cfg.daily_bias_filter,
+                "daily_bias_filter_label": DAILY_BIAS_FILTER_LABEL,
+                "daily_bias_tf": DAILY_BIAS_FILTER_TF,
                 "htf_structure": htf_struct,
                 # The timeframe the gate actually read (P0-09).  It is the
                 # same declared tier the indicators use, and is recorded so a
@@ -1089,6 +1291,7 @@ def run_one(path: str | Path, cfg: SetupConfig, daily_path: str | Path | None = 
                         commission_bps=cfg.commission_bps, slippage_bps=cfg.slippage_bps,
                         t1_at_r=cfg.t1_at_r, t1_fraction=cfg.t1_fraction,
                         t1_move_be=cfg.t1_move_be, t1_at_eq=cfg.t1_at_eq,
+                        ladder_mode=cfg.ladder_mode, be_mode=cfg.be_mode,
                         max_concurrent=cfg.max_concurrent,
                         max_trades_per_day=cfg.max_trades_per_day,
                         min_rr=cfg.min_target_rr,
@@ -1122,7 +1325,25 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--metrics", default="output/ict/setup_metrics.json")
     ap.add_argument("--rr", type=float, default=DEFAULT_FIXED_R)
     ap.add_argument("--max-bars", type=int, default=40)
-    ap.add_argument("--breakeven-at-r", type=float, default=0.0)
+    ap.add_argument("--breakeven-at-r", type=float, default=0.0,
+                    help="move the stop to entry at this favourable R; the "
+                         "trigger is declared by --be-mode (MG-08/V31)")
+    ap.add_argument("--be-mode", choices=list(BE_MODES), default=None,
+                    help="declared break-even trigger; default reads the one "
+                         "implied by the numeric settings (MG-08)")
+    ap.add_argument("--ladder-mode", choices=list(LADDER_MODES), default=None,
+                    help="declared first-partial coordinate system; default "
+                         "reads the one implied by --t1-at-r/--t1-at-eq (V31)")
+    ap.add_argument("--t1-at-r", type=float, default=0.0,
+                    help="take the first partial at this R multiple (0 = off)")
+    ap.add_argument("--t1-fraction", type=float, default=0.5,
+                    help="fraction taken off at the first partial")
+    ap.add_argument("--t1-no-be", action="store_true",
+                    help="keep the runner's stop instead of moving it to "
+                         "break-even after the first partial")
+    ap.add_argument("--t1-at-eq", action="store_true",
+                    help="take the first leg at the dealing-range EQ "
+                         "(repo variant, V31)")
     ap.add_argument("--t-plus-1", action="store_true")
     ap.add_argument("--sell-tax-bps", type=float, default=DEFAULT_SELL_TAX_BPS)
     ap.add_argument("--commission-bps", type=float, default=DEFAULT_COMMISSION_BPS)
@@ -1136,6 +1357,13 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--min-1d-score", type=int, default=DEFAULT_MIN_1D_SCORE)
     ap.add_argument("--min-4h-score", type=int, default=DEFAULT_MIN_4H_SCORE)
     ap.add_argument("--min-15m-score", type=int, default=DEFAULT_MIN_15M_SCORE)
+    ap.add_argument("--bias-primitive", choices=list(BIAS_PRIMITIVES),
+                    default=DEFAULT_BIAS_PRIMITIVE,
+                    help="declared V01 bias primitive; the default indicator "
+                         "stack is repo-labelled, not ICT doctrine")
+    ap.add_argument("--neutral-handling", choices=list(NEUTRAL_HANDLINGS),
+                    default=DEFAULT_NEUTRAL_HANDLING,
+                    help="declared BI-06 neutral handling (default: no_trade)")
     ap.add_argument("--strict", action="store_true",
                     help="deprecated alias for --gate-strength hard_veto")
     ap.add_argument("--gate-strength", choices=list(GATE_STRENGTHS),
@@ -1148,7 +1376,9 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--sweep-reclaim-bars", type=int, default=3)
     ap.add_argument("--use-key-targets", action="store_true")
     ap.add_argument("--target-mode", choices=list(TARGET_MODES), default=DEFAULT_TARGET_MODE)
-    ap.add_argument("--entry-mode", choices=["next_open", "retest_key", "fvg_ce", "ob_me", "ote"], default="next_open")
+    ap.add_argument("--entry-mode", choices=list(ENTRY_MODES), default=DEFAULT_ENTRY_MODE,
+                    help="declared RE:EX-03 entry member; next_open is the "
+                         "labelled repo default and is not an attested price")
     ap.add_argument("--retest-max-bars", type=int, default=20)
     ap.add_argument("--retest-tolerance-atr", type=float, default=0.0)
     ap.add_argument("--trail-activate-r", type=float, default=0.0)
@@ -1167,11 +1397,16 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--require-fresh-fvg", action="store_true")
     ap.add_argument("--max-inducements", type=int, default=-1)
     ap.add_argument("--quality-profile", choices=["standard", "high_value", "high_rr"], default="standard")
-    ap.add_argument("--stack", choices=["1d_4h_15m", "1d_1h_15m", "1d_15m", "4h_15m", "4h_1h_15m"],
-                    default="1d_4h_15m")
-    ap.add_argument("--daily-bias-filter", choices=["none", "c2", "c3"], default="none",
-                    help="E1: require a Candle-2/3 daily bias aligned with the signal")
-    ap.add_argument("--htf-structure-gate", choices=["none", "aligned"], default="none",
+    ap.add_argument("--stack", choices=list(STACKS),
+                    default=DEFAULT_STACK,
+                    help="named stack; the 1h-confirm stacks are the declared "
+                         "repo sub-4H fork (TF-02)")
+    ap.add_argument("--daily-bias-filter", choices=list(DAILY_BIAS_FILTERS),
+                    default=BIAS_GATE_DEFAULTS["daily_bias_filter"],
+                    help="repo Candle-2/3 closure filter computed on the 1D "
+                         "frame (not a corpus daily-bias rule)")
+    ap.add_argument("--htf-structure-gate", choices=list(HTF_STRUCTURE_GATES),
+                    default=BIAS_GATE_DEFAULTS["htf_structure_gate"],
                     help="require structure on the declared bias timeframe "
                          "(HH/HL for long, LH/LL for short) aligned with the signal")
     ap.add_argument("--min-disp-body", type=float, default=0.0)
@@ -1189,6 +1424,10 @@ def main() -> None:
     cfg = SetupConfig(rr=args.rr, max_bars=args.max_bars, min_grade=args.min_grade,
                       min_confluence=args.min_confluence, allow_short=args.allow_short,
                       market=args.market, breakeven_at_r=args.breakeven_at_r,
+                      be_mode=args.be_mode,
+                      ladder_mode=args.ladder_mode,
+                      t1_at_r=args.t1_at_r, t1_fraction=args.t1_fraction,
+                      t1_move_be=not args.t1_no_be, t1_at_eq=args.t1_at_eq,
                       t_plus_1=args.t_plus_1, sell_tax_bps=args.sell_tax_bps,
                       commission_bps=args.commission_bps,
                       slippage_bps=args.slippage_bps,
@@ -1196,6 +1435,8 @@ def main() -> None:
                       max_trades_per_day=args.max_trades_per_day,
                       min_1d_score=args.min_1d_score, min_4h_score=args.min_4h_score,
                       min_15m_score=args.min_15m_score,
+                      bias_primitive=args.bias_primitive,
+                      neutral_handling=args.neutral_handling,
                       gate_strength="hard_veto" if args.strict else args.gate_strength,
                       require_sweep=not args.allow_no_sweep and args.origin_mode != "pine" and args.origin_filter != "fvg",
                       origin_filter=args.origin_filter,

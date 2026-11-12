@@ -10,15 +10,19 @@ from types import SimpleNamespace
 import pandas as pd
 
 from .concepts import ICTConfig, analyze, atr as atr_series, load_csv, plot, signals_frame
+from .context import DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS
 from .journal import COLUMNS, process_summary
 from .rules import audit as audit_rules
-from .setup import (DEFAULT_MIN_15M_SCORE, DEFAULT_MIN_1D_SCORE,
-                    DEFAULT_MIN_4H_SCORE, DEFAULT_TARGET_MODE, TARGET_MODES,
-                    SetupConfig, build_setup, run_one)
-from .strategy import (DEFAULT_COMMISSION_BPS, DEFAULT_FIXED_R,
-                       DEFAULT_MAX_TRADES_PER_DAY, DEFAULT_RISK_PCT,
-                       DEFAULT_SELL_TAX_BPS, DEFAULT_SLIPPAGE_BPS, MIN_RR,
-                       NET_RR_FLOOR, net_rr)
+from .setup import (BIAS_GATE_DEFAULTS, BIAS_PRIMITIVES, DAILY_BIAS_FILTERS,
+                    DEFAULT_BIAS_PRIMITIVE, DEFAULT_MIN_15M_SCORE,
+                    DEFAULT_MIN_1D_SCORE, DEFAULT_MIN_4H_SCORE, DEFAULT_STACK,
+                    DEFAULT_TARGET_MODE, HTF_STRUCTURE_GATES, STACKS,
+                    TARGET_MODES, SetupConfig, build_setup, run_one)
+from .strategy import (BE_MODES, DEFAULT_COMMISSION_BPS, DEFAULT_ENTRY_MODE,
+                       DEFAULT_FIXED_R, DEFAULT_MAX_TRADES_PER_DAY,
+                       DEFAULT_RISK_PCT, DEFAULT_SELL_TAX_BPS,
+                       DEFAULT_SLIPPAGE_BPS, ENTRY_MODES, LADDER_MODES,
+                       MIN_RR, NET_RR_FLOOR, net_rr)
 from .walk_forward import purged_walk_forward
 
 
@@ -75,6 +79,9 @@ def _setup_config(args) -> SetupConfig:
         min_1d_score=args.min_1d_score,
         min_4h_score=args.min_4h_score,
         min_15m_score=args.min_15m_score,
+        bias_primitive=getattr(args, "bias_primitive", DEFAULT_BIAS_PRIMITIVE),
+        neutral_handling=getattr(args, "neutral_handling",
+                                 DEFAULT_NEUTRAL_HANDLING),
         require_sweep=not args.allow_no_sweep and args.origin_mode != "pine" and args.origin_filter != "fvg",
         origin_filter=args.origin_filter,
         sweep_reclaim_bars=args.sweep_reclaim_bars,
@@ -123,6 +130,10 @@ def _setup_config(args) -> SetupConfig:
         t1_fraction=getattr(args, "t1_fraction", 0.5),
         t1_move_be=not getattr(args, "t1_no_be", False),
         t1_at_eq=getattr(args, "t1_at_eq", False),
+        ladder_mode=getattr(args, "ladder_mode", None),
+        be_mode=getattr(args, "be_mode", None),
+        daily_bias_filter=getattr(args, "daily_bias_filter", "none"),
+        htf_structure_gate=getattr(args, "htf_structure_gate", "none"),
         stack=args.stack,
     )
 
@@ -344,6 +355,13 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
     p.add_argument("--min-1d-score", type=int, default=DEFAULT_MIN_1D_SCORE)
     p.add_argument("--min-4h-score", type=int, default=DEFAULT_MIN_4H_SCORE)
     p.add_argument("--min-15m-score", type=int, default=DEFAULT_MIN_15M_SCORE)
+    p.add_argument("--bias-primitive", choices=list(BIAS_PRIMITIVES),
+                   default=DEFAULT_BIAS_PRIMITIVE,
+                   help="declared V01 bias primitive; the default indicator "
+                        "stack is repo-labelled, not ICT doctrine")
+    p.add_argument("--neutral-handling", choices=list(NEUTRAL_HANDLINGS),
+                   default=DEFAULT_NEUTRAL_HANDLING,
+                   help="declared BI-06 neutral handling (default: no_trade)")
     p.add_argument("--allow-no-sweep", action="store_true")
     p.add_argument("--origin-mode", choices=["strict_sweep", "pine"], default="strict_sweep",
                    help="pine allows a CISD origin from sweep or FVG delivery (Pine validOrigin)")
@@ -363,7 +381,15 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
     p.add_argument("--min-disp-multiple", type=float, default=0.0)
     p.add_argument("--rr", type=float, default=DEFAULT_FIXED_R)
     p.add_argument("--max-bars", type=int, default=40)
-    p.add_argument("--breakeven-at-r", type=float, default=0.0)
+    p.add_argument("--breakeven-at-r", type=float, default=0.0,
+                   help="move the stop to entry at this favourable R; the "
+                        "trigger is declared by --be-mode (MG-08/V31)")
+    p.add_argument("--be-mode", choices=list(BE_MODES), default=None,
+                   help="declared break-even trigger; default reads the one "
+                        "implied by the numeric settings (MG-08)")
+    p.add_argument("--ladder-mode", choices=list(LADDER_MODES), default=None,
+                   help="declared first-partial coordinate system; default "
+                        "reads the one implied by --t1-at-r/--t1-at-eq (V31)")
     p.add_argument("--t-plus-1", action="store_true")
     p.add_argument("--sell-tax-bps", type=float, default=DEFAULT_SELL_TAX_BPS)
     p.add_argument("--commission-bps", type=float, default=DEFAULT_COMMISSION_BPS)
@@ -391,9 +417,10 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="drop FVGs narrower than this many ATR (BTC 15m: 0.1)")
     p.add_argument("--min-risk-atr", type=float, default=0.5,
                    help="reject a plan whose stop is closer than this many ATR (entry_invalid)")
-    p.add_argument("--entry-mode", choices=["next_open", "retest_key", "fvg_ce", "ob_me", "ote"],
-                   default="next_open",
-                   help="enter at next open, retest the CISD key level, or retest the FVG CE")
+    p.add_argument("--entry-mode", choices=list(ENTRY_MODES),
+                   default=DEFAULT_ENTRY_MODE,
+                   help="declared RE:EX-03 entry member; next_open is the "
+                        "labelled repo default and is not an attested price")
     p.add_argument("--retest-max-bars", type=int, default=20)
     p.add_argument("--retest-tolerance-atr", type=float, default=0.0)
     p.add_argument("--trail-activate-r", type=float, default=0.0,
@@ -430,8 +457,18 @@ def _add_setup_args(p: argparse.ArgumentParser, data: bool = True) -> None:
                    help="reject signals whose best recent sweep is weaker than this")
     p.add_argument("--min-stop-atr", type=float, default=0.0,
                    help="reject signals whose stop is closer than this many ATR")
-    p.add_argument("--stack", choices=["1d_4h_15m", "1d_1h_15m", "1d_15m", "4h_15m", "4h_1h_15m"],
-                   default="1d_4h_15m", help="multi-timeframe stack to test")
+    p.add_argument("--stack", choices=list(STACKS),
+                   default=DEFAULT_STACK,
+                   help="named stack; the 1h-confirm stacks are the declared "
+                        "repo sub-4H fork (TF-02)")
+    p.add_argument("--daily-bias-filter", choices=list(DAILY_BIAS_FILTERS),
+                   default=BIAS_GATE_DEFAULTS["daily_bias_filter"],
+                   help="repo Candle-2/3 closure filter computed on the 1D "
+                        "frame (not a corpus daily-bias rule)")
+    p.add_argument("--htf-structure-gate", choices=list(HTF_STRUCTURE_GATES),
+                   default=BIAS_GATE_DEFAULTS["htf_structure_gate"],
+                   help="require HH/HL (long) or LH/LL (short) on the declared "
+                        "bias timeframe")
 
 
 def main(argv=None) -> None:

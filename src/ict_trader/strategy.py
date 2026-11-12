@@ -125,6 +125,103 @@ DEFAULT_FIXED_R = 2.0
 SAME_BAR_TIE_BREAK = "stop_first"
 
 
+# --------------------------------------------------------------------------- #
+# Declared execution enums (P0-19: no implicit choice may decide a trade)
+# --------------------------------------------------------------------------- #
+#: RE:EX-03: the corpus states the entry-price *menu* and ranks none of it.
+#: ``next_open`` is the repo default and is **not** one of the four attested
+#: prices; it stays available but is labelled below instead of running as an
+#: undocumented market entry.
+ENTRY_MODES = ("next_open", "retest_key", "fvg_ce", "ob_me", "ote")
+DEFAULT_ENTRY_MODE = "next_open"
+
+#: Provenance of each declared entry mode (``label`` is the §14.1-6 label).
+ENTRY_MODE_SOURCES: dict[str, dict[str, str]] = {
+    "next_open": {
+        "label": "repo",
+        "source": "RE:EX-03 has no next-open member; repo market fill"},
+    "retest_key": {
+        "label": "repo",
+        "source": "key-level retest is a repo selector, not the entry menu"},
+    "fvg_ce": {
+        "label": "corpus",
+        "source": "RE:EX-03 entry menu: FVG CE"},
+    "ob_me": {
+        "label": "repo",
+        "source": "OB body mean is the repo OB construction"},
+    "ote": {
+        "label": "repo",
+        "source": "PP:OTE-05 0.705 preference; the OTE band is not the menu"},
+}
+
+#: MG-08 / V31: break-even triggers are mutually exclusive and one must be
+#: declared.  The repo implements three of the attestations; a bare
+#: ``breakeven_at_r > 0`` float no longer encodes ``never`` implicitly.
+BE_MODES = ("never", "at_r", "after_first_partial")
+DEFAULT_BE_MODE = "never"
+
+#: MG-01 / V31: the first-partial coordinate system.  ``level_anchored`` is the
+#: best-attested corpus ladder but needs the first-IRL object (P1-09/P1-15), so
+#: the P0 subset declares the two implementable modes and their default.
+LADDER_MODES = ("off", "r_anchored", "level_anchored")
+DEFAULT_LADDER_MODE = "off"
+
+
+def resolve_ladder_mode(t1_at_r: float, t1_at_eq: bool) -> str:
+    """Name the ladder mode implied by the numeric settings (MG-01/V31).
+
+    Exactly one coordinate system may be active: ``t1_at_eq`` (the repo EQ
+    variant) and a positive ``t1_at_r`` cannot both select a first leg.
+    """
+    if bool(t1_at_eq) and float(t1_at_r) > 0:
+        raise ValueError(
+            "two first-partial coordinate systems are enabled (t1_at_eq and "
+            "t1_at_r); declare exactly one ladder mode (MG-01/V31)")
+    if bool(t1_at_eq):
+        return "level_anchored"
+    if float(t1_at_r) > 0:
+        return "r_anchored"
+    return "off"
+
+
+def resolve_be_mode(breakeven_at_r: float, t1_move_be: bool,
+                    partial_enabled: bool) -> str:
+    """Name the break-even trigger implied by the numeric settings (MG-08).
+
+    ``never`` is a declared mode, not "the float happens to be zero".  The two
+    implemented triggers are mutually exclusive; asking for both fails closed
+    instead of silently running two BE rules on one trade.
+    """
+    at_r = float(breakeven_at_r) > 0
+    after_partial = bool(t1_move_be) and bool(partial_enabled)
+    if at_r and after_partial:
+        raise ValueError(
+            "two break-even triggers are enabled (breakeven_at_r > 0 and "
+            "t1_move_be with a live first partial); declare one BE mode "
+            "(MG-08/V31)")
+    if at_r:
+        return "at_r"
+    if after_partial:
+        return "after_first_partial"
+    return "never"
+
+
+def _declared_choice(value: str | None, allowed: tuple[str, ...],
+                     name: str, implied: str) -> str:
+    """Validate an optional declared enum against the behaviour it names."""
+    if value is None:
+        return implied
+    declared = str(value).strip().lower()
+    if declared not in allowed:
+        raise ValueError(
+            f"unknown {name} {value!r}; declare one of {allowed}")
+    if declared != implied:
+        raise ValueError(
+            f"declared {name} {declared!r} contradicts the configured "
+            f"behaviour {implied!r}; change the fields or the declaration")
+    return declared
+
+
 def _direction_sign(direction: str) -> int:
     if direction in {"long", "bull"}:
         return 1
@@ -304,8 +401,14 @@ class StrategyConfig:
     rr_mode: str = DEFAULT_RR_MODE
     min_rr: float | None = None
     breakeven_at_r: float = 0.0     # move SL to entry at this favourable R
+    #: Declared break-even trigger (MG-08/V31).  ``None`` reads the one implied
+    #: by ``breakeven_at_r`` / ``t1_move_be``; an explicit value must agree with
+    #: those fields.  ``never`` is a mode, never an implicit zero.
+    be_mode: str | None = None
     min_displacement_atr: float = 0.0
-    entry_mode: str = "next_open"   # next_open | retest_key
+    #: Declared entry-price member (RE:EX-03).  ``next_open`` is the labelled
+    #: repo default; it is not one of the four attested menu prices.
+    entry_mode: str = DEFAULT_ENTRY_MODE
     retest_max_bars: int = 20       # bars allowed for a retest to fill
     retest_tolerance_atr: float = 0.0  # allow a wick this close to the key
     trail_activate_r: float = 0.0     # activate ATR trail after this favourable R
@@ -322,6 +425,10 @@ class StrategyConfig:
     # shorts from premium, same."  When enabled, the first leg is taken at the
     # setup's dealing-range EQ (`quality_parts["dr_eq"]`) instead of at t1_at_r R.
     t1_at_eq: bool = False
+    #: Declared first-partial coordinate system (MG-01/V31).  ``off`` is the
+    #: labelled repo default (the corpus ladder needs the first-IRL object,
+    #: P1-09/P1-15); ``None`` reads the one implied by the numeric fields.
+    ladder_mode: str | None = None
     max_daily_loss_r: float = 0.0     # stop new entries after this daily R loss (0=off)
     # P0-13: the window gate must also cover the bar the order actually fills
     # on.  These mirror ``SetupConfig.session_gate``/``market`` so
@@ -337,12 +444,34 @@ class StrategyConfig:
                 f"declare one of {tuple(RR_MODE_FLOORS)}")
         if self.min_rr is not None and float(self.min_rr) < 0:
             raise ValueError("min_rr must be >= 0")
+        if self.entry_mode not in ENTRY_MODES:
+            raise ValueError(
+                f"unknown entry_mode {self.entry_mode!r}; "
+                f"declare one of {ENTRY_MODES} (RE:EX-03)")
+        # Validate the two declared management enums and their behaviour at
+        # construction, so an undeclared or contradictory choice cannot reach a
+        # simulated fill (P0-19; MG-01/MG-08/V31).
+        self.declared_ladder_mode()
+        self.declared_be_mode()
 
     def rr_floor(self) -> float:
         """The declared gate floor: explicit ``min_rr`` else the mode's floor."""
         if self.min_rr is not None:
             return float(self.min_rr)
         return rr_floor(self.rr_mode)
+
+    def declared_ladder_mode(self) -> str:
+        """The declared first-partial coordinate system (MG-01/V31)."""
+        implied = resolve_ladder_mode(self.t1_at_r, self.t1_at_eq)
+        return _declared_choice(self.ladder_mode, LADDER_MODES,
+                                "ladder_mode", implied)
+
+    def declared_be_mode(self) -> str:
+        """The one declared break-even trigger (MG-08/V31)."""
+        implied = resolve_be_mode(
+            self.breakeven_at_r, self.t1_move_be,
+            self.declared_ladder_mode() != "off")
+        return _declared_choice(self.be_mode, BE_MODES, "be_mode", implied)
 
 
 @dataclass
@@ -458,8 +587,11 @@ def simulate_cisd(
         "refused_fill_outside_window": 0,
     }
     mode = cfg.entry_mode
-    if mode not in {"next_open", "retest_key", "fvg_ce", "ob_me", "ote"}:
+    if mode not in ENTRY_MODES:
         raise ValueError(f"unknown entry_mode: {mode}")
+    # One declared management plan per run (P0-19; MG-01/MG-08/V31).
+    ladder_mode = cfg.declared_ladder_mode()
+    be_mode = cfg.declared_be_mode()
 
     # result.cisds is already time-ordered; use only information at c.end
     for c in result.cisds:
@@ -649,7 +781,7 @@ def simulate_cisd(
         t1_at = (entry + cfg.t1_at_r * risk) if c.direction == "bull" else (entry - cfg.t1_at_r * risk)
         # doc 631: optional equilibrium-price partial exit
         t1_eq_armed = False
-        if cfg.t1_at_eq:
+        if ladder_mode == "level_anchored":
             eq_price = (getattr(c, "quality_parts", None) or {}).get("dr_eq")
             if eq_price is not None:
                 eq_price = float(eq_price)
@@ -709,15 +841,16 @@ def simulate_cisd(
                     break
                 # partial take-profit on the first leg; the runner keeps the
                 # original target and (optionally) a break-even stop.
-                if (cfg.t1_at_r > 0 or t1_eq_armed) and not t1_filled:
+                if (ladder_mode == "r_anchored" or t1_eq_armed) and not t1_filled:
                     reached = (high[k] >= t1_at) if c.direction == "bull" else (low[k] <= t1_at)
                     if reached:
                         t1_price, t1_filled = t1_at, True
-                        if cfg.t1_move_be and (sl_current == c.sl or
-                                               (t1_at > sl_current if c.direction == "bull"
-                                                else t1_at < sl_current)):
+                        if be_mode == "after_first_partial" and (
+                                sl_current == c.sl or
+                                (t1_at > sl_current if c.direction == "bull"
+                                 else t1_at < sl_current)):
                             sl_current = entry
-                if cfg.breakeven_at_r > 0 and not be_armed:
+                if be_mode == "at_r" and not be_armed:
                     moved = (high[k] - entry) if c.direction == "bull" else (entry - low[k])
                     if moved >= cfg.breakeven_at_r * risk:
                         sl_current = entry
