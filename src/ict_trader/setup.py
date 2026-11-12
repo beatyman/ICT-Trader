@@ -39,14 +39,20 @@ from .context import (BiasDirection, BiasState, BiasStateStore,
                       DAILY_POLARITY_SOURCES,
                       DAY_BOUNDARY_OPTIONS, DayBoundary,
                       DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
-                      MidnightOpen, SwingIndex, bias_vocabulary_readings,
+                      MidnightOpen, SwingIndex, WEEK_OPEN_OPTIONS,
+                      WEEKLY_ANCHOR_OPTIONS, WEEKLY_ANCHOR_SOURCES,
+                      WEEKLY_PROBABILITY_SOURCE, WEEKLY_PROBABILITY_STATUS,
+                      WeekOpen, WeeklyAnchor, WeeklyGateResult, WeeklyIndex,
+                      WeeklyState, bias_vocabulary_readings,
                       candle2_closure, candle3_closure, daily_open_polarity,
-                      dealing_range, in_session, midnight_open_from_anchor,
-                      neutral_blocks, neutral_weight, open_vs_daily_ce,
-                      ote_from_signal, parse_bias, parse_day_clock,
-                      resolve_daily_polarity, resolve_day_boundary,
+                      dealing_range, declare_week_open, in_session,
+                      midnight_open_from_anchor, neutral_blocks, neutral_weight,
+                      open_vs_daily_ce, ote_from_signal, parse_bias,
+                      parse_day_clock, resolve_daily_polarity,
+                      resolve_day_boundary, resolve_weekly_anchor,
                       serialize_bias, validate_bias_vocabulary,
-                      validate_neutral_handling)
+                      validate_neutral_handling, weekly_anchor_bias,
+                      weekly_bias_gate)
 from .pd_arrays import count_path_liquidity, near_arrays
 from .strategy import (BE_MODES, DEFAULT_COMMISSION_BPS, DEFAULT_ENTRY_MODE,
                        DEFAULT_FIXED_R, DEFAULT_MAX_TRADES_PER_DAY,
@@ -306,6 +312,18 @@ class SetupConfig:
     #: undeclared refuses with ``NT_VARIANT_UNDECLARED`` -- no majority reading
     #: is picked on the run's behalf (§14.3 ``BLOCK``).
     midnight_open_gate: bool = False
+    #: P1-05: the declared week-open clock (WB-06/SN-W11).  §14.2 has no V##
+    #: row for the week field, so this is a declared run input with no default:
+    #: the Sunday 17:00 forex open and the Monday 09:30 equities open are
+    #: different weeks on the same bars.  ``None`` means no weekly state is
+    #: computed; every emitted setup then says so instead of assuming a week.
+    week_open_clock: str | None = None
+    #: P1-05: gate directional setups on the weekly state -- the declared V06
+    #: anchor reading (WB-01/WB-04) and the WB-03 monthly ∧ weekly gate.
+    #: ``True`` requires V06 and :attr:`week_open_clock`; either being undeclared
+    #: refuses with ``NT_VARIANT_UNDECLARED`` / ``ValueError`` rather than
+    #: picking a weekly anchor or a week boundary for the run.
+    weekly_gate: bool = False
 
     def read_variant(self, variant_id: str) -> str:
         """Read one declared fork through the single register (A7).
@@ -330,6 +348,20 @@ class SetupConfig:
                                     broker_roll=self.broker_roll)
 
     @property
+    def week_open(self) -> WeekOpen:
+        """The one declared week-open clock (P1-05 / WB-06).
+
+        There is no default: an undeclared clock refuses even a direct property
+        read, so no caller can silently inherit the Sunday forex week on a
+        Monday-open frame (SN-W11).
+        """
+        if self.week_open_clock is None:
+            raise ValueError(
+                "no week-open clock declared; declare one of "
+                f"{WEEK_OPEN_OPTIONS} (SN-W11/WB-06)")
+        return declare_week_open(self.week_open_clock)
+
+    @property
     def config_hash(self) -> str:
         """The declared-variant configuration hash (SYSTEM_SPEC A2)."""
         # Only declared values enter the payload: an undeclared boundary must
@@ -341,6 +373,10 @@ class SetupConfig:
             extra["day_boundary_required"] = True
         if self.midnight_open_gate:
             extra["midnight_open_gate"] = True
+        if self.week_open_clock is not None:
+            extra["week_open_clock"] = self.week_open_clock
+        if self.weekly_gate:
+            extra["weekly_gate"] = True
         return _config_hash(
             self.variant_config,
             bias_primitive=self.bias_primitive,
@@ -407,6 +443,10 @@ class SetupConfig:
         # read; it is never silently ignored or replaced by a default.
         if self.broker_roll is not None:
             parse_day_clock(self.broker_roll)
+        # P1-05: a declared week clock is validated here, before any bar is
+        # read, and it is never silently replaced by a default week.
+        if self.week_open_clock is not None:
+            declare_week_open(self.week_open_clock)
         resolve_ladder_mode(self.t1_at_r, self.t1_at_eq)
         resolve_be_mode(self.breakeven_at_r, self.t1_move_be,
                         self.ladder_mode_of() != "off")
@@ -754,7 +794,8 @@ class _SetupPrecompute:
     """Everything ``build_setup`` needs per bar, computed once per call."""
 
     def __init__(self, df: pd.DataFrame, result, cfg: "SetupConfig", daily,
-                 spec: StackSpec, day_boundary: DayBoundary | None = None):
+                 spec: StackSpec, day_boundary: DayBoundary | None = None,
+                 week_open: WeekOpen | None = None):
         self.n = len(df)
         self.dates = df["date"]
         self.close = df["close"].to_numpy(float)
@@ -872,6 +913,12 @@ class _SetupPrecompute:
         # key is the anchor bar so a day is read once, not once per CISD.
         self._midnight_opens: dict[int, MidnightOpen | None] = {}
         self._midnight_open_refusals: dict[int, Refusal | None] = {}
+        # P1-05: weekly/monthly buckets built once.  ``None`` means the run
+        # declared no week-open clock, so every weekly field stays absent and
+        # says so; it never means "assume a Monday/Sunday week" (SN-W11).
+        self.week_open = week_open
+        self.weekly = (None if week_open is None
+                       else WeeklyIndex(df, week_open, market=cfg.market))
 
     def bars_ok(self, t: int) -> bool:
         """NaN gate: HTF 1D indicators, 4H indicators and 15m Ichimoku present."""
@@ -934,6 +981,24 @@ class _SetupPrecompute:
         self._midnight_opens[anchor] = opening
         self._midnight_open_refusals[anchor] = refusal
         return opening, refusal
+
+    def weekly_state(self, t: int
+                     ) -> tuple[WeeklyState | None, Refusal | None]:
+        """The weekly state at base bar ``t`` (P1-05 / WB-01..WB-04).
+
+        Reads the per-frame :class:`~ict_trader.context.WeeklyIndex` built once
+        in ``__init__``; PWH/PWL and the weekly HH/HL come from complete,
+        aligned weeks only, so the live week cannot repaint them.  With no
+        declared week clock the result is ``(None, NT_DATA_MISSING)`` and every
+        consumer says "undeclared" rather than assuming a week boundary.
+        """
+        if self.weekly is None:
+            return None, Refusal(
+                RefusalCode.NT_DATA_MISSING,
+                detail=("no week-open clock declared; the weekly state is "
+                        f"undeclared (declare one of {WEEK_OPEN_OPTIONS})"))
+        return self.weekly.state(
+            int(t), variant_ids=self.cfg.variant_config.declared_ids)
 
     def bias_state(self, t: int) -> BiasState:
         """The one :class:`BiasState` for base bar ``t`` (P1-02).
@@ -1337,6 +1402,25 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     if cfg.variant_config.is_declared("V05"):
         midnight_polarity = resolve_daily_polarity(cfg.variant_config)
     daily_ce_value = None if daily_ce is None else float(daily_ce)
+    # P1-05: the week-open clock is a declared run input (SN-W11).  V06 is the
+    # anchor fork (weekly CE vs weekly open).  The gate refuses when either is
+    # undeclared; with the gate off they are still read for evidence when
+    # declared, and no weekly anchor is selected on the run's behalf.
+    week_open_obj: WeekOpen | None = None
+    if cfg.week_open_clock is not None:
+        week_open_obj = declare_week_open(cfg.week_open_clock)
+    weekly_anchor_mode_value: str | None = None
+    if cfg.weekly_gate and not cfg.variant_config.is_declared("V06"):
+        raise VariantUndeclared(
+            "V06",
+            "weekly_gate requires the declared weekly P/D anchor, but V06 is "
+            "unset; declare one of " + ", ".join(WEEKLY_ANCHOR_OPTIONS))
+    if cfg.variant_config.is_declared("V06"):
+        weekly_anchor_mode_value = resolve_weekly_anchor(cfg.variant_config)
+    if cfg.weekly_gate and week_open_obj is None:
+        raise ValueError(
+            "weekly_gate requires the declared week-open clock; declare one of "
+            f"{WEEK_OPEN_OPTIONS} (SN-W11/WB-06)")
     if cfg.origin_filter == "fvg" and cfg.require_sweep:
         cfg = replace(cfg, require_sweep=False)
     spec = _stack_spec(cfg)
@@ -1344,7 +1428,8 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     # All per-bar series are computed once: the loop below visits every CISD
     # (1210 on 20k BTC bars) and previously re-derived ATR, the HTF row lookup,
     # the swing scans and the displacement window each time.
-    pre = _SetupPrecompute(df, result, cfg, daily, spec, day_boundary)
+    pre = _SetupPrecompute(df, result, cfg, daily, spec, day_boundary,
+                           week_open_obj)
     close, high, low, atr14 = pre.close, pre.high, pre.low, pre.atr14
     htf_zones = (_htf_fvg_zones(df, daily, cfg, day_boundary, pre.raw_1d)
                  if cfg.htf_fvg else [])
@@ -1412,6 +1497,76 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                             "no reading for this bar" if open_reading is None
                             else "the declared V05 midnight-open polarity "
                                  "does not match the setup direction"),
+                )
+                continue
+        # P1-05: the weekly state is a snapshot (WB-01..WB-04); the V06 anchor
+        # is one declared read of it.  The gate applies the declared anchor and
+        # the WB-03 monthly ∧ weekly conjunct, refusing with a §12 code; with
+        # the gate off the same objects travel as evidence so a review can see
+        # the weekly context without a second implementation.
+        weekly: WeeklyState | None = None
+        weekly_refusal: Refusal | None = None
+        weekly_anchor: WeeklyAnchor | None = None
+        weekly_anchor_refusal: Refusal | None = None
+        weekly_gate_result: WeeklyGateResult | None = None
+        if pre.weekly is not None:
+            weekly, weekly_refusal = pre.weekly_state(t)
+        if weekly is not None and weekly_anchor_mode_value is not None:
+            weekly_anchor, weekly_anchor_refusal = weekly_anchor_bias(
+                weekly, weekly_anchor_mode_value)
+        if weekly is not None:
+            weekly_gate_result = weekly_bias_gate(weekly, c.direction)
+        if cfg.weekly_gate:
+            if weekly is None:
+                refusal = weekly_refusal
+                _record_refusal(
+                    refusals,
+                    code=(RefusalCode.NT_DATA_MISSING.value if refusal is None
+                          else refusal.code.value),
+                    direction=c.direction, signal_bar=int(t),
+                    gate="weekly_state", week_open_clock=cfg.week_open_clock,
+                    detail=("" if refusal is None else refusal.detail),
+                )
+                continue
+            if weekly_anchor is None:
+                refusal = weekly_anchor_refusal
+                _record_refusal(
+                    refusals,
+                    code=(RefusalCode.NT_NO_BIAS.value if refusal is None
+                          else refusal.code.value),
+                    direction=c.direction, signal_bar=int(t),
+                    gate="weekly_anchor",
+                    weekly_anchor_mode=weekly_anchor_mode_value,
+                    detail=("" if refusal is None else refusal.detail),
+                )
+                continue
+            if weekly_anchor.bias is not parse_bias(c.direction):
+                _record_refusal(
+                    refusals, code=RefusalCode.NT_BIAS_GATE.value,
+                    direction=c.direction, signal_bar=int(t),
+                    gate="weekly_anchor",
+                    weekly_anchor_mode=weekly_anchor_mode_value,
+                    weekly_anchor_price=weekly_anchor.anchor_price,
+                    weekly_anchor_bias=serialize_bias(weekly_anchor.bias),
+                    detail=("the declared V06 weekly anchor does not match the "
+                            "setup direction"),
+                )
+                continue
+            if (weekly_gate_result is not None
+                    and weekly_gate_result.refusal is not None):
+                refusal = weekly_gate_result.refusal
+                _record_refusal(
+                    refusals, code=refusal.code.value,
+                    direction=c.direction, signal_bar=int(t),
+                    gate="weekly_gate",
+                    weekly_structure=serialize_bias(
+                        weekly_gate_result.weekly_structure),
+                    monthly_structure=serialize_bias(
+                        weekly_gate_result.monthly_structure),
+                    ce_wk=weekly_gate_result.ce_wk,
+                    price=weekly_gate_result.price,
+                    downgraded=bool(weekly_gate_result.downgraded),
+                    detail=refusal.detail,
                 )
                 continue
         # P0-09: the HTF gate reads structure on spec.bias_tf, not on the
@@ -1672,6 +1827,42 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                     None if open_refusal is None
                     else {"code": open_refusal.code.value,
                           "detail": open_refusal.detail}),
+                # P1-05: the weekly state (PWH/PWL, CE_wk, weekly/monthly
+                # HH/HL, week open), the declared V06 anchor reading, and the
+                # WB-03 gate result.  ``None``/"" means the object was not
+                # declared or not available; no weekly probability is emitted
+                # because the corpus states none (weekly_bias R20).
+                "week_open_clock": cfg.week_open_clock,
+                "week_open_clock_source": (
+                    None if week_open_obj is None else week_open_obj.source),
+                "weekly_state_declared": weekly is not None,
+                "weekly_state": (None if weekly is None
+                                 else weekly.to_public()),
+                "weekly_state_refusal": (
+                    None if weekly_refusal is None
+                    else {"code": weekly_refusal.code.value,
+                          "detail": weekly_refusal.detail}),
+                "weekly_anchor_mode": weekly_anchor_mode_value,
+                "weekly_anchor_source": (
+                    None if weekly_anchor_mode_value is None
+                    else WEEKLY_ANCHOR_SOURCES[weekly_anchor_mode_value]),
+                "weekly_anchor": (None if weekly_anchor is None
+                                  else weekly_anchor.to_public()),
+                "weekly_anchor_refusal": (
+                    None if weekly_anchor_refusal is None
+                    else {"code": weekly_anchor_refusal.code.value,
+                          "detail": weekly_anchor_refusal.detail}),
+                "weekly_gate_enabled": bool(cfg.weekly_gate),
+                "weekly_gate_result": (
+                    None if weekly_gate_result is None
+                    else weekly_gate_result.to_public()),
+                "weekly_gate_refusal": (
+                    None if weekly_gate_result is None
+                    or weekly_gate_result.refusal is None
+                    else {"code": weekly_gate_result.refusal.code.value,
+                          "detail": weekly_gate_result.refusal.detail}),
+                "weekly_probability_status": WEEKLY_PROBABILITY_STATUS,
+                "weekly_probability_source": WEEKLY_PROBABILITY_SOURCE,
                 "daily_ce": daily_ce_value,
                 "daily_open_vs_ce": (
                     None if open_comparison is None
