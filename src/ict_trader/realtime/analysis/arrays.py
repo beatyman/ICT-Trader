@@ -45,11 +45,16 @@ from typing import Any
 import pandas as pd
 
 from ...concepts import (
+    ARRAY_SIDES,
+    DEFAULT_ARRAY_ORDER_MODE,
+    DEFAULT_ARRAY_SIDE_MODE,
+    DEFAULT_ARRAY_TOTAL_ORDER,
     ArrayState,
     ICTConfig,
     GapConsequentEncroachment,
     OrderBlockBodyMean,
     RangeEquilibrium,
+    array_side,
     build_zigzag,
     cisd_config,
     detect_bpr,
@@ -62,6 +67,7 @@ from ...concepts import (
     detect_structure,
     find_pivots,
     knowledge_state,
+    scan_arrays,
     validate_array_state,
 )
 from ...enhancements import detect_session_levels
@@ -97,6 +103,21 @@ class ICTArray:
     ob_body_mean: OrderBlockBodyMean | None = None
     htf_range_id: str = ""
     engine_version: str = "ict-arrays-1.0.0"
+    #: AS-04: the declared side tag and the mode that produced it.  ``side`` is
+    #: ``None`` when the declared mode cannot locate the array (e.g. a
+    #: by-position array straddling price); no default side is invented.
+    side: str | None = None
+    side_mode: str = ""
+    #: AR-09/AR-23: the first return into an inverted/breaker zone after its
+    #: creation, recorded separately from ``swept_at`` because a retest is the
+    #: **use** event, not an invalidation.
+    retest_at: int | None = None
+    #: AR-21: the bar the parent OB failed (breakers only).
+    failure_bar: int | None = None
+    #: V22: the declared IFVG removal rule (empty when undeclared).
+    removal_mode: str = ""
+    #: AS-09: reference geometry only; never an entry array.
+    reference_only: bool = False
 
     def __post_init__(self) -> None:
         validate_array_state(self.state)
@@ -148,6 +169,11 @@ class ICTArray:
             "formed_at": self.formed_at, "swept_at": self.swept_at,
             "invalidated_at": self.invalidated_at, "known_at": self.known_at,
             "state": self.state, "is_active": self.is_active,
+            "side": self.side, "side_mode": self.side_mode,
+            "retest_at": self.retest_at,
+            "failure_bar": self.failure_bar,
+            "removal_mode": self.removal_mode,
+            "reference_only": self.reference_only,
         }
 
 
@@ -163,35 +189,55 @@ def _direction(value: str) -> str:
     return "bullish" if value == "bull" else "bearish"
 
 
-def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[ICTArray]:
+def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str, *,
+                     config: ICTConfig | None = None,
+                     side_mode: str | None = None) -> list[ICTArray]:
     """Build the complete array inventory for ``frame``.
 
     The returned list is the selection inventory: every constructed array is
     present, including active arrays older than the newest per type.  Use
     :func:`present_ict_arrays` when the caller only needs a drawable view.
+
+    P1-09: every array carries its AS-04 ``side``/``side_mode`` tag, an IFVG
+    carries its AR-09 ``retest_at`` and any declared V22 removal, and a breaker
+    carries its AR-21 failure bar and AR-23 retest.  ``config`` exposes the
+    declared V19/V20/V22/AR-13 choices; the defaults are the labelled repo
+    readings documented on :class:`ICTConfig`.
     """
     if frame is None or len(frame) < 8:
         return []
     df = frame.reset_index(drop=True).copy()
     ms = [dt_to_ms(pd.Timestamp(x).to_pydatetime()) for x in df["date"]]
-    cfg = ICTConfig()
+    cfg = config or ICTConfig()
+    last_close = float(df["close"].iloc[-1])
+    tag_mode = cfg.array_side_mode if side_mode is None else side_mode
 
     pivots = find_pivots(df, cfg.swing_len, 1)
     swings = build_zigzag(pivots)
     events, _ = detect_structure(df, swings)
 
     fvgs = detect_fvgs(df, cfg)
-    ifvgs = detect_ifvg(list(fvgs), df) if cfg.show_ifvg else []
-    bprs = detect_bpr(list(fvgs)) if cfg.show_bpr else []
-    order_blocks = detect_order_blocks(df, events, swings, cfg)
+    ifvgs = (detect_ifvg(list(fvgs), df, removal=(cfg.ifvg_removal or None))
+             if cfg.show_ifvg else [])
+    bprs = (detect_bpr(list(fvgs), df, candle_floor=cfg.bpr_candle_floor)
+            if cfg.show_bpr else [])
     # A breaker is a failed order block (PP:C9/R4); the declared tier needs the
-    # sweep inventory at detection time (P0-20).  P1-09 owns its retest gate.
+    # sweep inventory at detection time (P0-20).  P1-09 adds the declared V20
+    # failure test/geometry and the AR-23 retest gate (the retest is a use
+    # condition, so it is recorded on the object, never used to filter it out).
+    # The sweep inventory is built first so the V19 ``grab`` gate and the
+    # sequenced breaker tier read the same objects the analysis path does.
     liquidity = detect_liquidity(df, pivots, cfg)
     sessions = detect_session_levels(df)
     key_levels = detect_key_levels(df, swings, sessions, liquidity)
     sweeps = (detect_sweeps(df, key_levels, reclaim_window=cfg.sweep_reclaim_bars)
               if cfg.show_sweeps else [])
-    breakers = detect_breakers(order_blocks, sweeps, tier=cfg.breaker_tier)
+    order_blocks = detect_order_blocks(df, events, swings, cfg,
+                                       fvgs=fvgs, sweeps=sweeps)
+    breakers = detect_breakers(order_blocks, sweeps, tier=cfg.breaker_tier,
+                               df=df, fvgs=fvgs,
+                               failure_test=cfg.breaker_failure_test,
+                               geometry=cfg.breaker_geometry)
 
     cisds = []
     if cfg.show_cisd:
@@ -213,7 +259,11 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
             state: ArrayState | None = None,
             range_equilibrium: RangeEquilibrium | None = None,
             gap_ce: GapConsequentEncroachment | None = None,
-            ob_body_mean: OrderBlockBodyMean | None = None) -> None:
+            ob_body_mean: OrderBlockBodyMean | None = None,
+            retest_at: int | None = None,
+            failure_bar: int | None = None,
+            removal_mode: str = "",
+            reference_only: bool = False) -> None:
         nonlocal serial
         serial += 1
         upper, lower = float(upper), float(lower)
@@ -239,6 +289,13 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
                 state = "intact"
         else:
             validate_array_state(state)
+        # AS-04: the side tag is produced by the declared mode and carried with
+        # it.  A neutral object has no by-type side; no side is invented.
+        side = None
+        if direction in ("bullish", "bearish") or tag_mode != "by_type":
+            tag = array_side(direction, price=last_close, top=upper,
+                             bottom=lower, mode=tag_mode)
+            side = tag.side
         stable = f"{symbol}|{interval}|{kind}|{formed}|{serial}"
         aid = "ARR-" + hashlib.sha1(stable.encode()).hexdigest()[:20]
         arrays.append(ICTArray(
@@ -247,6 +304,9 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
             swept, invalidated, known, state,
             range_equilibrium=range_equilibrium, gap_ce=gap_ce,
             ob_body_mean=ob_body_mean,
+            side=side, side_mode=tag_mode, retest_at=retest_at,
+            failure_bar=failure_bar, removal_mode=removal_mode,
+            reference_only=reference_only,
         ))
 
     for f in fvgs:
@@ -258,13 +318,18 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
             gap_ce=GapConsequentEncroachment(f.ce))
 
     for f in ifvgs:
+        invalidated = ms[f.removed_at] if f.removed_at is not None else None
         add("IFVG", _direction(f.direction), f.top, f.bottom, ms[f.created],
             known_at=ms[f.known_at],
+            retest_at=(ms[f.t_retest] if f.t_retest is not None else None),
+            invalidated=invalidated, removal_mode=f.removal_mode,
             gap_ce=GapConsequentEncroachment(f.ce))
 
     for f in bprs:
+        invalidated = None if f.active else ms[f.right]
+        swept = ms[f.touched_at] if f.touched_at is not None else None
         add("BPR", _direction(f.direction), f.top, f.bottom, ms[f.created],
-            known_at=ms[f.known_at],
+            known_at=ms[f.known_at], swept=swept, invalidated=invalidated,
             gap_ce=GapConsequentEncroachment(f.ce))
 
     for ob in order_blocks:
@@ -274,12 +339,16 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str) -> list[IC
             known_at=ms[ob.known_at], swept=swept, invalidated=invalidated,
             ob_body_mean=OrderBlockBodyMean(ob.mean))
 
-    # A breaker is a zone; its knowledge time is the flip/confirmation bar.
+    # A breaker is a zone; its knowledge time is the flip/confirmation bar.  The
+    # AR-23 retest is recorded but never filters the object out: the breaker
+    # exists at the failure bar and becomes *usable* only after the return.
     for br in breakers:
         confirmed = int(br.confirmed_at)
         add("BREAKER", _direction(br.direction), br.top, br.bottom,
             ms[confirmed], known_at=ms[confirmed],
-            anchor=float((br.top + br.bottom) / 2.0))
+            anchor=float((br.top + br.bottom) / 2.0),
+            retest_at=(ms[br.retest_at] if br.retest_at is not None else None),
+            failure_bar=(ms[br.failure_bar] if br.failure_bar is not None else None))
 
     # A CISD is a close-through level (a line), so it is emitted as an invalid
     # array rather than a zero-height zone.  Both directions share one type id.
@@ -332,3 +401,37 @@ def present_ict_arrays(arrays: list[ICTArray], *,
         limit = limits.get(kind)
         selected.extend(subset if limit is None else subset[-max(int(limit), 0):])
     return selected + inactive
+
+
+def scan_ict_arrays(arrays: list[ICTArray], *, roster: object,
+                    order_mode: str = DEFAULT_ARRAY_ORDER_MODE,
+                    total_order: str = DEFAULT_ARRAY_TOTAL_ORDER,
+                    side_mode: str | None = None,
+                    direction: object | None = None,
+                    half: str | None = None,
+                    price: float | None = None,
+                    at: int | None = None) -> tuple[list[ICTArray], object]:
+    """§7.3 selection over the realtime inventory (V09/V26, AS-01..AS-09).
+
+    A thin delegation to :func:`ict_trader.concepts.scan_arrays`: the roster,
+    side mode and order are declared once in ``concepts.py`` (A7) and this
+    wrapper only supplies the realtime array objects.  When ``side_mode`` is
+    omitted it is read from the inventory's own AS-04 declaration, so a scan
+    cannot silently re-tag a by-position inventory as by-type.  The declared
+    order is a **scan order**, not a guarantee price cannot trade through a
+    breaker (AS-05); freshness demotes instead of deleting (AS-07).
+    """
+    if half is not None and half not in ARRAY_SIDES:
+        raise ValueError(
+            f"unknown admitted half {half!r}; declare one of {ARRAY_SIDES}")
+    if side_mode is None:
+        modes = {array.side_mode for array in arrays if array.side_mode}
+        if len(modes) > 1:
+            raise ValueError(
+                f"the inventory mixes side modes {sorted(modes)}; scan one "
+                f"declared mode at a time (AS-04)")
+        side_mode = modes.pop() if modes else DEFAULT_ARRAY_SIDE_MODE
+    return scan_arrays(
+        arrays, roster=roster, order_mode=order_mode, total_order=total_order,
+        side_mode=side_mode, direction=direction, half=half, price=price,
+        at=at)

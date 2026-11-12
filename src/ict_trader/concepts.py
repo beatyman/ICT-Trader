@@ -30,6 +30,7 @@ from bisect import bisect_left, bisect_right, insort
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Iterable, Literal
 
 import matplotlib
@@ -52,9 +53,12 @@ from .context import (
     in_session_at,
 )
 from .enhancements import SMT, SessionLevel, detect_htf_cisds, detect_session_levels, detect_smt
-from .pd_arrays import (DEFAULT_BREAKER_TIER, PDAArray, detect_breakers,
+from .pd_arrays import (BREAKER_RETEST_WINDOW, DEFAULT_BREAKER_FAILURE,
+                        DEFAULT_BREAKER_GEOMETRY, DEFAULT_BREAKER_TIER,
+                        PDAArray, breaker_retest_at, detect_breakers,
                         detect_mitigations, detect_rejections)
 from .sweeps import KeyLevel, LiquiditySweep, detect_key_levels, detect_sweeps, nearest_key_target, score_key_levels
+from .variants import Refusal, RefusalCode, VariantUndeclared, read_variant_spec
 
 Direction = Literal["bull", "bear"]
 
@@ -169,6 +173,333 @@ STRUCTURE_LEVEL_SELECTION_SOURCES: dict[str, dict[str, str]] = {
                    "event attaches the nearest broken level"),
     },
 }
+
+# ---------------------------------------------------------------------------
+# P1-09: array family completion (AR-05/09/13/14/19/23, AS-01..09, V09/V19/V20/V22/V26)
+# ---------------------------------------------------------------------------
+#: AR-05: the FVG quadrants.  ``0.50`` is the CE; ``0.25``/``0.75`` are
+#: **grading only** and are never an entry gate or an entry level.  The values
+#: are corpus (single publisher, [PP:FVG-08]) and are not inferred.
+FVG_QUADRANTS: tuple[float, ...] = (0.25, 0.50, 0.75)
+FVG_QUADRANT_SOURCE = "AR-05 [PP:FVG-08]: 0.25/0.50/0.75; CE is 0.50; grading only"
+FVG_QUADRANT_ROLE = "grading_only"
+
+#: RE:EX-03: the entry menu over an array.  The quadrants are deliberately
+#: absent: AR-05 makes them a grade, not an entry.
+ENTRY_MENU = ("ce", "near_edge", "far_edge", "ltf_confirmation")
+
+#: V22 (PP:C10): the four incompatible IFVG removal rules.  The options are read
+#: from the one register (A7), never re-typed.  A run must declare one; no
+#: removal rule is applied silently.
+IFVG_REMOVAL_MODES: tuple[str, ...] = tuple(read_variant_spec("V22").options)
+IFVG_REMOVAL_SOURCES: dict[str, str] = {
+    "close-back": ("R19/R26 [doc_0193] 'a close back through the far side "
+                   "removes the zone'; declared reading: the first close back "
+                   "through the edge the inversion broke (the flip is undone)"),
+    "dead-return": ("R20/R26 [doc_0614]: a return that passes fully through "
+                    "the inverted zone without reaction is mitigated and "
+                    "removed (requires the AR-09 return visit)"),
+    "second close": ("R19/R26 [doc_0215]: a close through the far edge "
+                     "converts the gap; a second close through the far edge "
+                     "removes it (the inversion close counts as the first)"),
+    "never": ("doc_0068/doc_0522 state no removal rule; the zone is kept "
+              "until the declared range/lifecycle ends"),
+}
+
+#: AR-13 (corpus, single publisher): the BPR needs two three-candle gaps, i.e.
+#: six or more candles.  The floor is applied only when declared: three cited
+#: sources state no temporal constraint at all (BPR C2), so the repo's
+#: ``None`` reading is the labelled "no temporal constraint" option and is not
+#: a silent invention of a number.
+BPR_CANDLE_FLOOR = 6
+BPR_CANDLE_FLOOR_SOURCE = ("AR-13 [PP:BPR-06]: 6+ (two sets of three); "
+                           "corpus single publisher")
+BPR_FLOOR_BASIS = ("two three-candle groups: span = "
+                   "second.created - first.created + 3")
+
+#: V19 (PP:C4/C5): OB zone extent and admission gates.  ``hybrid`` is the
+#: repo-labelled zone already recorded at SYSTEM_SPEC §13.6; the other three
+#: existences are the corpus's own list.  ``unspecified`` has no construction
+#: rule, so declaring it refuses instead of inventing a rectangle.
+OB_EXTENTS: tuple[str, ...] = ("full_range", "body", "unspecified", "hybrid")
+DEFAULT_OB_EXTENT = "hybrid"
+OB_EXTENT_SOURCES: dict[str, dict[str, str]] = {
+    "full_range": {"label": "corpus", "ar16": "variant A: [low[t*], high[t*]]"},
+    "body": {"label": "corpus", "ar16": "variant B: [min(o,c), max(o,c)]"},
+    "unspecified": {"label": "missing",
+                    "ar16": "third corpus position; no construction rule"},
+    "hybrid": {"label": "repo",
+               "ar16": "SYSTEM_SPEC §13.6 repo hybrid: body near side, wick far side"},
+}
+
+#: AR-19: the three admission gate sets.  ``break_required`` is the event-driven
+#: gate the module already implements; ``imbalance_constitutive`` needs the FVG
+#: inventory and ``grab`` needs the sweep inventory.  A declared gate with no
+#: matching evidence emits no OB (fail closed), it never falls back.
+OB_ADMISSION_GATES: tuple[str, ...] = (
+    "break_required", "imbalance_constitutive", "grab")
+DEFAULT_OB_GATE = "break_required"
+OB_GATE_SOURCES: dict[str, dict[str, str]] = {
+    "break_required": {"label": "corpus", "ar19": "a structure break precedes the block"},
+    "imbalance_constitutive": {"label": "corpus",
+                               "ar19": "an imbalance is constitutive of the block"},
+    "grab": {"label": "corpus", "ar19": "OB-local grab (liquidity taken at the block)"},
+}
+
+
+def validate_ob_extent(extent: str) -> str:
+    """V19: accept a declared OB extent; ``unspecified`` has no rule.
+
+    The corpus permits the word but supplies no construction, so declaring it
+    refuses with :class:`~ict_trader.variants.VariantUndeclared`
+    (``NT_VARIANT_UNDECLARED``) instead of inventing a rectangle.
+    """
+    if extent == "unspecified":
+        raise VariantUndeclared(
+            "V19", "the OB extent 'unspecified' has no construction rule; "
+                   "declare full_range, body or the labelled hybrid")
+    if extent not in OB_EXTENTS:
+        raise ValueError(
+            f"unknown OB extent {extent!r}; declare one of {OB_EXTENTS} (V19)")
+    return extent
+
+
+def validate_ob_gate(gate: str) -> str:
+    """V19: accept a declared OB admission gate, choose nothing."""
+    if gate not in OB_ADMISSION_GATES:
+        raise ValueError(
+            f"unknown OB admission gate {gate!r}; declare one of "
+            f"{OB_ADMISSION_GATES} (V19/AR-19)")
+    return gate
+
+#: AS-01..AS-04: three competing side functions.  ``by_type`` is the corpus
+#: majority (AS-01) and the declared repo reading; a caller may declare
+#: ``by_position`` or ``by_role`` instead.  Each yields opposite labels on one
+#: class of object, which is why the mode travels with every tag.
+SIDE_MODES: tuple[str, ...] = ("by_type", "by_position", "by_role")
+DEFAULT_ARRAY_SIDE_MODE = "by_type"
+ARRAY_SIDES: tuple[str, ...] = ("premium", "discount")
+SIDE_MODE_SOURCES: dict[str, dict[str, str]] = {
+    "by_type": {"label": "corpus", "as01": "bearish array => premium; bullish => discount"},
+    "by_position": {"label": "corpus", "as03": "premium <=> array above price"},
+    "by_role": {"label": "corpus",
+                "as02": "supply/old-low-as-resistance => premium; demand => discount"},
+}
+
+#: The corpus roster sizes (V09).  The member rule is *not* one union: the
+#: corpus prints five unreconciled rosters (AS-06), so each is a separate
+#: declared object and a max-union roster is refused.
+ARRAY_ROSTER_SIZES: tuple[int, ...] = (3, 6, 7, 8, 9)
+ARRAY_MEMBER_CLASSES: tuple[str, ...] = (
+    "fvg", "ifvg", "bpr", "order_block", "breaker", "mitigation",
+    "rejection", "liquidity_void", "unicorn", "old_high", "old_low",
+    "old_high_low", "liquidity_pool", "nwog", "ndog",
+)
+
+#: Map an array's type id (both the ``concepts`` spellings and the realtime
+#: ``ICTArray.array_type`` spellings) onto the roster's member vocabulary.
+ARRAY_TYPE_MEMBERS: dict[str, tuple[str, ...]] = {
+    "fvg": ("fvg",), "FVG": ("fvg",),
+    "ifvg": ("ifvg",), "IFVG": ("ifvg",),
+    "bpr": ("bpr",), "BPR": ("bpr",),
+    "ob": ("order_block",), "OB": ("order_block",),
+    "order_block": ("order_block",), "OrderBlock": ("order_block",),
+    "breaker": ("breaker",), "BREAKER": ("breaker",),
+    "mitigation": ("mitigation",), "MITIGATION": ("mitigation",),
+    "rejection": ("rejection",), "REJECTION": ("rejection",),
+    # A CISD is a close-through line and a DEALING_RANGE is the range itself;
+    # neither is a member of any corpus roster.
+    "CISD": (), "DEALING_RANGE": (),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ArrayRoster:
+    """One declared V09 roster: a size and its exact member classes.
+
+    ``declared_size`` must be one of :data:`ARRAY_ROSTER_SIZES` and must equal
+    ``len(members)``.  The corpus's 9-member roster prints only eight names; a
+    count defect is recorded in ``count_note`` and is never repaired silently
+    (AS-06 forbids the max-union).
+    """
+
+    name: str
+    declared_size: int
+    members: tuple[str, ...]
+    source: str
+    count_note: str = ""
+
+    def __post_init__(self) -> None:
+        if self.declared_size not in ARRAY_ROSTER_SIZES:
+            raise ValueError(
+                f"unknown roster size {self.declared_size!r}; the corpus "
+                f"attests {ARRAY_ROSTER_SIZES} (V09/AS-06)")
+        if not self.members:
+            raise ValueError(f"{self.name}: the roster has no members")
+        if len(set(self.members)) != len(self.members):
+            raise ValueError(f"{self.name}: duplicate roster members")
+        unknown = set(self.members) - set(ARRAY_MEMBER_CLASSES)
+        if unknown:
+            raise ValueError(
+                f"{self.name}: unknown member classes {sorted(unknown)}; the "
+                f"corpus vocabulary is {ARRAY_MEMBER_CLASSES}")
+        if len(self.members) != self.declared_size:
+            # The corpus's 9-member roster prints eight names (doc_0415).  That
+            # single recorded defect is the only permitted mismatch; any other
+            # mismatch would be a silently repaired roster (AS-06).
+            if not (self.declared_size == 9 and len(self.members) == 8
+                    and self.count_note):
+                raise ValueError(
+                    f"{self.name}: declared size {self.declared_size} != "
+                    f"{len(self.members)} printed members; a count defect must "
+                    f"be recorded, never repaired (AS-06)")
+        if not self.source.strip():
+            raise ValueError(f"{self.name}: no source citation")
+
+    def admits(self, array_type: object) -> bool:
+        """True only when the array's class is a declared roster member."""
+        member = str(array_type)
+        classes = ARRAY_TYPE_MEMBERS.get(member, (member.lower(),))
+        return any(cls in self.members for cls in classes)
+
+
+#: The five rosters the corpus prints, each kept separate (AS-06).  The
+#: 9-member header prints eight names; the defect is recorded, not repaired.
+ARRAY_ROSTERS: MappingProxyType = MappingProxyType({
+    "corpus_3": ArrayRoster(
+        "corpus_3", 3, ("fvg", "old_high_low", "liquidity_pool"),
+        "[SN:C25] doc_0541 dedup_batch_107.md:174"),
+    "corpus_6": ArrayRoster(
+        "corpus_6", 6,
+        ("old_high_low", "rejection", "order_block", "fvg", "breaker",
+         "mitigation"),
+        "[SN:C25] doc_0364 dedup_batch_073.md:87-88 (a bulletin, not a ladder)"),
+    "corpus_7": ArrayRoster(
+        "corpus_7", 7,
+        ("mitigation", "breaker", "liquidity_void", "fvg", "order_block",
+         "rejection", "old_high_low"),
+        "[SN:C25] doc_0439 dedup_batch_043.md:267"),
+    "corpus_7_ladder": ArrayRoster(
+        "corpus_7_ladder", 7,
+        ("old_high_low", "rejection", "order_block", "fvg", "liquidity_void",
+         "breaker", "mitigation"),
+        "[SN:C25] doc_0291 dedup_batch_071.md:42"),
+    "corpus_8": ArrayRoster(
+        "corpus_8", 8,
+        ("fvg", "ifvg", "order_block", "breaker", "mitigation", "unicorn",
+         "nwog", "ndog"),
+        "[SN:C25] doc_0518 dedup_batch_065.md:230"),
+    "corpus_9": ArrayRoster(
+        "corpus_9", 9,
+        ("mitigation", "breaker", "liquidity_void", "fvg", "order_block",
+         "rejection", "old_high", "old_low"),
+        "[SN:C25] doc_0415 dedup_batch_051.md:124",
+        count_note=("header says nine bearish objects but eight names are "
+                    "printed; recorded not repaired (AS-06)")),
+})
+
+#: V09's ordering axis and the concrete total orders.  ``ladder_reversed`` is
+#: doc_0291's scan order (R16); ``breaker_first`` applies R17's breaker
+#: precedence to that ladder.  ``proximity`` is the competing R19 rule.
+ARRAY_ORDER_MODES: tuple[str, ...] = ("total_order", "proximity", "none")
+ARRAY_TOTAL_ORDERS: dict[str, tuple[str, ...]] = {
+    "ladder_reversed": ("mitigation", "breaker", "liquidity_void", "fvg",
+                        "order_block", "rejection", "old_high_low"),
+    "breaker_first": ("breaker", "mitigation", "liquidity_void", "fvg",
+                      "order_block", "rejection", "old_high_low"),
+}
+DEFAULT_ARRAY_ORDER_MODE = "total_order"
+DEFAULT_ARRAY_TOTAL_ORDER = "breaker_first"
+ARRAY_ORDER_SOURCES: dict[str, dict[str, str]] = {
+    "ladder_reversed": {"label": "corpus",
+                        "r16": "mitigation -> breaker -> void -> FVG -> OB -> rejection -> old high/low"},
+    "breaker_first": {"label": "corpus",
+                      "r17": "the breaker has precedence over everything (scan order, not a guarantee)"},
+    "proximity": {"label": "corpus",
+                  "r19": "nearest array first, outward from price; explicitly not a type ranking"},
+    "none": {"label": "corpus",
+             "section": "§7.3-4: no order is rejected (it cannot select)"},
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ArraySideTag:
+    """One array's AS-01..AS-04 side label under the declared mode."""
+
+    side: str | None
+    mode: str
+    source: str
+    at_price: bool = False
+
+    def __post_init__(self) -> None:
+        if self.side is not None and self.side not in ARRAY_SIDES:
+            raise ValueError(f"unknown array side {self.side!r}")
+        if self.mode not in SIDE_MODES:
+            raise ValueError(f"unknown side_mode {self.mode!r}")
+
+
+def _normalise_direction(direction: object) -> str:
+    value = str(direction).strip().lower()
+    if value in ("bull", "bullish", "long", "buy"):
+        return "bull"
+    if value in ("bear", "bearish", "short", "sell"):
+        return "bear"
+    return ""
+
+
+def array_side(direction: object, *, price: float | None = None,
+               top: float | None = None, bottom: float | None = None,
+               mode: str = DEFAULT_ARRAY_SIDE_MODE,
+               role: str | None = None) -> ArraySideTag:
+    """AS-04: one side tag under exactly one declared ``side_mode``.
+
+    * ``by_type``     -- AS-01: a bearish array is ``premium``, a bullish array
+      ``discount``.
+    * ``by_position`` -- AS-03: ``premium`` iff the array is above price,
+      ``discount`` iff below.  An array straddling the price has **no**
+      positional side (``side=None``, ``at_price=True``) rather than a silent
+      default; the caller must refuse.
+    * ``by_role``     -- AS-02: an old low acting as resistance is a *premium*
+      array and a historical high acting as support a *discount* array, so the
+      role (supply/demand) is required and never inferred from direction.
+
+    The three functions disagree on at least one class of object (AS-04), which
+    is why the chosen mode is carried on every tag.
+    """
+    if mode not in SIDE_MODES:
+        raise ValueError(
+            f"unknown side_mode {mode!r}; declare one of {SIDE_MODES} (AS-04)")
+    side_dir = _normalise_direction(direction)
+    source = SIDE_MODE_SOURCES[mode].get(
+        {"by_type": "as01", "by_position": "as03", "by_role": "as02"}[mode], "")
+    if mode == "by_type":
+        if side_dir not in ("bull", "bear"):
+            raise ValueError(
+                f"by_type needs a bull/bear array direction, got {direction!r}")
+        side = "discount" if side_dir == "bull" else "premium"
+        return ArraySideTag(side, mode, source)
+    if mode == "by_position":
+        if price is None or top is None or bottom is None:
+            raise ValueError(
+                "by_position needs price and the array bounds (AS-03)")
+        high, low = max(float(top), float(bottom)), min(float(top), float(bottom))
+        if low > float(price):
+            return ArraySideTag("premium", mode, source)
+        if high < float(price):
+            return ArraySideTag("discount", mode, source)
+        return ArraySideTag(None, mode, source, at_price=True)
+    # by_role
+    if role is None:
+        raise ValueError(
+            "by_role needs the array's supply/demand role; it is never inferred "
+            "from direction (AS-02/AS-04)")
+    value = str(role).strip().lower()
+    if value in ("supply", "resistance", "premium"):
+        return ArraySideTag("premium", mode, source)
+    if value in ("demand", "support", "discount"):
+        return ArraySideTag("discount", mode, source)
+    raise ValueError(f"unknown array role {role!r}; declare supply or demand")
+
 
 # ---------------------------------------------------------------------------
 # P1-07: structure labels, the V07 MSS family and the ST-09 level mains
@@ -344,6 +675,25 @@ class ICTConfig:
     #: PP:C9/R4: which breaker tier is emitted (``minimal`` flips a failed OB;
     #: ``sequenced`` additionally requires a sweep before the flip).
     breaker_tier: str = DEFAULT_BREAKER_TIER
+    #: P1-09 / V20: the declared breaker failure test (AR-21) and geometry
+    #: (AR-22).  Both are BLOCK forks in §14.2; the defaults are the labelled
+    #: repo readings (``close`` / ``parent_ob``) and are never corpus claims.
+    breaker_failure_test: str = DEFAULT_BREAKER_FAILURE
+    breaker_geometry: str = DEFAULT_BREAKER_GEOMETRY
+    #: P1-09 / V19: the declared OB zone extent and admission gate.
+    ob_extent: str = DEFAULT_OB_EXTENT
+    ob_gate: str = DEFAULT_OB_GATE
+    #: P1-09 / V22: the declared IFVG removal rule.  Empty means the fork is
+    #: undeclared: the IFVG is still labelled (AR-06..AR-09) but no removal is
+    #: applied, and the array records ``removal_mode=""``.  No rule is chosen
+    #: on the caller's behalf (§14.1-4).
+    ifvg_removal: str = ""
+    #: P1-09 / AR-13: the declared BPR candle floor.  ``None`` is the labelled
+    #: "no temporal constraint" reading; ``6`` enforces the corpus single
+    #: publisher floor.  There is no other value in the corpus.
+    bpr_candle_floor: int | None = None
+    #: P1-09 / AS-04: the declared array side tag mode.
+    array_side_mode: str = DEFAULT_ARRAY_SIDE_MODE
 
 
 @dataclass
@@ -413,11 +763,69 @@ class FVG:
     first_presented: bool = False
     touched_at: int | None = None
     signal_id: str = ""
+    #: AR-09: first return into the inverted zone after ``invert_bar`` (IFVGs
+    #: only).  The inversion and the retest are separate events: the close
+    #: produces the label, the retest is the entry opportunity.
+    t_retest: int | None = None
+    #: AR-08/AR-09: the parent gap's creation bar, so the flip keeps its
+    #: provenance instead of overwriting ``created`` with the inversion bar.
+    parent_created: int | None = None
+    #: V22: the declared removal rule that produced ``removed_at`` (empty when
+    #: the fork is undeclared or the rule is ``never``).
+    removal_mode: str = ""
+    #: V22: the bar the declared removal rule retired the IFVG (``None`` while
+    #: not removed).  This is the LQ-06 ``broken`` bar, not the inversion bar.
+    removed_at: int | None = None
 
     @property
     def ce(self) -> float:
         """Consequent Encroachment: the 50% midpoint of the gap."""
         return (float(self.top) + float(self.bottom)) / 2.0
+
+    def waypoint(self, fraction: float) -> float:
+        """AR-05: the grading level at ``fraction`` of the zone.
+
+        Only ``0.25 / 0.50 / 0.75`` are attested; any other fraction is
+        refused rather than interpolated into an invented level.
+        """
+        value = float(fraction)
+        if value not in FVG_QUADRANTS:
+            raise ValueError(
+                f"FVG waypoint {fraction!r} is not declared; the corpus "
+                f"attests {FVG_QUADRANTS} (AR-05)")
+        return float(self.bottom) + value * (float(self.top) - float(self.bottom))
+
+    @property
+    def waypoints(self) -> dict[float, float]:
+        """AR-05: the three quadrant levels; ``0.50`` is exactly :attr:`ce`."""
+        return {fraction: self.waypoint(fraction) for fraction in FVG_QUADRANTS}
+
+    def entry_levels(self) -> dict[str, float]:
+        """RE:EX-03: the entry menu over this array -- never a quadrant.
+
+        ``near_edge`` is the edge price meets first on the retrace (``top`` for
+        a bullish array, ``bottom`` for a bearish one); ``far_edge`` is the
+        other bound.  AR-05's waypoints are grading only, so they are absent.
+        """
+        return {
+            "ce": self.ce,
+            "near_edge": float(self.top if self.direction == "bull" else self.bottom),
+            "far_edge": float(self.bottom if self.direction == "bull" else self.top),
+        }
+
+    @property
+    def is_ifvg(self) -> bool:
+        """True only for the flipped object, never for its mutated parent.
+
+        ``detect_ifvg`` marks the parent ``inverted=True`` as well; the parent
+        keeps its ``FVG`` label and must not be re-read as an IFVG (AR-08's
+        direction rule applies to the new object only).
+        """
+        return bool(self.label == "IFVG")
+
+    def removal_allowed(self) -> bool:
+        """V22: true only when the removal rule was explicitly declared."""
+        return bool(self.removal_mode)
 
     @property
     def known_at(self) -> int:
@@ -1299,7 +1707,8 @@ def detect_fvgs(df: pd.DataFrame, cfg: ICTConfig) -> list[FVG]:
     return out
 
 
-def detect_bpr(fvgs: list[FVG]) -> list[FVG]:
+def detect_bpr(fvgs: list[FVG], df: pd.DataFrame | None = None, *,
+               candle_floor: int | None = None) -> list[FVG]:
     """Balance Price Range = the intersection of two opposite-direction FVGs.
 
     AR-11: the band is the intersection (never the union) and exists only while
@@ -1308,28 +1717,220 @@ def detect_bpr(fvgs: list[FVG]) -> list[FVG]:
     not a gap either, so only strict ``label == "FVG"`` rows that are still
     directional (``not inverted``) qualify.
 
+    AR-11/R11 sequence: the second gap must be the **later** gap and must
+    extend into the first, so only ordered pairs ``(first, second)`` with
+    opposite directions are considered.  AR-13's ``6+`` candle floor is a
+    corpus single-publisher rule and is applied only when ``candle_floor`` is
+    declared (``6``); ``None`` is the labelled "no temporal constraint" reading
+    from the three sources that state none (BPR C2), never a guessed number.
+
+    AR-14: with ``df`` the band is a live object -- a **close** through the far
+    side advances it to ``mitigated``/``broken``, a wick is only a ``touched``
+    (partial-mitigation) event (R24/R26).
+
     Polarity is a corpus conflict (PP:C3: first gap / newer gap / entry side;
     V18 must choose).  P0 declares the *newer gap* reading (b), which two of the
     three cited sources attest, instead of the old hardcoded ``"bull"``.
     """
+    if candle_floor is not None:
+        if not isinstance(candle_floor, int) or isinstance(candle_floor, bool):
+            raise ValueError("the BPR candle floor must be an int or None")
+        if candle_floor != BPR_CANDLE_FLOOR:
+            raise ValueError(
+                f"the corpus attests {BPR_CANDLE_FLOOR}+ candles only; "
+                f"{candle_floor!r} is not a declared floor (AR-13)")
     gaps = [f for f in fvgs if f.label == "FVG" and not f.inverted]
-    bulls = [f for f in gaps if f.direction == "bull"]
-    bears = [f for f in gaps if f.direction == "bear"]
-    if not bulls or not bears:
+    best: tuple[FVG, FVG, float, float] | None = None
+    for i, first in enumerate(gaps):
+        for second in gaps[i + 1:]:
+            if second.created <= first.created:
+                continue
+            if second.direction == first.direction:
+                continue
+            if candle_floor is not None:
+                span = (int(second.created) - int(first.created)) + 3
+                if span < int(candle_floor):
+                    continue
+            top = min(float(first.top), float(second.top))
+            bottom = max(float(first.bottom), float(second.bottom))
+            if top <= bottom:
+                continue
+            if best is None or (second.created, first.created) > (
+                    best[1].created, best[0].created):
+                best = (first, second, top, bottom)
+    if best is None:
         return []
-    b, s = bulls[-1], bears[-1]
-    top = min(b.top, s.top)
-    bottom = max(b.bottom, s.bottom)
-    if top <= bottom:
-        return []
-    direction: Direction = "bear" if s.created > b.created else "bull"
-    return [FVG(direction, top, bottom, min(b.left, s.left),
-                max(b.right, s.right), max(b.created, s.created),
-                active=True, mitigated=False, label="BPR")]
+    first, second, top, bottom = best
+    direction: Direction = second.direction   # V18(b): the newer gap sets polarity
+    bpr = FVG(direction, top, bottom, min(first.left, second.left),
+              max(first.right, second.right), second.created,
+              active=True, mitigated=False, label="BPR")
+    if df is not None:
+        _apply_gap_lifecycle(bpr, df)
+    return [bpr]
 
 
-def detect_ifvg(fvgs: list[FVG], df: pd.DataFrame) -> list[FVG]:
-    """A close through an FVG flips it into an inverse FVG (IFVG)."""
+def _apply_gap_lifecycle(gap: FVG, df: pd.DataFrame) -> None:
+    """Body-close invalidation for a derived gap (BPR), AR-04/AR-14.
+
+    A wick inside the band is a test (``touched_at``), never a break; only a
+    body close beyond the far edge (bull ``bottom``, bear ``top``) retires it.
+    """
+    n = len(df)
+    start = int(gap.created) + 1
+    if start >= n:
+        gap.right = n - 1
+        return
+    lows = df["low"].to_numpy(float)
+    highs = df["high"].to_numpy(float)
+    closes = df["close"].to_numpy(float)
+    if gap.direction == "bull":
+        touch = lows[start:] < float(gap.top)
+        invalidated = closes[start:] < float(gap.bottom)
+    else:
+        touch = highs[start:] > float(gap.bottom)
+        invalidated = closes[start:] > float(gap.top)
+    if bool(touch.any()):
+        gap.touched_at = start + int(np.argmax(touch))
+    if bool(invalidated.any()):
+        gap.active = False
+        gap.mitigated = True
+        gap.right = start + int(np.argmax(invalidated))
+        return
+    gap.right = n - 1
+
+
+def ifvg_retest_bar(fvg: FVG, df: pd.DataFrame) -> int | None:
+    """AR-09: ``t_retest`` -- the first return into the inverted zone.
+
+    The inversion close leaves price outside the zone; the retest is the first
+    later bar whose range reaches the zone from that side (bull IFVG: above the
+    zone, ``low <= top``; bear IFVG: below it, ``high >= bottom``).  The
+    inversion bar itself is not a retest.
+    """
+    start = int(fvg.invert_bar if fvg.invert_bar is not None else fvg.created) + 1
+    highs = df["high"].to_numpy(float)
+    lows = df["low"].to_numpy(float)
+    for t in range(start, len(df)):
+        if fvg.direction == "bull":
+            if lows[t] <= float(fvg.top):
+                return t
+        elif highs[t] >= float(fvg.bottom):
+            return t
+    return None
+
+
+def validate_ifvg_removal(mode: str) -> str:
+    """V22: accept a declared removal rule, refuse anything else."""
+    if mode not in IFVG_REMOVAL_MODES:
+        raise ValueError(
+            f"unknown IFVG removal rule {mode!r}; declare one of "
+            f"{IFVG_REMOVAL_MODES} (V22/PP:C10)")
+    return mode
+
+
+def ifvg_removal_bar(fvg: FVG, df: pd.DataFrame, *, mode: str) -> int | None:
+    """V22: the bar at which the declared removal rule retires an IFVG.
+
+    All four rules are corpus-attested and mutually incompatible, so the mode
+    is required and no default exists.  The predicates are the declared
+    readings of R19/R20/R26 (documented per option because the corpus never
+    reconciles them):
+
+    * ``close-back`` -- the first close back through the near edge the
+      inversion broke (the flip is undone).
+    * ``dead-return`` -- after ``t_retest``, the first close that passes fully
+      through the inverted zone in the *old* direction (mitigate-and-remove).
+    * ``second close`` -- the second close through the far edge in the new
+      direction (the inversion close counts as the first).
+    * ``never``      -- no removal, the reading of the sources that state none.
+    """
+    validate_ifvg_removal(mode)
+    if mode == "never":
+        return None
+    invert = int(fvg.invert_bar if fvg.invert_bar is not None else fvg.created)
+    closes = df["close"].to_numpy(float)
+    n = len(df)
+    if mode == "close-back":
+        # The inversion broke the near edge (top for a bull IFVG, bottom for a
+        # bear IFVG); a close back through it restores the pre-flip state.
+        target = float(fvg.top) if fvg.direction == "bull" else float(fvg.bottom)
+        for t in range(invert + 1, n):
+            if fvg.direction == "bull" and closes[t] < target:
+                return t
+            if fvg.direction == "bear" and closes[t] > target:
+                return t
+        return None
+    if mode == "second close":
+        far = float(fvg.top) if fvg.direction == "bull" else float(fvg.bottom)
+        count = 1  # the inversion close already went through the far edge
+        for t in range(invert + 1, n):
+            through = (closes[t] > far if fvg.direction == "bull"
+                       else closes[t] < far)
+            if through:
+                count += 1
+                if count >= 2:
+                    return t
+        return None
+    # dead-return
+    if fvg.t_retest is None:
+        return None
+    far = float(fvg.bottom) if fvg.direction == "bull" else float(fvg.top)
+    for t in range(int(fvg.t_retest), n):
+        if fvg.direction == "bull" and closes[t] < far:
+            return t
+        if fvg.direction == "bear" and closes[t] > far:
+            return t
+    return None
+
+
+def ifvg_admits(fvg: object, direction: object) -> Refusal | None:
+    """AR-08: an IFVG may be used **only** in its new direction.
+
+    Returns ``None`` when admissible and a typed ``NT_ARRAY_WRONG_SIDE``
+    refusal otherwise, so a selection gate cannot silently re-use the inverted
+    zone in the parent gap's direction.
+    """
+    is_ifvg = bool(
+        getattr(fvg, "is_ifvg", False)
+        or str(getattr(fvg, "label", "")) == "IFVG"
+        or str(getattr(fvg, "array_type", "")) == "IFVG")
+    if not is_ifvg:
+        return None
+    wanted = _normalise_direction(direction)
+    if not wanted:
+        raise ValueError(
+            f"the IFVG direction gate needs bull/bear, got {direction!r}")
+    new_direction = _normalise_direction(getattr(fvg, "direction", ""))
+    if new_direction != wanted:
+        return Refusal(
+            RefusalCode.NT_ARRAY_WRONG_SIDE,
+            detail=(f"IFVG {getattr(fvg, 'top', getattr(fvg, 'price_upper', ''))}"
+                    f"/{getattr(fvg, 'bottom', getattr(fvg, 'price_lower', ''))} "
+                    f"is usable only in its new direction {new_direction!r} "
+                    f"(AR-08)"))
+    return None
+
+
+def detect_ifvg(fvgs: list[FVG], df: pd.DataFrame, *,
+                removal: str | None = None) -> list[FVG]:
+    """A close through an FVG flips it into an inverse FVG (IFVG).
+
+    AR-06/AR-08: bounds and CE are unchanged, the direction is the parent's
+    opposite, and the flip is produced by a **body close** beyond the far edge.
+
+    AR-09: the inversion and the retest are separate events, so the new object
+    records ``t_retest`` (first return into the zone) without moving
+    ``known_at``: the label is knowable at the inversion bar, the retest is a
+    later fact.
+
+    V22: the removal rule is a BLOCK fork and has no default.  When ``removal``
+    is ``None`` the IFVG is labelled but no removal is applied and
+    ``removal_mode`` stays empty (undeclared); when declared, ``removed_at`` and
+    the LQ-06 ``broken`` state follow the chosen rule.
+    """
+    if removal is not None:
+        validate_ifvg_removal(str(removal))
     close = df["close"].to_numpy(float)
     n = len(df)
     out: list[FVG] = []
@@ -1337,23 +1938,39 @@ def detect_ifvg(fvgs: list[FVG], df: pd.DataFrame) -> list[FVG]:
         if f.inverted or f.invert_bar is not None:
             continue
         for t in range(f.created + 1, n):
+            flipped: FVG | None = None
             if f.direction == "bull" and close[t] < f.bottom:
-                f.inverted = True
-                f.invert_bar = t
-                out.append(FVG("bear", f.top, f.bottom, t, n - 1, t,
-                               active=True, label="IFVG", inverted=True, invert_bar=t))
-                break
-            if f.direction == "bear" and close[t] > f.top:
-                f.inverted = True
-                f.invert_bar = t
-                out.append(FVG("bull", f.top, f.bottom, t, n - 1, t,
-                               active=True, label="IFVG", inverted=True, invert_bar=t))
-                break
+                flipped = FVG("bear", f.top, f.bottom, t, n - 1, t,
+                              active=True, label="IFVG", inverted=True,
+                              invert_bar=t, parent_created=int(f.created))
+            elif f.direction == "bear" and close[t] > f.top:
+                flipped = FVG("bull", f.top, f.bottom, t, n - 1, t,
+                              active=True, label="IFVG", inverted=True,
+                              invert_bar=t, parent_created=int(f.created))
+            if flipped is None:
+                continue
+            f.inverted = True
+            f.invert_bar = t
+            flipped.t_retest = ifvg_retest_bar(flipped, df)
+            if removal is not None:
+                mode = str(removal)
+                flipped.removal_mode = mode
+                removed = ifvg_removal_bar(flipped, df, mode=mode)
+                if removed is not None:
+                    flipped.removed_at = int(removed)
+                    flipped.right = int(removed)
+                    flipped.active = False
+                    flipped.mitigated = True
+            out.append(flipped)
+            break
     return out
 
 
 def detect_order_blocks(df: pd.DataFrame, events: list[StructureEvent], swings: list[Swing],
-                        cfg: ICTConfig) -> list[OrderBlock]:
+                        cfg: ICTConfig, *, extent: str | None = None,
+                        gate: str | None = None,
+                        fvgs: Iterable = (),
+                        sweeps: Iterable = ()) -> list[OrderBlock]:
     """Order blocks selected by recency, not by size (AR-15, AR-17).
 
     The candidate is ``t* = max{t < e : sign(close[t] - open[t]) = -leg_sign}``
@@ -1361,12 +1978,25 @@ def detect_order_blocks(df: pd.DataFrame, events: list[StructureEvent], swings: 
     at the structure event ``e``.  The swing-extreme bar is a different object
     and is not the candidate (``swings`` is kept for API compatibility only).
 
-    The zone is the repo's declared hybrid (AR-16: wick extreme on the far
-    side, body on the near side), but ``OrderBlock.mean`` is read from the
-    selected candle's body, never from the zone (AR-17).
+    The zone is the declared V19 extent.  The repo's ``hybrid`` (AR-16) is the
+    default: wick extreme on the far side, body on the near side.  ``full_range``
+    and ``body`` are the corpus variants; ``unspecified`` has no construction
+    rule and refuses (``NT_VARIANT_UNDECLARED``).  ``OrderBlock.mean`` is always
+    read from the selected candle's body, never from the zone (AR-17).
+
+    The V19 admission gate is declared too (AR-19): ``break_required`` is the
+    event-driven gate this function already implements,
+    ``imbalance_constitutive`` requires an FVG overlapping the leg, and
+    ``grab`` requires an OB-local sweep known by the event bar.  A declared gate
+    with no matching evidence emits **no** block; it never falls back to a
+    weaker gate.
     """
     if not cfg.show_ob:
         return []
+    ob_extent = validate_ob_extent(cfg.ob_extent if extent is None else extent)
+    ob_gate = validate_ob_gate(cfg.ob_gate if gate is None else gate)
+    fvg_list = list(fvgs)
+    sweep_list = list(sweeps)
     highs = df["high"].to_numpy()
     lows = df["low"].to_numpy()
     opens = df["open"].to_numpy()
@@ -1399,20 +2029,32 @@ def detect_order_blocks(df: pd.DataFrame, events: list[StructureEvent], swings: 
             continue  # no opposite-close candle: refuse rather than fabricate one
         body_high = float(max(opens[t_star], closes[t_star]))
         body_low = float(min(opens[t_star], closes[t_star]))
-        if ev.direction == "bull":
-            top = body_high
-            bottom = float(lows[t_star])
-            if top <= bottom:
-                top = float(highs[t_star])
-            out.append(OrderBlock("bull", top, bottom, t_star, e, e,
-                                  body_high=body_high, body_low=body_low))
-        else:
-            top = float(highs[t_star])
-            bottom = body_low
-            if top <= bottom:
+        if ob_extent == "hybrid":
+            if ev.direction == "bull":
+                top = body_high
                 bottom = float(lows[t_star])
-            out.append(OrderBlock("bear", top, bottom, t_star, e, e,
-                                  body_high=body_high, body_low=body_low))
+                if top <= bottom:
+                    top = float(highs[t_star])
+            else:
+                top = float(highs[t_star])
+                bottom = body_low
+                if top <= bottom:
+                    bottom = float(lows[t_star])
+        elif ob_extent == "full_range":
+            top, bottom = float(highs[t_star]), float(lows[t_star])
+        else:  # body
+            top, bottom = body_high, body_low
+        if top <= bottom:
+            continue  # a zero-height block is a line, not an array
+        direction: Direction = ev.direction
+        if ob_gate == "imbalance_constitutive":
+            if not _ob_imbalance_ok(direction, t_star, e, top, bottom, fvg_list):
+                continue
+        elif ob_gate == "grab":
+            if not _ob_grab_ok(t_star, e, top, bottom, sweep_list):
+                continue
+        out.append(OrderBlock(direction, top, bottom, t_star, e, e,
+                              body_high=body_high, body_low=body_low))
 
     # mitigation
     for ob in out:
@@ -1443,6 +2085,217 @@ def detect_order_blocks(df: pd.DataFrame, events: list[StructureEvent], swings: 
         if ob.active:
             ob.right = n - 1
     return out
+
+
+def _ob_imbalance_ok(direction: Direction, t_star: int, event: int,
+                     top: float, bottom: float,
+                     fvgs: list[FVG]) -> bool:
+    """V19 ``imbalance_constitutive``: an FVG overlaps the displacement leg."""
+    for f in fvgs:
+        if str(getattr(f, "label", "")) != "FVG" or bool(getattr(f, "inverted", False)):
+            continue
+        if int(getattr(f, "created")) <= int(t_star) or int(getattr(f, "created")) > int(event):
+            continue
+        if min(top, float(f.top)) > max(bottom, float(f.bottom)):
+            return True
+    return False
+
+
+def _ob_grab_ok(t_star: int, event: int, top: float, bottom: float,
+                sweeps: list[object]) -> bool:
+    """V19 ``grab``: a liquidity sweep local to the block is known by the leg end."""
+    for sweep in sweeps:
+        known = int(getattr(sweep, "reclaim_bar",
+                            getattr(sweep, "sweep_bar", -1)))
+        if known < 0 or known > int(event):
+            continue
+        for attr in ("level", "extreme"):
+            value = getattr(sweep, attr, None)
+            if value is not None and bottom <= float(value) <= top:
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# P1-09 §7.3: roster, side, priority and scan order (V09/V26, AS-01..AS-09)
+# ---------------------------------------------------------------------------
+def resolve_array_roster(roster: object) -> ArrayRoster:
+    """V09: read the declared roster; an undeclared roster refuses.
+
+    A missing roster is the §14.1-4 unspecified model, not an invitation to use
+    the corpus's largest list (AS-06 forbids exactly that).
+    """
+    if isinstance(roster, ArrayRoster):
+        return roster
+    key = str(roster or "").strip()
+    if not key:
+        raise VariantUndeclared(
+            "V09", "the matrix roster is undeclared; AS-06 forbids a "
+                   "max-union roster and no member set is assumed")
+    try:
+        return ARRAY_ROSTERS[key]
+    except KeyError:
+        raise ValueError(
+            f"unknown matrix roster {roster!r}; declare one of "
+            f"{tuple(ARRAY_ROSTERS)} (V09)")
+    # unreachable
+
+
+def resolve_array_order(order_mode: str = DEFAULT_ARRAY_ORDER_MODE,
+                        total_order: str = DEFAULT_ARRAY_TOTAL_ORDER
+                        ) -> tuple[str, tuple[str, ...]]:
+    """V09/V26: the declared scan order; ``none`` cannot select (§7.3-4)."""
+    if order_mode not in ARRAY_ORDER_MODES:
+        raise ValueError(
+            f"unknown array order mode {order_mode!r}; declare one of "
+            f"{ARRAY_ORDER_MODES} (V09)")
+    if order_mode == "none":
+        raise ValueError(
+            "the 'none' order is explicitly rejected for selection (§7.3-4): "
+            "without an order 'first eligible' has no meaning")
+    if order_mode == "proximity":
+        return "proximity", ()
+    if total_order not in ARRAY_TOTAL_ORDERS:
+        raise ValueError(
+            f"unknown total order {total_order!r}; declare one of "
+            f"{tuple(ARRAY_TOTAL_ORDERS)} (V26)")
+    return "total_order", ARRAY_TOTAL_ORDERS[total_order]
+
+
+def _array_member(array: object) -> str:
+    for attr in ("array_type", "label", "kind"):
+        value = getattr(array, attr, None)
+        if value:
+            return str(value)
+    return type(array).__name__
+
+
+def _array_direction(array: object) -> str:
+    return _normalise_direction(getattr(array, "direction", ""))
+
+
+def _array_bounds(array: object) -> tuple[float, float]:
+    for upper, lower in (("price_upper", "price_lower"), ("top", "bottom")):
+        top, bottom = getattr(array, upper, None), getattr(array, lower, None)
+        if top is not None and bottom is not None:
+            return float(top), float(bottom)
+    raise TypeError(
+        f"{type(array).__name__} exposes no zone bounds and cannot be scanned")
+
+
+def _array_known_at(array: object) -> int:
+    for attr in ("known_at", "confirmed_at", "created", "formed_at"):
+        value = getattr(array, attr, None)
+        if value is not None:
+            return int(value)
+    raise TypeError(f"{type(array).__name__} carries no knowledge time (CB-07)")
+
+
+def _array_state(array: object) -> str:
+    state = getattr(array, "state", None)
+    if state in ARRAY_STATES:
+        return str(state)
+    active = getattr(array, "active", getattr(array, "is_active", None))
+    if active is None:
+        return "intact"
+    return "intact" if bool(active) else "broken"
+
+
+def _array_distance(array: object, price: float | None) -> float:
+    if price is None:
+        return 0.0
+    top, bottom = _array_bounds(array)
+    high, low = max(top, bottom), min(top, bottom)
+    if low <= float(price) <= high:
+        return 0.0
+    return min(abs(float(price) - high), abs(float(price) - low))
+
+
+def _array_stable_id(array: object) -> str:
+    value = getattr(array, "array_id", None)
+    if value:
+        return str(value)
+    top, bottom = _array_bounds(array)
+    return f"{_array_member(array)}|{_array_known_at(array)}|{top}|{bottom}"
+
+
+def scan_arrays(arrays: Iterable, *, roster: object,
+                order_mode: str = DEFAULT_ARRAY_ORDER_MODE,
+                total_order: str = DEFAULT_ARRAY_TOTAL_ORDER,
+                side_mode: str = DEFAULT_ARRAY_SIDE_MODE,
+                direction: object | None = None,
+                half: str | None = None,
+                price: float | None = None,
+                at: int | None = None,
+                role_of=None) -> tuple[list, Refusal | None]:
+    """§7.3 steps 1-4: roster, side, hard filter, declared order.
+
+    The scan is deterministic and returns the **full ordered candidate list**;
+    the caller selects the first entry.  An empty result is not an invalidation
+    of anything: it is the typed ``NT_MATRIX_EMPTY`` refusal (§7.3-8).
+
+    * step 1 -- only the declared roster's member classes are admitted (AS-06);
+    * step 2 -- every array carries an AS-04 side tag under ``side_mode``;
+    * step 3 -- the hard filter: known at ``at`` (CB-07), not ``broken``
+      (exhausted/deleted), side equals the admitted ``half`` (PD-01), and an
+      IFVG only in its new direction (AR-08);
+    * step 4 -- the declared order: a total order (with breaker precedence) or
+      proximity from price; ``none`` is rejected.
+
+    Freshness (step 5) is a **demotion**, not a deletion: ``swept`` arrays sort
+    after ``intact`` arrays within the same declaration.
+    """
+    roster_obj = resolve_array_roster(roster)
+    mode, order = resolve_array_order(order_mode, total_order)
+    wanted = _normalise_direction(direction) if direction is not None else ""
+    admitted_half = half
+    if admitted_half is None and wanted:
+        # PD-01: a long is taken from discount, a short from premium.
+        admitted_half = "discount" if wanted == "bull" else "premium"
+    if admitted_half is not None and admitted_half not in ARRAY_SIDES:
+        raise ValueError(
+            f"unknown admitted half {admitted_half!r}; declare one of "
+            f"{ARRAY_SIDES} (PD-01)")
+    candidates: list[tuple[tuple, object]] = []
+    for array in arrays:
+        if not roster_obj.admits(_array_member(array)):
+            continue
+        known = _array_known_at(array)
+        if at is not None and known > int(at):
+            continue
+        state = _array_state(array)
+        if state == "broken":
+            continue
+        if wanted and ifvg_admits(array, wanted) is not None:  # type: ignore[arg-type]
+            continue
+        top, bottom = _array_bounds(array)
+        role = role_of(array) if callable(role_of) else None
+        tag = array_side(_array_direction(array), price=price, top=top,
+                         bottom=bottom, mode=side_mode, role=role)
+        if admitted_half is not None and tag.side != admitted_half:
+            continue
+        freshness = 0 if state == "intact" else 1
+        if mode == "total_order":
+            member = _array_member(array).lower()
+            classes = ARRAY_TYPE_MEMBERS.get(_array_member(array), (member,))
+            priority = len(order)
+            for cls in classes:
+                if cls in order:
+                    priority = min(priority, order.index(cls))
+            key = (priority, freshness, -known, _array_stable_id(array))
+        else:
+            key = (_array_distance(array, price), freshness, -known,
+                   _array_stable_id(array))
+        candidates.append((key, array))
+    candidates.sort(key=lambda item: item[0])
+    ordered = [array for _, array in candidates]
+    if not ordered:
+        return [], Refusal(
+            RefusalCode.NT_MATRIX_EMPTY,
+            detail=(f"roster {roster_obj.name!r} has no eligible array at "
+                    f"bar {at}; absence is a no-trade, not an invalidation "
+                    f"(§7.3-8)"))
+    return ordered, None
 
 
 def detect_liquidity(df: pd.DataFrame, pivots: list[Swing], cfg: ICTConfig) -> list[Liquidity]:
@@ -1639,12 +2492,22 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
     score_key_levels(key_levels, sessions, df)
     fvgs = detect_fvgs(df, cfg)
     if cfg.show_ifvg:
-        fvgs.extend(detect_ifvg(list(fvgs), df))
+        fvgs.extend(detect_ifvg(list(fvgs), df,
+                                removal=(cfg.ifvg_removal or None)))
     if cfg.show_bpr:
-        fvgs.extend(detect_bpr(fvgs))
-    obs = detect_order_blocks(df, events, swings, cfg)
+        fvgs.extend(detect_bpr(fvgs, df, candle_floor=cfg.bpr_candle_floor))
+    obs = detect_order_blocks(df, events, swings, cfg,
+                              fvgs=fvgs, sweeps=sweeps)
+    breakers = detect_breakers(obs, sweeps, tier=cfg.breaker_tier)
+    # P1-09 / AR-23: the retest gate is a *use* condition, so it is applied
+    # after detection.  This keeps the declared detect_breakers call (and its
+    # tier forwarding) unchanged while still stamping the later return.
+    for breaker in breakers:
+        if breaker.retest_at is None:
+            breaker.retest_at = breaker_retest_at(breaker, df)
+            breaker.retest_window = BREAKER_RETEST_WINDOW
     pd_arrays = (detect_rejections(df, swings)
-                 + detect_breakers(obs, sweeps, tier=cfg.breaker_tier)
+                 + breakers
                  + detect_mitigations(df, swings))
     pd_arrays.sort(key=lambda x: x.confirmed_at)
     gaps = detect_gaps(df, cfg)
