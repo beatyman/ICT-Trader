@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import time as dtime
+from datetime import date, time as dtime, timedelta
 from enum import Enum, StrEnum
 from typing import Iterable, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 import pandas as pd
@@ -964,6 +965,345 @@ def in_session(df: pd.DataFrame, idx: int, market: str, gate: SessionGate) -> bo
     zone, windows = _SESSION_WINDOWS[key]
     t = _as_zone(df, idx, zone, market).time()
     return any(_in_window(t, start, end) for start, end in windows)
+
+
+# --------------------------------------------------------------------------- #
+# P1-03 — one declared day boundary (V04, SYSTEM_SPEC §10.4 GW-01)
+# --------------------------------------------------------------------------- #
+#: The four V04 options, read from the one register (A7).  The option strings
+#: live in ``variants.py`` only; this module never keeps a second copy of the
+#: vocabulary.
+DAY_BOUNDARY_OPTIONS: tuple[str, ...] = tuple(read_variant_spec("V04").options)
+
+#: The clock each V04 option anchors, and the provenance of that clock.
+#:
+#: ``NY midnight`` is the corpus's dominant anchor (daily_bias R5: "the 00:00
+#: New York opening price"; GW-03: daily default ``00:00 America/New_York``).
+#: ``futures open`` and ``cash open`` are corpus-attested instants (CME Globex
+#: 18:00 ET; NYSE 09:30 ET).  ``broker day`` is the one convention whose clock
+#: the corpus names but does not define (daily_bias R10; ``broker.py`` used to
+#: roll on the UTC date): the broker supplies the roll time, so it is required
+#: at construction and is never defaulted.
+DAY_BOUNDARY_CLOCKS: dict[str, tuple[str, dtime | None, str]] = {
+    "NY midnight": (
+        "America/New_York", dtime(0, 0),
+        "daily_bias R5 (00:00 New York); SYSTEM_SPEC GW-03"),
+    "broker day": (
+        "America/New_York", None,
+        "daily_bias R10 names the convention; the roll time is "
+        "broker-supplied (not corpus) and is required"),
+    "futures open": (
+        "America/New_York", dtime(18, 0),
+        "CME Globex opens 18:00 ET (doc_0067; doc_0356)"),
+    "cash open": (
+        "America/New_York", dtime(9, 30),
+        "NYSE cash open 09:30 ET (doc_0345; doc_0625)"),
+}
+
+
+def parse_day_clock(value: object) -> dtime:
+    """Parse one declared boundary clock (``HH:MM[:SS]``); no implicit clock."""
+    if isinstance(value, dtime):
+        parsed = value
+    elif isinstance(value, pd.Timestamp):
+        parsed = value.time()
+    elif isinstance(value, str):
+        try:
+            parsed = dtime.fromisoformat(value.strip())
+        except ValueError:
+            raise ValueError(
+                f"{value!r} is not a clock; declare HH:MM or HH:MM:SS"
+            ) from None
+    else:
+        raise TypeError(
+            f"a day-boundary clock must be a time or 'HH:MM' string, got "
+            f"{type(value).__name__}")
+    if parsed.second or parsed.microsecond:
+        raise ValueError(
+            f"a day-boundary clock is minute-resolution; {value!r} carries "
+            "seconds and would be silently truncated")
+    return parsed
+
+
+def _validate_day_zone(zone: object) -> str:
+    text = str(zone).strip()
+    try:
+        ZoneInfo(text)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(
+            f"unknown day-boundary timezone {zone!r}; declare an IANA zone"
+        ) from None
+    return text
+
+
+@dataclass(frozen=True, slots=True)
+class DayBoundary:
+    """One declared trading-day boundary (V04, GW-01).
+
+    A day is the half-open interval ``[anchor, next anchor)`` on the declared
+    wall clock, in a declared IANA zone.  The object is a *declaration*, not a
+    preference: it is built from a V04 option (:func:`declare_day_boundary` /
+    :func:`resolve_day_boundary`), it refuses an unknown option, and it carries
+    the clock's provenance so no downstream artefact can present a repo guess
+    as corpus doctrine (§14.1-6).
+
+    The four options intentionally disagree: at one instant they can name four
+    different days (daily_bias R10: "each can produce a different PO3 shape on
+    the same date").  A run declares exactly one and reads it everywhere
+    (GW-01); it never mixes two.
+    """
+
+    kind: str
+    zone: str
+    anchor_time: dtime
+    source: str
+    broker_supplied_clock: bool = False
+
+    def __post_init__(self) -> None:
+        kind = str(self.kind).strip()
+        if kind not in DAY_BOUNDARY_OPTIONS:
+            raise ValueError(
+                f"unknown day boundary {self.kind!r}; V04 declares one of "
+                f"{DAY_BOUNDARY_OPTIONS}")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "zone", _validate_day_zone(self.zone))
+        object.__setattr__(self, "anchor_time", parse_day_clock(self.anchor_time))
+        source = str(self.source).strip()
+        if not source:
+            raise ValueError("a day boundary must carry its clock provenance")
+        object.__setattr__(self, "source", source)
+
+    # -- the one bucket arithmetic ----------------------------------------- #
+    def _localize(self, day: date) -> pd.Timestamp:
+        naive = pd.Timestamp.combine(day, self.anchor_time)
+        return naive.tz_localize(
+            self.zone, ambiguous=False, nonexistent="shift_forward")
+
+    def _stamp(self, ts: object, *, input_tz: str | None = None,
+               market: str | None = None) -> pd.Timestamp:
+        stamp = pd.Timestamp(ts)
+        if pd.isna(stamp):
+            raise ValueError("a day boundary cannot be computed for NaT")
+        if stamp.tzinfo is None:
+            if input_tz is not None:
+                zone = _validate_day_zone(input_tz)
+            elif market is not None:
+                zone = _validate_day_zone(_MARKET_TZ.get(market, "UTC"))
+            else:
+                raise ValueError(
+                    "a naive timestamp needs the declared input timezone; pass "
+                    "market= or input_tz= (the day boundary never assumes UTC)")
+            stamp = stamp.tz_localize(
+                zone, ambiguous=False, nonexistent="shift_forward")
+        return stamp
+
+    def bucket_start(self, ts: object, *, input_tz: str | None = None,
+                     market: str | None = None) -> pd.Timestamp:
+        """The anchor instant of the day containing ``ts`` (inclusive)."""
+        local = self._stamp(ts, input_tz=input_tz,
+                            market=market).tz_convert(self.zone)
+        day = local.date()
+        start = self._localize(day)
+        if local < start:
+            start = self._localize(day - timedelta(days=1))
+        return start
+
+    def bucket_end(self, ts: object, *, input_tz: str | None = None,
+                   market: str | None = None) -> pd.Timestamp:
+        """The exclusive end instant of the day containing ``ts``."""
+        return self._next_anchor(
+            self.bucket_start(ts, input_tz=input_tz, market=market))
+
+    def _next_anchor(self, start: pd.Timestamp) -> pd.Timestamp:
+        return self._localize(start.date() + timedelta(days=1))
+
+    def bucket_bounds(self, ts: object, *, input_tz: str | None = None,
+                      market: str | None = None
+                      ) -> tuple[pd.Timestamp, pd.Timestamp]:
+        """The half-open ``[start, end)`` day containing ``ts``."""
+        start = self.bucket_start(ts, input_tz=input_tz, market=market)
+        return start, self._next_anchor(start)
+
+    def day_key(self, ts: object, *, input_tz: str | None = None,
+                market: str | None = None) -> str:
+        """The stable identity of the day containing ``ts``.
+
+        The key is the anchor instant's ISO string (offset included), so two
+        runs with the same declaration name the same day, a DST transition
+        cannot collapse two days into one key, and a budget account keyed by it
+        resets at the declared boundary rather than at UTC midnight.
+        """
+        return self.bucket_start(
+            ts, input_tz=input_tz, market=market).isoformat()
+
+    # -- frames ------------------------------------------------------------ #
+    def _input_zone(self, market: str, input_tz: str | None) -> str:
+        return _validate_day_zone(input_tz or _MARKET_TZ.get(market, "UTC"))
+
+    def _starts(self, df: pd.DataFrame, *, market: str = "other",
+                input_tz: str | None = None) -> pd.Series:
+        """The anchor instant of every base bar, as a tz-aware Series."""
+        zone = self._input_zone(market, input_tz)
+        stamps = pd.to_datetime(df["date"])
+        if stamps.dt.tz is None:
+            aware = stamps.dt.tz_localize(
+                zone, ambiguous=False, nonexistent="shift_forward")
+        else:
+            aware = stamps.dt.tz_convert(zone)
+        local = aware.dt.tz_convert(self.zone)
+        clock = pd.Timedelta(
+            hours=self.anchor_time.hour, minutes=self.anchor_time.minute,
+            seconds=self.anchor_time.second)
+        # Local-midnight arithmetic on the already-parsed instants: converting
+        # the dates back through strings is both slow and lossy.
+        naive = local.dt.normalize().dt.tz_localize(None) + clock
+        starts = naive.dt.tz_localize(
+            self.zone, ambiguous=False, nonexistent="shift_forward")
+        earlier = (starts > local).to_numpy()
+        if earlier.any():
+            previous = (naive - pd.Timedelta(days=1)).dt.tz_localize(
+                self.zone, ambiguous=False, nonexistent="shift_forward")
+            starts = starts.mask(earlier, previous)
+        return starts.reset_index(drop=True)
+
+    def day_keys(self, df: pd.DataFrame, *, market: str = "other",
+                 input_tz: str | None = None) -> list[str]:
+        """One day key per base bar, aligned to ``df`` (the budget account)."""
+        return [start.isoformat()
+                for start in self._starts(df, market=market, input_tz=input_tz)]
+
+    def anchor_bars(self, df: pd.DataFrame, *, market: str = "other",
+                    input_tz: str | None = None) -> np.ndarray:
+        """Index of the first base bar in each bar's day (the day's anchor bar).
+
+        The first bar of a bucket is the day's opening price as the run can
+        know it; a budget reset and the daily anchor therefore share one
+        boundary (GW-01) instead of one using UTC midnight and the other a
+        session clock.
+        """
+        starts = self._starts(df, market=market, input_tz=input_tz)
+        # Integer instants keep the group lookup cheap; the unit is whatever
+        # resolution pandas parsed, and only equality is used here.
+        values = starts.array.asi8
+        out = np.empty(len(values), dtype=np.int64)
+        first: dict[int, int] = {}
+        for i, value in enumerate(values):
+            key = int(value)
+            anchor = first.get(key)
+            if anchor is None:
+                first[key] = i
+                anchor = i
+            out[i] = anchor
+        return out
+
+    def bucket_frame(self, df: pd.DataFrame, *, market: str = "other",
+                     input_tz: str | None = None) -> pd.DataFrame:
+        """Daily OHLCV bars bucketed on this boundary, labelled at their close.
+
+        ``date`` is the bucket's exclusive end (its *known-at*), not a UTC
+        midnight and not a left label.  The label is expressed in the input
+        zone so it stays directly comparable with the base frame's timestamps;
+        the last, still-forming bucket is left in place for
+        ``setup._drop_incomplete_htf`` to drop, exactly like the repo's
+        resample path.
+        """
+        if len(df) == 0:
+            return df.copy()
+        zone = self._input_zone(market, input_tz)
+        stamps = pd.to_datetime(df["date"])
+        naive_input = stamps.dt.tz is None
+        starts = self._starts(df, market=market, input_tz=input_tz)
+        work = pd.DataFrame({
+            "bucket": starts.reset_index(drop=True),
+            "open": df["open"].to_numpy(),
+            "high": df["high"].to_numpy(),
+            "low": df["low"].to_numpy(),
+            "close": df["close"].to_numpy(),
+            "volume": (df["volume"].to_numpy() if "volume" in df
+                       else np.zeros(len(df), dtype=float)),
+        })
+        grouped = work.groupby("bucket", sort=True).agg(
+            open=("open", "first"), high=("high", "max"),
+            low=("low", "min"), close=("close", "last"),
+            volume=("volume", "sum"))
+        ends = pd.DatetimeIndex([
+            self._next_anchor(pd.Timestamp(start)) for start in grouped.index])
+        labels = ends.tz_convert(zone)
+        if naive_input:
+            labels = labels.tz_localize(None)
+        return pd.DataFrame({
+            "date": labels,
+            "open": grouped["open"].to_numpy(),
+            "high": grouped["high"].to_numpy(),
+            "low": grouped["low"].to_numpy(),
+            "close": grouped["close"].to_numpy(),
+            "volume": grouped["volume"].to_numpy(),
+        }).reset_index(drop=True)
+
+    def matches(self, other: "DayBoundary") -> bool:
+        """Whether two declarations name the same boundary (kind, clock, zone)."""
+        return (self.kind, self.zone, self.anchor_time) == (
+            other.kind, other.zone, other.anchor_time)
+
+    def to_public(self) -> dict[str, object]:
+        """The JSON-safe declaration record."""
+        return {
+            "kind": self.kind,
+            "zone": self.zone,
+            "anchor_time": self.anchor_time.strftime("%H:%M"),
+            "source": self.source,
+            "broker_supplied_clock": bool(self.broker_supplied_clock),
+            "variant_id": "V04",
+        }
+
+
+def declare_day_boundary(kind: str, *, broker_roll: object | None = None,
+                         broker_zone: str | None = None) -> DayBoundary:
+    """Build one V04 declaration; an option's clock is never guessed.
+
+    ``broker day`` has no corpus clock (daily_bias R10 names the convention and
+    stops there), so its ``broker_roll`` is required and its ``broker_zone`` may
+    be supplied alongside it.  ``broker_roll``/``broker_zone`` on any other
+    option refuse instead of being ignored: a declaration that carries a clock
+    the model does not read is a silent second convention.
+    """
+    option = str(kind).strip()
+    try:
+        default_zone, clock, source = DAY_BOUNDARY_CLOCKS[option]
+    except KeyError:
+        raise ValueError(
+            f"unknown day boundary {kind!r}; V04 declares one of "
+            f"{DAY_BOUNDARY_OPTIONS}") from None
+    if option == "broker day":
+        if broker_roll is None:
+            raise ValueError(
+                "V04='broker day' has no corpus clock: declare the broker's "
+                "roll time (broker_roll='HH:MM'); it is never defaulted")
+        clock = parse_day_clock(broker_roll)
+        zone = _validate_day_zone(broker_zone or default_zone)
+        source = ("daily_bias R10 names the convention; the roll time and "
+                  "zone are broker-supplied, not corpus")
+        return DayBoundary(option, zone, clock, source,
+                           broker_supplied_clock=True)
+    if broker_roll is not None or broker_zone is not None:
+        raise ValueError(
+            f"broker_roll/broker_zone are only meaningful for V04='broker "
+            f"day'; {option!r} has one corpus-attested clock")
+    return DayBoundary(option, default_zone, clock, source)
+
+
+def resolve_day_boundary(variant_config, *, broker_roll: object | None = None,
+                         broker_zone: str | None = None) -> DayBoundary:
+    """Read V04 from the one register and build its boundary.
+
+    This is the only read path for the day boundary (A7).  An undeclared V04
+    raises :class:`~ict_trader.variants.VariantUndeclared` carrying
+    ``NT_VARIANT_UNDECLARED``; no option is selected on the caller's behalf
+    (SYSTEM_SPEC §14.1-4).
+    """
+    option = variant_config.read("V04")
+    return declare_day_boundary(option, broker_roll=broker_roll,
+                                broker_zone=broker_zone)
 
 
 def dealing_range_state(swings: Iterable, idx: int,

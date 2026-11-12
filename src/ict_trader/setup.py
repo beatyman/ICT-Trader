@@ -34,13 +34,15 @@ from .cisd import CISD
 from .concepts import (ICTConfig, PIVOT_LEFT, analyze, detect_fvgs, find_pivots,
                        load_csv)
 from .config import config_hash as _config_hash
-from .variants import VariantConfig
+from .variants import VariantConfig, VariantUndeclared
 from .context import (BiasDirection, BiasState, BiasStateStore,
+                      DAY_BOUNDARY_OPTIONS, DayBoundary,
                       DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
                       SwingIndex, bias_vocabulary_readings, candle2_closure,
                       candle3_closure, dealing_range, in_session,
                       neutral_blocks, neutral_weight, ote_from_signal,
-                      parse_bias, serialize_bias, validate_bias_vocabulary,
+                      parse_bias, parse_day_clock, resolve_day_boundary,
+                      serialize_bias, validate_bias_vocabulary,
                       validate_neutral_handling)
 from .pd_arrays import count_path_liquidity, near_arrays
 from .strategy import (BE_MODES, DEFAULT_COMMISSION_BPS, DEFAULT_ENTRY_MODE,
@@ -285,6 +287,14 @@ class SetupConfig:
     #: fork stays undeclared until the run declares it, and every read then
     #: refuses with ``NT_VARIANT_UNDECLARED`` instead of choosing a default.
     variant_config: VariantConfig = field(default_factory=VariantConfig)
+    #: P1-03: the broker-day roll clock.  It is only meaningful (and only read)
+    #: when V04 declares ``broker day``; the corpus names that convention but
+    #: supplies no clock, so it is broker-supplied and never defaulted.
+    broker_roll: str | None = None
+    #: P1-03: reject a run that has no declared V04 day boundary.  ``False``
+    #: keeps the pre-P1-03 compatibility path (which is labelled ``undeclared``
+    #: on every emitted setup instead of silently claiming a day boundary).
+    day_boundary_required: bool = False
 
     def read_variant(self, variant_id: str) -> str:
         """Read one declared fork through the single register (A7).
@@ -297,8 +307,27 @@ class SetupConfig:
         return self.variant_config.read(variant_id)
 
     @property
+    def day_boundary(self) -> DayBoundary:
+        """The one declared V04 day boundary (P1-03 / GW-01).
+
+        The read path is :func:`ict_trader.context.resolve_day_boundary`, so an
+        undeclared V04 refuses with ``NT_VARIANT_UNDECLARED`` instead of
+        selecting UTC midnight or any other convention.  ``broker day`` also
+        needs :attr:`broker_roll`, because its clock is broker-specific.
+        """
+        return resolve_day_boundary(self.variant_config,
+                                    broker_roll=self.broker_roll)
+
+    @property
     def config_hash(self) -> str:
         """The declared-variant configuration hash (SYSTEM_SPEC A2)."""
+        # Only declared values enter the payload: an undeclared boundary must
+        # not change the digest of a pre-P1-03 run.
+        extra: dict[str, object] = {}
+        if self.broker_roll is not None:
+            extra["broker_roll"] = self.broker_roll
+        if self.day_boundary_required:
+            extra["day_boundary_required"] = True
         return _config_hash(
             self.variant_config,
             bias_primitive=self.bias_primitive,
@@ -306,6 +335,7 @@ class SetupConfig:
             gate_strength=self.gate_strength,
             stack=self.stack,
             target_mode=self.target_mode,
+            **extra,
         )
 
     def __post_init__(self) -> None:
@@ -360,6 +390,10 @@ class SetupConfig:
                 f"{DAILY_BIAS_FILTERS[1:]}; the declared primitive would "
                 "otherwise be inactive")
         validate_neutral_handling(self.neutral_handling)
+        # P1-03: a declared broker clock is validated here, before any bar is
+        # read; it is never silently ignored or replaced by a default.
+        if self.broker_roll is not None:
+            parse_day_clock(self.broker_roll)
         resolve_ladder_mode(self.t1_at_r, self.t1_at_eq)
         resolve_be_mode(self.breakeven_at_r, self.t1_move_be,
                         self.ladder_mode_of() != "off")
@@ -602,6 +636,34 @@ def _htf(df: pd.DataFrame, rule: str, market: str = "cn") -> pd.DataFrame:
                              "macd", "macd_signal", "macd_hist"])
 
 
+def _boundary_raw(df: pd.DataFrame, boundary: DayBoundary,
+                  market: str) -> pd.DataFrame:
+    """Raw 1D bars bucketed on the declared day boundary (P1-03).
+
+    This is the one place a *derived* daily bucket is built: the bucket is the
+    declared half-open day, and ``date`` is its exclusive end (the bar's
+    known-at), so a base bar can never read a day that has not closed (CB-07).
+    """
+    h = boundary.bucket_frame(df, market=market)
+    h = h.sort_values("date").reset_index(drop=True)
+    return _drop_incomplete_htf(df, h)
+
+
+def _boundary_htf_from_raw(df: pd.DataFrame, raw: pd.DataFrame,
+                           market: str) -> pd.DataFrame:
+    """Align an already-bucketed 1D frame onto the base bars (P1-03)."""
+    h = add_indicators(raw)
+    return align_htf(df, h, ["close", "tenkan", "kijun", "span_a", "span_b", "cloud_top", "cloud_bottom",
+                             "macd", "macd_signal", "macd_hist"])
+
+
+def _boundary_htf(df: pd.DataFrame, boundary: DayBoundary,
+                  market: str) -> pd.DataFrame:
+    """Derived 1D indicator tier on the declared day boundary (P1-03)."""
+    return _boundary_htf_from_raw(df, _boundary_raw(df, boundary, market),
+                                  market)
+
+
 def _daily_htf(base: pd.DataFrame, daily: pd.DataFrame, close_hour: int = 15) -> pd.DataFrame:
     d = daily.copy()
     d["date"] = pd.to_datetime(d["date"]).dt.normalize() + pd.Timedelta(hours=close_hour)
@@ -678,8 +740,10 @@ def _swing_index(swings: Iterable):
 class _SetupPrecompute:
     """Everything ``build_setup`` needs per bar, computed once per call."""
 
-    def __init__(self, df: pd.DataFrame, result, cfg: "SetupConfig", daily, spec: StackSpec):
+    def __init__(self, df: pd.DataFrame, result, cfg: "SetupConfig", daily,
+                 spec: StackSpec, day_boundary: DayBoundary | None = None):
         self.n = len(df)
+        self.dates = df["date"]
         self.close = df["close"].to_numpy(float)
         self.high = df["high"].to_numpy(float)
         self.low = df["low"].to_numpy(float)
@@ -691,13 +755,28 @@ class _SetupPrecompute:
         ])
         self.atr14 = pd.Series(tr).rolling(14, min_periods=1).mean().to_numpy()
         self.swings = SwingIndex(result.swings)
+        # P1-03: when a V04 boundary is declared, every derived daily object
+        # (structure, indicators, daily filter, anchor, budget key) reads it;
+        # when it is not, ``None`` marks the pre-P1-03 compatibility path and
+        # every emitted setup says so instead of implying a boundary.
+        self.day_boundary = day_boundary
+        self.day_anchor_bar = (None if day_boundary is None
+                               else day_boundary.anchor_bars(
+                                   df, market=cfg.market))
 
         # Bias-tier swings.  ``htf_structure_gate`` reads these, never the
         # base/entry swings above (TF-01/TF-02, P0-09).  ``bias_bar_at[t]`` is
         # the last bias-TF bar already closed at base bar ``t``; a still-forming
         # bucket is never visible (CB-07).
         self.bias_swings: SwingIndex | None
-        bias_frame = _bias_structure_frame(df, daily, spec.bias_tf, cfg.market)
+        # One derived 1D bucket frame serves the structure read, the indicator
+        # tier and the daily FVG zones, so the three cannot disagree (P0-09).
+        self.raw_1d = (None if day_boundary is None
+                       or spec.bias_tf != DAILY_BIAS_FILTER_TF
+                       else _boundary_raw(df, day_boundary, cfg.market))
+        bias_frame = (self.raw_1d if self.raw_1d is not None
+                      else _bias_structure_frame(df, daily, spec.bias_tf,
+                                                 cfg.market, day_boundary))
         if bias_frame is None or len(bias_frame) < 2:
             self.bias_swings = None
             self.bias_bar_at = np.full(self.n, -1, dtype=np.int64)
@@ -719,7 +798,9 @@ class _SetupPrecompute:
 
         # HTF indicator columns as numpy, plus the NaN gate and the per-bar
         # checks for both directions (avoids a pandas row lookup per CISD).
-        d1 = _tf_frame(df, daily, spec.bias_tf, cfg.market)
+        d1 = (_boundary_htf_from_raw(df, self.raw_1d, cfg.market)
+              if self.raw_1d is not None
+              else _tf_frame(df, daily, spec.bias_tf, cfg.market, day_boundary))
         self.d1 = {c: d1[c].to_numpy(float) for c in
                    ("close", "tenkan", "kijun", "span_a", "span_b", "macd", "macd_signal")}
         self.d1_ok = ~np.isnan(np.column_stack(
@@ -794,6 +875,22 @@ class _SetupPrecompute:
         if i < 0:
             return serialize_bias(BiasDirection.NEUTRAL)
         return self.bias_swings.structure_bias(i)
+
+    def day_info(self, t: int) -> tuple[str | None, int | None, float | None]:
+        """The declared day's key, anchor bar and anchor price at base bar ``t``.
+
+        The key and the anchor are read from one boundary, so a daily budget
+        account keyed by :meth:`ict_trader.context.DayBoundary.day_keys` and
+        the anchor price travel together (GW-01: never mix two boundaries).
+        ``(None, None, None)`` means the run declared no V04 boundary; it never
+        means UTC midnight.
+        """
+        if self.day_boundary is None or self.day_anchor_bar is None:
+            return None, None, None
+        anchor = int(self.day_anchor_bar[int(t)])
+        stamp = self.dates.iloc[anchor]
+        return (self.day_boundary.day_key(stamp, market=self.cfg.market),
+                anchor, float(self.open[anchor]))
 
     def bias_state(self, t: int) -> BiasState:
         """The one :class:`BiasState` for base bar ``t`` (P1-02).
@@ -917,8 +1014,15 @@ class _SetupPrecompute:
         return Displacement(body_ratio, body_atr, body_multiple, volume_ratio, min(score, 1.0))
 
 
-def _tf_frame(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str) -> pd.DataFrame:
+def _tf_frame(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str,
+              market: str, day_boundary: DayBoundary | None = None) -> pd.DataFrame:
     if tf == "1D":
+        # P1-03: a declared boundary governs every derived 1D bucket, even when
+        # a daily CSV is supplied: the declared day and the supplied frame's
+        # unknown convention may not be mixed (GW-01).  Without V04, a supplied
+        # daily CSV keeps its own labels and close-time convention.
+        if day_boundary is not None:
+            return _boundary_htf(df, day_boundary, market)
         if market == "crypto":
             return _htf(df, "1D", market)
         close_hour = 16 if market in {"hk", "us"} else 15
@@ -926,7 +1030,12 @@ def _tf_frame(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str
     return _htf(df, tf, market)
 
 
-def _raw_htf(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str) -> pd.DataFrame | None:
+def _raw_htf(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str,
+             market: str, day_boundary: DayBoundary | None = None) -> pd.DataFrame | None:
+    # A declared boundary is authoritative for every derived 1D object, so the
+    # indicator tier (``_tf_frame``) and the structure read use the same days.
+    if tf == "1D" and day_boundary is not None:
+        return _boundary_raw(df, day_boundary, market)
     if tf == "1D" and market != "crypto":
         if daily is None:
             return None
@@ -948,23 +1057,34 @@ def _time_ns(values) -> np.ndarray:
 
 
 def _bias_structure_frame(df: pd.DataFrame, daily: pd.DataFrame | None,
-                          tf: str, market: str) -> pd.DataFrame:
+                          tf: str, market: str,
+                          day_boundary: DayBoundary | None = None) -> pd.DataFrame:
     """Closed OHLC bars of the declared bias timeframe, for the swing scan.
 
     Uses the same source as the indicator bias tier (``_tf_frame``), but keeps
     the *bias-TF bars* instead of aligning them onto the base frame.  The gate
     must read structure here, not on the base/entry frame (P0-09/TF-02).
     """
-    h = _raw_htf(df, daily, tf, market)
+    # ``_raw_htf`` is monkeypatched by existing tests with its pre-P1-03
+    # four-argument signature, so the declared-boundary keyword is only passed
+    # when there is a boundary to declare.
+    h = (_raw_htf(df, daily, tf, market, day_boundary=day_boundary)
+         if day_boundary is not None
+         else _raw_htf(df, daily, tf, market))
     if h is not None:
         return h
+    if day_boundary is not None and tf == DAILY_BIAS_FILTER_TF:
+        return _boundary_raw(df, day_boundary, market)
     # Non-crypto 1D without a supplied daily frame: ``_tf_frame`` falls back to
     # the resample, so the structure read must use the same source.
     return mark_htf_known_at(_drop_incomplete_htf(df, resample_htf(df, tf)), tf)
 
 
 def _htf_fvg_zones(df: pd.DataFrame, daily: pd.DataFrame | None,
-                   cfg: SetupConfig) -> list[tuple[float, float, int, str, str]]:
+                   cfg: SetupConfig,
+                   day_boundary: DayBoundary | None = None,
+                   raw_daily: pd.DataFrame | None = None
+                   ) -> list[tuple[float, float, int, str, str]]:
     """HTF FVG zones mapped to the first base bar that knows the zone."""
     base_dates = pd.to_datetime(df["date"]).to_numpy()
     fcfg = ICTConfig(show_fvg=True, displacement_filter=True,
@@ -972,7 +1092,12 @@ def _htf_fvg_zones(df: pd.DataFrame, daily: pd.DataFrame | None,
                      fvg_min_width_atr=cfg.fvg_min_width_atr)
     zones: list[tuple[float, float, int, str, str]] = []
     for tf in ("1h", "4h", "1D"):
-        h = _raw_htf(df, daily, tf, cfg.market)
+        if tf == DAILY_BIAS_FILTER_TF and raw_daily is not None:
+            h = raw_daily
+        else:
+            h = (_raw_htf(df, daily, tf, cfg.market, day_boundary=day_boundary)
+                 if day_boundary is not None
+                 else _raw_htf(df, daily, tf, cfg.market))
         if h is None or len(h) < 4:
             continue
         h = h.reset_index(drop=True)
@@ -1007,7 +1132,10 @@ def _htf_fvg_delivery(zones: list[tuple[float, float, int, str, str]],
 
 
 def _daily_bias_series(df: pd.DataFrame, daily: pd.DataFrame | None,
-                       cfg: SetupConfig) -> list[str | None]:
+                       cfg: SetupConfig,
+                       day_boundary: DayBoundary | None = None,
+                       raw_daily: pd.DataFrame | None = None
+                       ) -> list[str | None]:
     """Repo Candle-2/3 closure filter, right-aligned to the base bars.
 
     The filter is implemented on the **1D (daily)** frame whether or not the
@@ -1021,7 +1149,11 @@ def _daily_bias_series(df: pd.DataFrame, daily: pd.DataFrame | None,
     """
     if cfg.daily_bias_filter not in DAILY_BIAS_FILTERS[1:]:
         return [None] * len(df)
-    d = _raw_htf(df, daily, DAILY_BIAS_FILTER_TF, cfg.market)
+    d = (raw_daily if raw_daily is not None else
+         (_raw_htf(df, daily, DAILY_BIAS_FILTER_TF, cfg.market,
+                   day_boundary=day_boundary)
+          if day_boundary is not None
+          else _raw_htf(df, daily, DAILY_BIAS_FILTER_TF, cfg.market)))
     if d is None or len(d) < 2:
         return [None] * len(df)
     d = d.reset_index(drop=True)
@@ -1081,7 +1213,9 @@ def _record_refusal(refusals: list[dict] | None, **fields) -> None:
 def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 daily: pd.DataFrame | None = None,
                 refusals: list[dict] | None = None, *,
-                bias_store: BiasStateStore | None = None) -> list[CISD]:
+                bias_store: BiasStateStore | None = None,
+                day_boundary: DayBoundary | None = None,
+                day_boundary_required: bool | None = None) -> list[CISD]:
     """Build the admitted setups.  ``refusals`` is an optional audit sink.
 
     When supplied, every setup refused by a named §12 code appends one dict
@@ -1092,11 +1226,44 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     ``bias_store`` is the optional P1-02 pre-session commitment.  When given,
     the directional gate reads the **held** :class:`BiasState` from the store
     (one per scope, subject to its declared hold) instead of the per-bar
-    reading, and an absent or expired hold is recorded as ``NT_NO_BIAS``.  The
-    default ``None`` keeps the pre-P1-02 per-bar behaviour until a caller has a
-    day boundary (P1-03) at which to commit.
+    reading, and an absent or expired hold is recorded as ``NT_NO_BIAS``.
+
+    ``day_boundary`` is the P1-03 declaration.  V04 is the one declaration
+    path: when the register declares it, that boundary is read and an
+    explicitly passed :class:`DayBoundary` is accepted only as a matching cache;
+    a passed boundary without a V04 declaration refuses, and a disagreeing one
+    refuses, because GW-01 permits exactly one declaration.  With no boundary
+    the run is marked ``undeclared`` on every setup (the legacy path) and
+    ``day_boundary_required=True`` refuses with ``NT_VARIANT_UNDECLARED``
+    instead of inventing a day.
     """
     cfg = apply_quality_profile(cfg)
+    # P1-03: resolve the one declared day boundary before any bar is read.  V04
+    # is the single declaration; a second, disagreeing one refuses.
+    required = (cfg.day_boundary_required if day_boundary_required is None
+                else bool(day_boundary_required))
+    if cfg.variant_config.is_declared("V04"):
+        declared_boundary = cfg.day_boundary
+        if day_boundary is not None and not declared_boundary.matches(day_boundary):
+            raise ValueError(
+                "two day-boundary declarations disagree: V04 declares "
+                f"{declared_boundary.kind!r} at "
+                f"{declared_boundary.anchor_time.strftime('%H:%M')} "
+                f"{declared_boundary.zone}, the caller passed "
+                f"{day_boundary.kind!r} at "
+                f"{day_boundary.anchor_time.strftime('%H:%M')} "
+                f"{day_boundary.zone}; GW-01 declares exactly one")
+        day_boundary = declared_boundary
+    elif day_boundary is not None:
+        raise VariantUndeclared(
+            "V04",
+            "a DayBoundary was passed without declaring V04; the register is "
+            "the one declaration path (A7)")
+    elif required:
+        raise VariantUndeclared(
+            "V04",
+            "the run requires a declared day boundary (GW-01), but V04 is "
+            "unset; declare one of " + ", ".join(DAY_BOUNDARY_OPTIONS))
     if cfg.origin_filter == "fvg" and cfg.require_sweep:
         cfg = replace(cfg, require_sweep=False)
     spec = _stack_spec(cfg)
@@ -1104,10 +1271,11 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
     # All per-bar series are computed once: the loop below visits every CISD
     # (1210 on 20k BTC bars) and previously re-derived ATR, the HTF row lookup,
     # the swing scans and the displacement window each time.
-    pre = _SetupPrecompute(df, result, cfg, daily, spec)
+    pre = _SetupPrecompute(df, result, cfg, daily, spec, day_boundary)
     close, high, low, atr14 = pre.close, pre.high, pre.low, pre.atr14
-    htf_zones = _htf_fvg_zones(df, daily, cfg) if cfg.htf_fvg else []
-    daily_bias = _daily_bias_series(df, daily, cfg)
+    htf_zones = (_htf_fvg_zones(df, daily, cfg, day_boundary, pre.raw_1d)
+                 if cfg.htf_fvg else [])
+    daily_bias = _daily_bias_series(df, daily, cfg, day_boundary, pre.raw_1d)
     out: list[CISD] = []
     for c in result.cisds:
         t = c.end
@@ -1280,6 +1448,7 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             if quality < cfg.min_setup_score:
                 continue
             best_sweep = max(recent_sweeps, key=lambda s: s.strength) if recent_sweeps else None
+            day_key, day_anchor_bar, day_anchor_price = pre.day_info(t)
             quality_parts.update({
                 "stack": cfg.stack,
                 "bias_tf_fork": spec.bias_tf_fork,
@@ -1332,6 +1501,24 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                     else bias_state.invalidation.to_public()),
                 "bias_state_variant_ids": list(bias_state.variant_ids),
                 "bias_state_missing_fields": list(bias_state.missing_fields),
+                # P1-03: the declared day boundary and the day this signal
+                # belongs to.  ``None``/``False`` means the run declared no V04
+                # boundary; it never claims UTC midnight, and the budget key and
+                # the anchor price come from the same boundary (GW-01).
+                "day_boundary": (None if day_boundary is None
+                                 else day_boundary.kind),
+                "day_boundary_zone": (None if day_boundary is None
+                                      else day_boundary.zone),
+                "day_boundary_anchor": (
+                    None if day_boundary is None
+                    else day_boundary.anchor_time.strftime("%H:%M")),
+                "day_boundary_source": (
+                    "undeclared: legacy 1D aggregation (V04 unset)"
+                    if day_boundary is None else day_boundary.source),
+                "day_boundary_declared": day_boundary is not None,
+                "day_key": day_key,
+                "day_anchor_bar": day_anchor_bar,
+                "day_anchor_price": day_anchor_price,
                 # The timeframe the gate actually read (P0-09).  It is the
                 # same declared tier the indicators use, and is recorded so a
                 # consumer never has to assume which frame produced the state.
