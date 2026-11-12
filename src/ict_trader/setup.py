@@ -1,8 +1,8 @@
 """The frozen multi-timeframe setup.
 
-  1D  : Ichimoku cloud + Tenkan/Kijun + MACD  (3/3)
-  4H  : Ichimoku cloud + Tenkan/Kijun + MACD  (>= 2/3)
-  15m : CISD trigger, with optional cloud/MACD score
+  1D  : Ichimoku cloud + Tenkan/Kijun + MACD  (conjunction)
+  4H  : Ichimoku cloud + Tenkan/Kijun + MACD  (conjunction)
+  15m : CISD trigger, with optional cloud/MACD checks
         + recent liquidity sweep
         + PDA and displacement quality
 
@@ -48,6 +48,17 @@ from .regime import Regime, market_regime
 TARGET_MODES = ("fixed", "liquidity", "hybrid", "dol", "htf_dol")
 DEFAULT_TARGET_MODE = "liquidity"
 
+#: Declared gate strength for setup admission (SYSTEM_SPEC V11, §8.1).
+#:
+#: The corpus states admission as a conjunction -- ``setup_complete <=>
+#: window_closed_bar ^ htf_bias_aligned ^ sweep ^ displacement ^ mss ...`` --
+#: and expressly not as a score (``execution_model.md`` R11).  ``hard_veto``
+#: therefore enforces that conjunction and is the default.  ``score`` is the
+#: legacy repo 2-of-3 reading and only applies when it is declared explicitly;
+#: a boolean ``use_score`` is no longer allowed to select it silently (P0-17).
+GATE_STRENGTHS = ("hard_veto", "score")
+DEFAULT_GATE_STRENGTH = "hard_veto"
+
 #: Repo pivot width for the bias-tier swing scan: the ``ICTConfig.swing_len``
 #: default used by ``analyze`` for the base frame.  It is a repo value, not a
 #: corpus constant (P0-20 declares it); P0-09 only requires that the scan runs
@@ -72,7 +83,11 @@ class SetupConfig:
     min_1d_score: int = 2
     min_4h_score: int = 2
     min_15m_score: int = 1
-    use_score: bool = True
+    # Deprecated boolean alias.  ``None`` (the default) means "not declared";
+    # an explicit True/False is mapped to the declared gate strength in
+    # ``__post_init__`` so old callers keep their meaning without keeping the
+    # score path as the default (P0-17).
+    use_score: bool | None = None
     require_sweep: bool = True
     origin_filter: str = "any"  # any | both | sweep | fvg
     sweep_window: int = 15
@@ -142,12 +157,25 @@ class SetupConfig:
     # none | aligned: the gate reads HH/HL vs LH/LL on ``spec.bias_tf``, never
     # on the base/entry frame (TF-01/TF-02, P0-09).
     htf_structure_gate: str = "none"
+    # Declared admission strength (V11, P0-17).  ``hard_veto`` is the §8.1
+    # conjunction; ``score`` is the legacy repo count and must be explicit.
+    gate_strength: str = DEFAULT_GATE_STRENGTH
 
     def __post_init__(self) -> None:
         if self.target_mode not in TARGET_MODES:
             raise ValueError(
                 f"unknown target_mode {self.target_mode!r}; "
                 f"declare one of {TARGET_MODES}")
+        strength = str(self.gate_strength).strip().lower()
+        if strength not in GATE_STRENGTHS:
+            raise ValueError(
+                f"unknown gate_strength {self.gate_strength!r}; "
+                f"declare one of {GATE_STRENGTHS}")
+        if self.use_score is not None:
+            # Legacy alias: an explicit boolean still selects the declared
+            # strength, but it can no longer be the implicit default.
+            strength = "score" if self.use_score else "hard_veto"
+        object.__setattr__(self, "gate_strength", strength)
 
 
 def apply_quality_profile(cfg: SetupConfig) -> SetupConfig:
@@ -218,6 +246,28 @@ def _declared_target_mode(cfg: SetupConfig) -> str:
     if cfg.use_key_targets and mode == "fixed":
         return "hybrid"
     return mode
+
+
+def _admit(checks: Iterable[bool], gate_strength: str,
+           min_score: int = 0) -> bool:
+    """Apply one tier of the §8.1 admission conjunction.
+
+    ``hard_veto`` is the declared corpus strength: every enabled conjunct must
+    hold, so *one* failing check rejects the setup.  ``score`` is the legacy
+    repo reading (``>= min_score`` of the enabled checks) and is only reachable
+    when the caller declares it.  A tier with no enabled checks has no conjunct
+    to fail and therefore does not block.
+    """
+    values = [bool(c) for c in checks]
+    if not values:
+        return True
+    if gate_strength == "hard_veto":
+        return all(values)
+    if gate_strength == "score":
+        return sum(values) >= min(int(min_score), len(values))
+    raise ValueError(
+        f"unknown gate_strength {gate_strength!r}; "
+        f"declare one of {GATE_STRENGTHS}")
 
 
 def _fixed_r_target(direction: str, level: float, risk: float, rr: float) -> float:
@@ -801,15 +851,14 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
         if not pre.bars_ok(t):
             continue
         d1_checks, h4_checks, m15_checks = pre.htf_checks(t, c.direction, cfg)
-
-        def passed(checks, min_score):
-            if not checks:
-                return True
-            if cfg.use_score:
-                return sum(bool(x) for x in checks) >= min(min_score, len(checks))
-            return all(checks)
-
-        if passed(d1_checks, spec.min_bias) and passed(h4_checks, spec.min_confirm) and passed(m15_checks, cfg.min_15m_score):
+        # P0-17: admission is the §8.1 conjunction under the declared gate
+        # strength.  Under the default ``hard_veto`` a single failing check
+        # rejects the setup; the old 2-of-3 score is only available when
+        # ``gate_strength="score"`` is declared explicitly.
+        gate = cfg.gate_strength
+        if (_admit(d1_checks, gate, spec.min_bias)
+                and _admit(h4_checks, gate, spec.min_confirm)
+                and _admit(m15_checks, gate, cfg.min_15m_score)):
             # result.sweeps is sorted by reclaim_bar, so the window is a slice.
             lo = int(np.searchsorted(pre.sweep_reclaim, t - cfg.sweep_window, side="left"))
             hi = int(np.searchsorted(pre.sweep_reclaim, t, side="right"))
@@ -863,6 +912,7 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
             best_sweep = max(recent_sweeps, key=lambda s: s.strength) if recent_sweeps else None
             quality_parts.update({
                 "stack": cfg.stack,
+                "gate_strength": gate,
                 "bias_tf": spec.bias_tf,
                 "confirm_tf": spec.confirm_tf,
                 "cisd_swept": bool(c.checks.get("sweep")),
@@ -1010,7 +1060,12 @@ def main() -> None:
     ap.add_argument("--min-1d-score", type=int, default=2)
     ap.add_argument("--min-4h-score", type=int, default=2)
     ap.add_argument("--min-15m-score", type=int, default=1)
-    ap.add_argument("--strict", action="store_true", help="require every enabled check (AND)")
+    ap.add_argument("--strict", action="store_true",
+                    help="deprecated alias for --gate-strength hard_veto")
+    ap.add_argument("--gate-strength", choices=list(GATE_STRENGTHS),
+                    default=DEFAULT_GATE_STRENGTH,
+                    help="declared admission strength: hard_veto is the §8.1 "
+                         "conjunction (default); score is the legacy repo count")
     ap.add_argument("--allow-no-sweep", action="store_true")
     ap.add_argument("--origin-mode", choices=["strict_sweep", "pine"], default="strict_sweep")
     ap.add_argument("--origin-filter", choices=["any", "both", "sweep", "fvg"], default="any")
@@ -1056,7 +1111,8 @@ def main() -> None:
                       market=args.market, breakeven_at_r=args.breakeven_at_r,
                       t_plus_1=args.t_plus_1, sell_tax_bps=args.sell_tax_bps,
                       min_1d_score=args.min_1d_score, min_4h_score=args.min_4h_score,
-                      min_15m_score=args.min_15m_score, use_score=not args.strict,
+                      min_15m_score=args.min_15m_score,
+                      gate_strength="hard_veto" if args.strict else args.gate_strength,
                       require_sweep=not args.allow_no_sweep and args.origin_mode != "pine" and args.origin_filter != "fvg",
                       origin_filter=args.origin_filter,
                       sweep_reclaim_bars=args.sweep_reclaim_bars,

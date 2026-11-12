@@ -443,37 +443,70 @@ def _displacement_quality(df: pd.DataFrame, i: int, atr: float,
 
 
 
-def _sequence_check(sweeps, events, cisds, entry_bar: int | None,
-                    max_mss_gap: int = 12, max_cisd_gap: int = 6) -> dict:
+#: Declared event chain for the repo's CISD entry model (SYSTEM_SPEC §8.2,
+#: PP:CISD-08).  The corpus places the CISD *before* the MSS/CHoCH: "CISD may
+#: give earlier information because MSS needs price to travel to the swing"
+#: (doc_0354).  The old gate required ``sweep -> MSS -> CISD`` and invented
+#: 12/6-bar budgets; neither exists in the corpus, so the chain is declared
+#: here instead of being renumbered (P0-17).
+SEQUENCE_CHAIN = ("sweep", "cisd", "mss")
+
+
+def _sequence_check(sweeps, events, cisds,
+                    entry_bar: int | None = None) -> dict:
+    """Validate :data:`SEQUENCE_CHAIN` and report the bar of each leg.
+
+    The chain is ``sweep <= CISD <= MSS`` and is directional: the CISD and the
+    MSS must describe the same shift.  No maximum gap is applied -- the corpus
+    states no MSS-delay budget (M-14), so an old sweep does not by itself
+    invalidate a later shift.  A BOS never satisfies the MSS leg.
+    """
+    chain = list(SEQUENCE_CHAIN)
+    result = {
+        "valid": False,
+        "reason": "",
+        "chain": chain,
+        "sweep_bar": None,
+        "mss_bar": None,
+        "cisd_bar": None,
+        "entry_bar": entry_bar,
+    }
     if not sweeps:
-        return {"valid": False, "reason": "missing sweep",
-                "sweep_bar": None, "mss_bar": None, "cisd_bar": None, "entry_bar": entry_bar}
-    sweep = max(sweeps, key=lambda s: s.sweep_bar)
-    if not events:
-        return {"valid": False, "reason": "no MSS/CHoCH events",
-                "sweep_bar": sweep.sweep_bar, "mss_bar": None, "cisd_bar": None, "entry_bar": entry_bar}
-    msses = [e for e in events if e.kind in {"MSS", "CHoCH"} and e.index >= sweep.sweep_bar]
-    if not msses:
-        return {"valid": False, "reason": "no MSS after sweep",
-                "sweep_bar": sweep.sweep_bar, "mss_bar": None, "cisd_bar": None, "entry_bar": entry_bar}
-    mss = min(msses, key=lambda e: e.index)
-    if mss.index - sweep.sweep_bar > max_mss_gap:
-        return {"valid": False, "reason": "MSS too far from sweep",
-                "sweep_bar": sweep.sweep_bar, "mss_bar": mss.index, "cisd_bar": None, "entry_bar": entry_bar}
+        result["reason"] = "missing sweep"
+        return result
+    sweep = max(sweeps, key=lambda s: int(s.sweep_bar))
+    result["sweep_bar"] = int(sweep.sweep_bar)
     if not cisds:
-        return {"valid": False, "reason": "no CISD",
-                "sweep_bar": sweep.sweep_bar, "mss_bar": mss.index, "cisd_bar": None, "entry_bar": entry_bar}
-    cds = [c for c in cisds if c.end >= mss.index]
+        result["reason"] = "no CISD"
+        return result
+    cds = sorted(
+        (c for c in cisds if int(c.end) >= int(sweep.sweep_bar)),
+        key=lambda c: int(c.end),
+    )
     if not cds:
-        return {"valid": False, "reason": "no CISD after MSS",
-                "sweep_bar": sweep.sweep_bar, "mss_bar": mss.index, "cisd_bar": None, "entry_bar": entry_bar}
-    c = min(cds, key=lambda x: x.end)
-    if c.end - mss.index > max_cisd_gap:
-        return {"valid": False, "reason": "CISD too far from MSS",
-                "sweep_bar": sweep.sweep_bar, "mss_bar": mss.index, "cisd_bar": c.end, "entry_bar": entry_bar}
-    return {"valid": True, "reason": "sweep -> MSS -> CISD",
-            "sweep_bar": sweep.sweep_bar, "mss_bar": mss.index,
-            "cisd_bar": c.end, "entry_bar": entry_bar}
+        result["reason"] = "no CISD after sweep"
+        return result
+    result["cisd_bar"] = int(cds[0].end)
+    for c in cds:
+        cisd_bar = int(c.end)
+        msses = [
+            e for e in events
+            if str(getattr(e, "kind", "")) == "MSS"
+            and int(e.index) >= cisd_bar
+            and str(getattr(e, "direction", "")) == str(getattr(c, "direction", ""))
+        ]
+        if not msses:
+            continue
+        mss = min(msses, key=lambda e: int(e.index))
+        result.update({
+            "valid": True,
+            "reason": "sweep -> CISD -> MSS",
+            "cisd_bar": cisd_bar,
+            "mss_bar": int(mss.index),
+        })
+        return result
+    result["reason"] = "no MSS after CISD"
+    return result
 
 
 

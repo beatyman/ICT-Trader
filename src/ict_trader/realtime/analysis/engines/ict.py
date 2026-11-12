@@ -6,7 +6,7 @@ ClickHouse, the broker or the AI queue.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from numbers import Real
 from typing import Any
 
@@ -21,12 +21,23 @@ from ...models import dt_to_ms
 from ..contracts import AnalysisContext, EngineSignal, PriceZone
 from ..dealing_range import DealingRange as AnalysisDealingRange
 from ..evidence import (
-    breaker_evidence, extract_sweep, htf_bias_evidence,
+    breaker_evidence, displacement_evidence, extract_sweep, htf_bias_evidence,
     hidden_ob_evidence, ifvg_evidence, pd_array_evidence,
     rvol_evidence, structure_evidence,
 )
 
 ENGINE_VERSION = "ict_trader-0.1.0"
+
+#: §12 refusal codes for the §8.1 structure chain.  The V25 detector is a
+#: P1-07 object, so a setup whose displacement conjunct is absent must fail
+#: closed instead of treating the unmeasured conjunct as true (DP-07).  A
+#: structure print that is not the required MSS-after-sweep is likewise a
+#: refusal, never a satisfied conjunct (P0-17).
+NT_NO_DISPLACEMENT = "NT_NO_DISPLACEMENT"
+NT_NO_SHIFT = "NT_NO_SHIFT"
+#: Backwards-compatible short aliases used by the engine internals.
+NO_DISPLACEMENT = NT_NO_DISPLACEMENT
+NO_SHIFT = NT_NO_SHIFT
 
 
 def _plain(value: Any) -> Any:
@@ -41,6 +52,14 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _bar_index(times: list[int], at_ms: int) -> int | None:
+    """Index of the bar whose open time is ``at_ms`` (``None`` if not found)."""
+    try:
+        return times.index(int(at_ms))
+    except (ValueError, TypeError):
+        return None
+
+
 @dataclass(slots=True)
 class ICTEngine:
     setup_config: SetupConfig
@@ -49,6 +68,10 @@ class ICTEngine:
     version: str = ENGINE_VERSION
     warmup_bars: int = 800
     rule_mode: bool = False
+    #: Refusals from the last scan, one dict per rejected setup
+    #: (``{"code", "direction", "end", "data_gaps"}``).  An empty signal list
+    #: alone is not a passing refusal (A3); this is where the §12 code lives.
+    refusals: list[dict[str, Any]] = field(default_factory=list)
 
     def analyze(self, window: pd.DataFrame,
                 context: AnalysisContext) -> list[EngineSignal]:
@@ -62,6 +85,7 @@ class ICTEngine:
 
     def _scan(self, window: pd.DataFrame, *, actionable_only: bool,
               context: AnalysisContext | None) -> list[EngineSignal]:
+        self.refusals = []
         if not isinstance(window, pd.DataFrame):
             raise TypeError("ICTEngine expects a pandas DataFrame")
         if len(window) < 100:
@@ -120,7 +144,15 @@ class ICTEngine:
                 direction=direction,
                 source_kline_open_time=source_ms,
             )
-            structure = structure_evidence(result.events, idx, times)
+            # §8.1: `structure` means the MSS *after the sweep*, never "any
+            # BOS"; the sweep's reclaim bar is the lower bound.
+            sweep_bar = (_bar_index(times, int(sweep["time"]))
+                         if sweep is not None else None)
+            structure = structure_evidence(
+                result.events, idx, times,
+                direction=direction, after_index=sweep_bar,
+            )
+            displacement = displacement_evidence(c.quality_parts)
             breakers = breaker_evidence(result.pd_arrays, idx)
             pd_arrays = pd_array_evidence(result, idx)
             htf = htf_bias_evidence(frame, idx)
@@ -129,11 +161,35 @@ class ICTEngine:
             if sweep is None:
                 data_gaps.append("sweep")
             if structure is None:
-                data_gaps.append("structure")
+                data_gaps.append("mss")
+            if displacement is None:
+                data_gaps.append("displacement")
             if htf is None or any(v is None for v in htf.values()):
                 data_gaps.append("htf_bias")
             if rvol is None:
                 data_gaps.append("rvol")
+            if displacement is None:
+                # P1-07 owns the V25 displacement detector.  Until it exists an
+                # unmeasured conjunct is unknown, not satisfied, so the setup
+                # must be refused instead of silently admitted (DP-07).
+                self.refusals.append({
+                    "code": NO_DISPLACEMENT,
+                    "direction": direction,
+                    "end": idx,
+                    "data_gaps": sorted(set(data_gaps)),
+                })
+                continue
+            if structure is None and result.events:
+                # A structure print exists, but it is a BOS (or an MSS in the
+                # wrong direction / before the sweep), not the MSS the §8.1
+                # conjunction requires.  Admitting it would repeat the defect.
+                self.refusals.append({
+                    "code": NO_SHIFT,
+                    "direction": direction,
+                    "end": idx,
+                    "data_gaps": sorted(set(data_gaps)),
+                })
+                continue
             evidence = {
                 "entry": entry,
                 "stop": stop,
@@ -148,6 +204,8 @@ class ICTEngine:
                 "ict_overlays": overlay_evidence,
                 "sweep": sweep,
                 "structure": structure,
+                "mss": structure,
+                "displacement": displacement,
                 "breaker": breakers,
                 "fvg": pd_arrays["fvg"],
                 "ifvg": pd_arrays["ifvg"],

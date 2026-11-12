@@ -34,19 +34,91 @@ def extract_sweep(sweeps: list[dict], *, direction: str,
     }
 
 
+_MSS_DIRECTIONS = {
+    "long": "bull", "bull": "bull", "bullish": "bull",
+    "short": "bear", "bear": "bear", "bearish": "bear",
+}
+
+
 def structure_evidence(events: list[Any], end_idx: int,
-                       times: list[int]) -> dict[str, Any] | None:
-    usable = [e for e in events
-              if int(getattr(e, "index", 0)) <= end_idx]
-    if not usable:
+                       times: list[int], *,
+                       direction: str | None = None,
+                       after_index: int | None = None) -> dict[str, Any] | None:
+    """Latest **MSS** at/before ``end_idx`` -- never a BOS.
+
+    The §8.1 conjunction requires an MSS *after* the sweep, not "any structure
+    event": a BOS extends the existing trend and cannot confirm the reversal
+    the setup needs (ST-06/ST-07; ``structure_arrays.md`` P0-17).  When
+    ``after_index`` is supplied (the sweep bar), only MSS events at or after it
+    are eligible.  ``direction`` is the entry side (long/short) and filters the
+    MSS to the same shift, so a counter-direction break cannot be attached to
+    the setup.
+    """
+    wanted = None
+    if direction is not None:
+        wanted = _MSS_DIRECTIONS.get(str(direction).strip().lower())
+        if wanted is None:
+            raise ValueError(f"unknown direction: {direction!r}")
+    best: tuple[int, Any] | None = None
+    for e in events:
+        if str(getattr(e, "kind", "")) != "MSS":
+            continue
+        try:
+            idx = int(getattr(e, "index"))
+        except (TypeError, ValueError):
+            continue
+        if idx > int(end_idx):
+            continue
+        if after_index is not None and idx < int(after_index):
+            continue
+        if wanted is not None and str(getattr(e, "direction", "")) != wanted:
+            continue
+        if best is None or idx > best[0]:
+            best = (idx, e)
+    if best is None:
         return None
-    e = usable[-1]
+    idx, e = best
     return {
         "event": str(e.kind),
         "direction": "bullish" if e.direction == "bull" else "bearish",
         "price": float(e.price),
-        "time": int(times[min(int(e.index), len(times) - 1)]),
+        "time": int(times[min(idx, len(times) - 1)]) if times else 0,
     }
+
+
+#: Fields ``setup.build_setup`` records for its measured displacement.  The V25
+#: displacement detector is a P1-07 object and is not implemented yet, so these
+#: measurements are the only displacement evidence the engine can consume.  When
+#: they are absent the conjunct is *unknown*, not true (P0-17, DP-07).
+DISPLACEMENT_KEYS = ("disp_body_ratio", "disp_body_atr",
+                     "disp_body_multiple", "disp_volume_ratio")
+#: At least one *body* measure is required; a volume ratio alone is not a
+#: displacement reading.
+_REQUIRED_DISPLACEMENT_KEYS = ("disp_body_ratio", "disp_body_atr",
+                               "disp_body_multiple")
+
+
+def displacement_evidence(quality_parts: Any) -> dict[str, float] | None:
+    """Measured displacement attached to a setup, or ``None`` when absent.
+
+    ``quality_parts`` comes from ``setup.build_setup``.  At least one body
+    measure (body/range, body/ATR or body/average-body) is required: a volume
+    ratio alone does not establish expansion.  Absence is a refusal, never an
+    implicit pass -- ``ICTEngine`` records ``NT_NO_DISPLACEMENT`` and emits no
+    signal (P0-17).
+    """
+    if quality_parts is None or not hasattr(quality_parts, "get"):
+        return None
+    if not any(key in quality_parts for key in _REQUIRED_DISPLACEMENT_KEYS):
+        return None
+    out: dict[str, float] = {}
+    for key in DISPLACEMENT_KEYS:
+        if key in quality_parts:
+            try:
+                out[key] = float(quality_parts[key])
+            except (TypeError, ValueError):
+                return None
+    return out
 
 
 def breaker_evidence(pd_arrays: list[Any], end_idx: int,
