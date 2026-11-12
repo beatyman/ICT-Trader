@@ -1,19 +1,24 @@
 """P0-01 - a forming HTF bar must not leak into the signal's HTF bias.
 
-``htf_bias_evidence`` resamples the base frame and used to hand the still
-forming 1D/4H bucket to ``structure_bias``.  That bucket's partial OHLC (in
-particular its close) could set or flip the bias attached to a signal, even
-though the bucket is knowable only at its close time (CB-01, CB-07, CB-08).
+``htf_bias_evidence`` resamples the base frame and must hand only **closed**
+buckets to the corpus HH/HL structure read (P0-09 renamed the realtime
+pivot/BOS read to ``pivot_bos_bias``).  A forming bucket's partial OHLC (in
+particular its close) is knowable only at its close time (CB-01, CB-07, CB-08),
+so it must never set or confirm a swing used by the signal's HTF bias.
 """
 from __future__ import annotations
 
 import pandas as pd
 
+from ict_trader.concepts import find_pivots
+from ict_trader.context import structure_bias
 from ict_trader.realtime.analysis.evidence import htf_bias_evidence
-from ict_trader.realtime.analysis.structure import structure_bias
 
 START = pd.Timestamp("2026-01-01", tz="UTC")
 DAY = pd.Timedelta(days=1)
+
+#: Repo pivot width used to build the HTF swings (``ICTConfig.swing_len``).
+PIVOT_LEFT = 5
 
 
 def _bar(ts: pd.Timestamp, close: float) -> dict:
@@ -46,16 +51,14 @@ def _uptrend_frame() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _expected_bias(frame: pd.DataFrame, rule: str, cutoff: pd.Timestamp) -> dict:
-    """Bias from only the buckets that closed before ``cutoff``."""
+def _expected_bias(frame: pd.DataFrame, rule: str, cutoff: pd.Timestamp) -> str:
+    """HH/HL bias from only the buckets that closed before ``cutoff``."""
     complete = frame[frame["date"] < cutoff]
     x = (complete.set_index("date").resample(rule)
          .agg({"open": "first", "high": "max", "low": "min",
                "close": "last", "volume": "sum"})
          .dropna().reset_index())
-    b = structure_bias(x)
-    return {"bias": b["bias"], "event": b["event"],
-            "event_time": b["event_time"]}
+    return structure_bias(find_pivots(x, PIVOT_LEFT, 1), len(x) - 1)
 
 
 def test_forming_htf_buckets_are_not_visible_to_the_signal():
@@ -63,14 +66,9 @@ def test_forming_htf_buckets_are_not_visible_to_the_signal():
     out = htf_bias_evidence(frame, len(frame) - 1)
     assert out is not None
     day22 = START + DAY * 21
-    assert out["1D"] == _expected_bias(frame, "1D", day22)
-    assert out["4h"] == _expected_bias(
-        frame, "4h", day22 + pd.Timedelta(hours=4))
-    # The synthetic crash exists only in the forming buckets; seeing it would
-    # change both reads (1D collapses to neutral, 4H flips to bearish).
-    assert out["1D"]["bias"] == "bullish"
-    assert out["4h"]["bias"] == "bullish"
-    assert out["1D"]["event"] != "BOS_DOWN"
+    assert out["1D"] == {"bias": _expected_bias(frame, "1D", day22)}
+    assert out["4h"] == {"bias": _expected_bias(
+        frame, "4h", day22 + pd.Timedelta(hours=4))}
 
 
 def test_a_dropped_forming_bucket_is_not_replaced_by_an_incomplete_bar():

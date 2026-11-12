@@ -894,8 +894,8 @@ class RealtimeEngine:
                         if x.strip()],
         )
         from .analysis.auxiliary import build_auxiliary_context
-        from .analysis.structure import structure_bias
-        structure = structure_bias(frame)
+        from .analysis.structure import pivot_bos_bias
+        structure = pivot_bos_bias(frame)
         biases = {"chan": "neutral", "ichimoku": "neutral", "wyckoff": "neutral"}
         for run in runs:
             if run.signals:

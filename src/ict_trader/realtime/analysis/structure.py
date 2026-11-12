@@ -1,7 +1,10 @@
-"""Current LTF market-structure bias from confirmed pivots.
+"""Current LTF market-structure read from confirmed pivots.
 
-The bias is intentionally based on the *latest closed bar* and confirmed
-swings; a BOS from two hours ago must not authorize a new setup.
+This is the **repo pivot/BOS read**, not the corpus HH/HL bias primitive
+(BI-01).  It is deliberately named ``pivot_bos_bias`` so it never shares the
+name of :func:`ict_trader.context.structure_bias` (P0-09).  The bias is based
+on the *latest closed bar* and confirmed swings; a BOS from two hours ago must
+not authorize a new setup.
 """
 from __future__ import annotations
 
@@ -9,12 +12,20 @@ from typing import Any
 
 import pandas as pd
 
+from ...context import BiasState, serialize_bias
 
-def structure_bias(frame: pd.DataFrame, *, left: int = 2, right: int = 2,
+
+def pivot_bos_bias(frame: pd.DataFrame, *, left: int = 2, right: int = 2,
                    lookback: int = 120) -> dict[str, Any]:
+    """Pivot 2/2 + body-close BOS with a 20-bar trend fallback (repo rule).
+
+    Returned ``bias`` uses the one declared state vocabulary (BI-03):
+    ``bullish`` / ``bearish`` / ``neutral``.  ``event`` is the pivot/BOS event
+    name and is not a bias state.
+    """
     if frame is None or len(frame) < 20:
-        return {"bias": "neutral", "event": "", "event_time": 0,
-                "swing_high": 0.0, "swing_low": 0.0}
+        return {"bias": serialize_bias(BiasState.NEUTRAL), "event": "",
+                "event_time": 0, "swing_high": 0.0, "swing_low": 0.0}
     df = frame.tail(max(40, lookback)).reset_index(drop=True)
     highs = df["high"].astype(float).to_numpy()
     lows = df["low"].astype(float).to_numpy()
@@ -55,8 +66,10 @@ def structure_bias(frame: pd.DataFrame, *, left: int = 2, right: int = 2,
             trend, last_event = 1, "TREND_UP"
         elif closes[-1] < closes[-20] and highs[-1] <= highs[-20]:
             trend, last_event = -1, "TREND_DOWN"
+    state = (BiasState.BULL if trend > 0
+             else BiasState.BEAR if trend < 0 else BiasState.NEUTRAL)
     return {
-        "bias": "bullish" if trend > 0 else "bearish" if trend < 0 else "neutral",
+        "bias": serialize_bias(state),
         "event": last_event,
         "event_time": last_time,
         "swing_high": swing_h[1] if swing_h else 0.0,

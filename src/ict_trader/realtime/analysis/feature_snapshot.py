@@ -12,7 +12,7 @@ from typing import Any
 import pandas as pd
 
 from .pda_confluence import annotate_confluence
-from .structure import structure_bias
+from .structure import pivot_bos_bias
 
 
 TFS = ("1D", "4H", "1H", "15m")
@@ -109,7 +109,7 @@ def build_feature_snapshot(symbol: str, frame: pd.DataFrame, result: Any,
         if len(x) < 20:
             gaps.append(f"view_{tf.lower()}")
             continue
-        b = structure_bias(x)
+        b = pivot_bos_bias(x)
         views[tf] = TFView(
             timeframe=tf, bias=b["bias"], structure_event=b["event"],
             structure_price=float(b.get("swing_high") or b.get("swing_low") or 0.0),

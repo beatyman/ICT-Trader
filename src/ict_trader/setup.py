@@ -28,9 +28,10 @@ import numpy as np
 import pandas as pd
 
 from .cisd import CISD
-from .concepts import ICTConfig, analyze, detect_fvgs, load_csv
-from .context import (SwingIndex, candle2_closure, candle3_closure, dealing_range,
-                      in_session, ote_from_signal, structure_bias)
+from .concepts import ICTConfig, analyze, detect_fvgs, find_pivots, load_csv
+from .context import (BiasState, SwingIndex, candle2_closure, candle3_closure,
+                      dealing_range, in_session, ote_from_signal, parse_bias,
+                      serialize_bias)
 from .pd_arrays import count_path_liquidity, near_arrays
 from .strategy import StrategyConfig, simulate_cisd
 from .indicators import (add_indicators, align_htf, ichimoku, macd,
@@ -46,6 +47,12 @@ from .regime import Regime, market_regime
 #: no relationship with structure (target_selection R8/R18).
 TARGET_MODES = ("fixed", "liquidity", "hybrid", "dol", "htf_dol")
 DEFAULT_TARGET_MODE = "liquidity"
+
+#: Repo pivot width for the bias-tier swing scan: the ``ICTConfig.swing_len``
+#: default used by ``analyze`` for the base frame.  It is a repo value, not a
+#: corpus constant (P0-20 declares it); P0-09 only requires that the scan runs
+#: on the bias timeframe.
+_BIAS_PIVOT_LEFT = 5
 
 
 @dataclass
@@ -132,7 +139,9 @@ class SetupConfig:
     quality_profile: str = "standard"  # standard | high_value
     stack: str = "1d_4h_15m"  # 1d_4h_15m | 1d_1h_15m | 1d_15m | 4h_15m | 4h_1h_15m
     daily_bias_filter: str = "none"  # none | c2 | c3 (E1: Candle 2/3 daily bias)
-    htf_structure_gate: str = "none"  # none | aligned (corpus HTF structure HH/HL vs LH/LL)
+    # none | aligned: the gate reads HH/HL vs LH/LL on ``spec.bias_tf``, never
+    # on the base/entry frame (TF-01/TF-02, P0-09).
+    htf_structure_gate: str = "none"
 
     def __post_init__(self) -> None:
         if self.target_mode not in TARGET_MODES:
@@ -405,6 +414,31 @@ class _SetupPrecompute:
         self.atr14 = pd.Series(tr).rolling(14, min_periods=1).mean().to_numpy()
         self.swings = SwingIndex(result.swings)
 
+        # Bias-tier swings.  ``htf_structure_gate`` reads these, never the
+        # base/entry swings above (TF-01/TF-02, P0-09).  ``bias_bar_at[t]`` is
+        # the last bias-TF bar already closed at base bar ``t``; a still-forming
+        # bucket is never visible (CB-07).
+        self.bias_swings: SwingIndex | None
+        bias_frame = _bias_structure_frame(df, daily, spec.bias_tf, cfg.market)
+        if bias_frame is None or len(bias_frame) < 2:
+            self.bias_swings = None
+            self.bias_bar_at = np.full(self.n, -1, dtype=np.int64)
+        else:
+            bias_frame = bias_frame.reset_index(drop=True)
+            bias_ns = _time_ns(bias_frame["date"])
+            order = np.argsort(bias_ns, kind="stable")
+            if not np.array_equal(order, np.arange(len(order))):
+                bias_frame = bias_frame.iloc[order].reset_index(drop=True)
+                bias_ns = bias_ns[order]
+            # Raw pivots, not a global zigzag: ``build_zigzag`` lets a *later*
+            # same-kind pivot replace an earlier one, which would let a future
+            # bias bar rewrite the swing history a base bar is allowed to see.
+            # ``SwingIndex`` filters them by ``confirmed_at <= bias_bar``.
+            self.bias_swings = SwingIndex(
+                find_pivots(bias_frame, _BIAS_PIVOT_LEFT, 1))
+            self.bias_bar_at = np.searchsorted(
+                bias_ns, _time_ns(df["date"]), side="right") - 1
+
         # HTF indicator columns as numpy, plus the NaN gate and the per-bar
         # checks for both directions (avoids a pandas row lookup per CISD).
         d1 = _tf_frame(df, daily, spec.bias_tf, cfg.market)
@@ -462,6 +496,20 @@ class _SetupPrecompute:
         if not self.d1_ok[t] or not self.i15_ok[t]:
             return False
         return True if self.h4_ok is None else bool(self.h4_ok[t])
+
+    def bias_structure(self, t: int) -> str:
+        """HH/HL vs LH/LL on the declared **bias** timeframe at base bar ``t``.
+
+        Returns the one declared state vocabulary (BI-03).  Fewer than two
+        confirmed bias-TF swings resolves to ``neutral``; the aligned gate
+        then refuses the setup (BI-06).
+        """
+        if self.bias_swings is None:
+            return serialize_bias(BiasState.NEUTRAL)
+        i = int(self.bias_bar_at[int(t)])
+        if i < 0:
+            return serialize_bias(BiasState.NEUTRAL)
+        return self.bias_swings.structure_bias(i)
 
     def htf_checks(self, t: int, direction: str, cfg: "SetupConfig"):
         """The 1D / 4H / 15m indicator checks for one CISD, as bool lists."""
@@ -570,6 +618,30 @@ def _raw_htf(df: pd.DataFrame, daily: pd.DataFrame | None, tf: str, market: str)
         return _drop_incomplete_htf(df, h.sort_values("date").reset_index(drop=True))
     if tf == "4h" and market == "cn":
         return _drop_incomplete_htf(df, resample_cn_4h(df))
+    return mark_htf_known_at(_drop_incomplete_htf(df, resample_htf(df, tf)), tf)
+
+
+def _time_ns(values) -> np.ndarray:
+    """Integer nanosecond timestamps, UTC-normalised so naive/aware mix safely."""
+    ts = pd.to_datetime(pd.Series(values))
+    if ts.dt.tz is not None:
+        ts = ts.dt.tz_convert("UTC").dt.tz_localize(None)
+    return ts.to_numpy(dtype="datetime64[ns]").astype(np.int64)
+
+
+def _bias_structure_frame(df: pd.DataFrame, daily: pd.DataFrame | None,
+                          tf: str, market: str) -> pd.DataFrame:
+    """Closed OHLC bars of the declared bias timeframe, for the swing scan.
+
+    Uses the same source as the indicator bias tier (``_tf_frame``), but keeps
+    the *bias-TF bars* instead of aligning them onto the base frame.  The gate
+    must read structure here, not on the base/entry frame (P0-09/TF-02).
+    """
+    h = _raw_htf(df, daily, tf, market)
+    if h is not None:
+        return h
+    # Non-crypto 1D without a supplied daily frame: ``_tf_frame`` falls back to
+    # the resample, so the structure read must use the same source.
     return mark_htf_known_at(_drop_incomplete_htf(df, resample_htf(df, tf)), tf)
 
 
@@ -684,10 +756,14 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
         if c.grade < cfg.min_grade or sum(bool(v) for v in c.checks.values()) < cfg.min_confluence:
             continue
         bias_dir = daily_bias[t]
-        if cfg.daily_bias_filter != "none" and bias_dir != c.direction:
+        if cfg.daily_bias_filter != "none" and (
+                bias_dir is None or parse_bias(bias_dir) is not parse_bias(c.direction)):
             continue
-        htf_struct = pre.swings.structure_bias(t)
-        if cfg.htf_structure_gate == "aligned" and htf_struct != c.direction:
+        # P0-09: the HTF gate reads structure on spec.bias_tf, not on the
+        # base/entry frame.  ``neutral`` never permits a direction (BI-06).
+        htf_struct = pre.bias_structure(t)
+        if (cfg.htf_structure_gate == "aligned"
+                and parse_bias(htf_struct) is not parse_bias(c.direction)):
             continue
         if cfg.session_gate != "none" and not in_session(df, t, cfg.market, cfg.session_gate):
             continue
@@ -810,8 +886,12 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 "disp_body_atr": float(disp.body_atr),
                 "disp_body_multiple": float(disp.body_multiple),
                 "disp_volume_ratio": float(disp.volume_ratio),
-                "daily_bias": bias_dir or "",
+                "daily_bias": serialize_bias(bias_dir),
                 "htf_structure": htf_struct,
+                # The timeframe the gate actually read (P0-09).  It is the
+                # same declared tier the indicators use, and is recorded so a
+                # consumer never has to assume which frame produced the state.
+                "htf_structure_tf": spec.bias_tf,
             })
             if pd_pos is not None:
                 quality_parts["pd"] = float(pd_pos)
@@ -961,7 +1041,8 @@ def main() -> None:
     ap.add_argument("--daily-bias-filter", choices=["none", "c2", "c3"], default="none",
                     help="E1: require a Candle-2/3 daily bias aligned with the signal")
     ap.add_argument("--htf-structure-gate", choices=["none", "aligned"], default="none",
-                    help="require HTF structure (HH/HL for long, LH/LL for short) aligned with the signal")
+                    help="require structure on the declared bias timeframe "
+                         "(HH/HL for long, LH/LL for short) aligned with the signal")
     ap.add_argument("--min-disp-body", type=float, default=0.0)
     ap.add_argument("--min-disp-atr", type=float, default=0.0)
     ap.add_argument("--min-disp-multiple", type=float, default=0.0)

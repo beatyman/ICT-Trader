@@ -102,15 +102,15 @@ def test_candle3_closure_reversal():
 
 
 def test_structure_bias_hh_hl_lh_ll():
-    # HH/HL -> bull
+    # HH/HL -> bullish (canonical BI-03 token)
     bull = [P("H", 100, 1, 2), P("L", 50, 3, 4), P("H", 120, 5, 6), P("L", 60, 7, 8)]
-    assert structure_bias(bull, 8) == "bull"
-    # LH/LL -> bear
+    assert structure_bias(bull, 8) == "bullish"
+    # LH/LL -> bearish
     bear = [P("H", 120, 1, 2), P("L", 60, 3, 4), P("H", 100, 5, 6), P("L", 50, 7, 8)]
-    assert structure_bias(bear, 8) == "bear"
-    # 不足两个 swing -> flat
+    assert structure_bias(bear, 8) == "bearish"
+    # 不足两个 swing -> neutral
     flat = [P("H", 100, 1, 2), P("L", 50, 3, 4)]
-    assert structure_bias(flat, 4) == "flat"
-    # 混合（HH 但 LL）-> flat
+    assert structure_bias(flat, 4) == "neutral"
+    # 混合（HH 但 LL）-> neutral (the declared repo outcome, BI-02)
     mixed = [P("H", 100, 1, 2), P("L", 60, 3, 4), P("H", 120, 5, 6), P("L", 50, 7, 8)]
-    assert structure_bias(mixed, 8) == "flat"
+    assert structure_bias(mixed, 8) == "neutral"

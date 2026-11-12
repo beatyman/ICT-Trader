@@ -159,9 +159,26 @@ def rvol_evidence(frame: Any, end_idx: int, *, window: int = 20) -> float | None
     return float(vol[end_idx] / base)
 
 
+#: Repo pivot width used to build the HTF swings (``ICTConfig.swing_len``'s
+#: default).  It is a repo value, not a corpus constant (P0-20 declares it).
+_HTF_PIVOT_LEFT = 5
+
+
 def htf_bias_evidence(frame: Any, end_idx: int) -> dict | None:
+    """HH/HL bias for the 4H and 1D tiers, from **closed** buckets only.
+
+    The bias primitive is :func:`ict_trader.context.structure_bias` (BI-01:
+    HH/HL ⇒ bullish, LH/LL ⇒ bearish).  The realtime pivot/BOS read is a
+    different, repo rule and is deliberately not used here (P0-09); it is
+    named ``pivot_bos_bias`` in :mod:`.structure`.
+
+    A left-labelled resample bucket is knowable only at its close, so the
+    still-forming bucket is dropped before the swings are built: its partial
+    OHLC must never reach the bias attached to a signal (P0-01, CB-01/CB-07).
+    """
     import pandas as pd
-    from .structure import structure_bias
+    from ...concepts import find_pivots
+    from ...context import structure_bias
 
     sub = frame.iloc[:end_idx + 1].copy()
     if len(sub) < 20:
@@ -186,7 +203,6 @@ def htf_bias_evidence(frame: Any, end_idx: int) -> dict | None:
         if len(x) < 20:
             out[rule] = None
             continue
-        b = structure_bias(x)
-        out[rule] = {"bias": b["bias"], "event": b["event"],
-                     "event_time": b["event_time"]}
+        swings = find_pivots(x, _HTF_PIVOT_LEFT, 1)
+        out[rule] = {"bias": structure_bias(swings, len(x) - 1)}
     return out

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import time as dtime
+from enum import Enum
 from typing import Iterable, Literal
 from zoneinfo import ZoneInfo
 
@@ -17,6 +18,62 @@ import pandas as pd
 Market = Literal["cn", "hk", "crypto", "other"]
 SessionGate = Literal["none", "auto", "asian", "asian_dr", "london", "london_close", "ny_am", "ny_pm",
                       "silver_bullet", "macro_0950", "venom", "cn", "hk"]
+
+
+class BiasState(str, Enum):
+    """The one declared bias vocabulary (BI-03; SPEC §13.2).
+
+    The canonical wire values are ``bullish`` / ``bearish`` / ``neutral``.
+    The repo's ``flat`` and the realtime layer's ``neutral`` name the same
+    state; they are aliases into this enum, never separate states.  The
+    corpus's ``+unclear`` / ``+ambiguous`` forks are deliberately absent: they
+    are a declared vocabulary choice (P1-02), not interchangeable spellings.
+    """
+    BULL = "bullish"
+    BEAR = "bearish"
+    NEUTRAL = "neutral"
+
+
+#: Every repo spelling of a bias/direction token, mapped onto the enum.
+_BIAS_ALIASES: dict[str, BiasState] = {
+    "bull": BiasState.BULL,
+    "bullish": BiasState.BULL,
+    "long": BiasState.BULL,
+    "bear": BiasState.BEAR,
+    "bearish": BiasState.BEAR,
+    "short": BiasState.BEAR,
+    "flat": BiasState.NEUTRAL,
+    "neutral": BiasState.NEUTRAL,
+}
+
+
+def parse_bias(value: object) -> BiasState:
+    """Map any repo spelling of a bias state onto :class:`BiasState` (BI-03).
+
+    Unknown spellings raise instead of being coerced: a second vocabulary is
+    exactly the defect this enum removes.
+    """
+    if isinstance(value, BiasState):
+        return value
+    key = str(value).strip().lower()
+    try:
+        return _BIAS_ALIASES[key]
+    except KeyError:
+        raise ValueError(
+            f"unknown bias state {value!r}; use one of "
+            f"{[state.value for state in BiasState]}") from None
+
+
+def serialize_bias(value: object) -> str:
+    """The single serializer at every bias output boundary.
+
+    ``None`` means *no reading* and is not ``neutral``: it serializes to the
+    empty string so "no bias" is never collapsed into a direction or a neutral
+    veto (P0-04/P1-02).  All other spellings go through :func:`parse_bias`.
+    """
+    if value is None:
+        return ""
+    return parse_bias(value).value
 
 
 @dataclass(frozen=True)
@@ -165,6 +222,12 @@ class SwingIndex:
         return int(np.searchsorted(getattr(self, f"{key}_conf"), int(t), side="right"))
 
     def structure_bias(self, t: int, lookback: int = 2) -> str:
+        """HH/HL (``bullish``) or LH/LL (``bearish``) over confirmed swings.
+
+        This is the only structure read that sets bias (BI-01).  A mixed pair
+        or too few confirmed swings is ``neutral``: the repo declares the
+        mixed-pair outcome that the corpus leaves undefined (BI-02/BI-03).
+        """
         nh, nl = self._n("h", t), self._n("l", t)
         if nh >= lookback and nl >= lookback:
             hp, lp = self.h_price, self.l_price
@@ -173,10 +236,10 @@ class SwingIndex:
             lh = hp[nh - 1] < hp[nh - lookback]
             ll = lp[nl - 1] < lp[nl - lookback]
             if hh and hl:
-                return "bull"
+                return serialize_bias(BiasState.BULL)
             if lh and ll:
-                return "bear"
-        return "flat"
+                return serialize_bias(BiasState.BEAR)
+        return serialize_bias(BiasState.NEUTRAL)
 
     def dealing_range(self, t: int, lookback_bars: int = 120) -> DealingRange | None:
         nh, nl = self._n("h", t), self._n("l", t)
@@ -281,11 +344,15 @@ def candle3_closure(prior_high: float, prior_low: float,
 
 
 def structure_bias(swings: Iterable, t: int, lookback: int = 2) -> str:
-    """ICT daily-bias structure: HH/HL vs LH/LL (corpus high-consensus).
+    """ICT bias structure: HH/HL vs LH/LL (BI-01, corpus high-consensus).
 
     Bullish = the last two swing highs are rising AND the last two swing lows
     are rising (higher-high / higher-low).  Bearish = the mirror.  Anything
-    else (mixed, or fewer than two swings on each side) is ``"flat"``.
+    else (mixed, or fewer than two swings on each side) is ``"neutral"``, the
+    declared repo outcome for the mixed pair the corpus leaves undefined
+    (BI-02/BI-03).  This HH/HL read is the **only** ``structure_bias``; the
+    realtime pivot/BOS read is named ``pivot_bos_bias`` instead of sharing
+    this name (P0-09).
     """
     highs = [s for s in swings if getattr(s, "kind", "") == "H" and int(s.confirmed_at) <= t]
     lows = [s for s in swings if getattr(s, "kind", "") == "L" and int(s.confirmed_at) <= t]
@@ -297,7 +364,7 @@ def structure_bias(swings: Iterable, t: int, lookback: int = 2) -> str:
         lh = float(h2.price) < float(h1.price)
         ll = float(l2.price) < float(l1.price)
         if hh and hl:
-            return "bull"
+            return serialize_bias(BiasState.BULL)
         if lh and ll:
-            return "bear"
-    return "flat"
+            return serialize_bias(BiasState.BEAR)
+    return serialize_bias(BiasState.NEUTRAL)
