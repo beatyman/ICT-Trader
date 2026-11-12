@@ -10,6 +10,7 @@ configured only).
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,7 @@ from ..strategy import (
     DEFAULT_COMMISSION_BPS,
     DEFAULT_FIXED_R,
     DEFAULT_LOT_STEP,
+    DEFAULT_MAX_DAILY_LOSS_PCT,
     DEFAULT_MAX_TRADES_PER_DAY,
     DEFAULT_MIN_DISTANCE_FLOOR,
     DEFAULT_RISK_BAND,
@@ -31,6 +33,16 @@ from ..strategy import (
     RR_MODE_FLOORS,
     RISK_BANDS,
     validate_risk_pct,
+)
+from .analysis.risk import (
+    BUDGET_HORIZONS,
+    BUDGET_RESET_OPTIONS,
+    BUDGET_UNITS,
+    EVENT_VETO_POST_RELEASE_WAIT_MINUTES,
+    EVENT_VETO_RESPONSES,
+    EVENT_VETO_WINDOW_HOURS,
+    POST_RELEASE_WAIT_MINUTES_MAX,
+    POST_RELEASE_WAIT_MINUTES_MIN,
 )
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
@@ -101,6 +113,26 @@ def _env_list(name: str, default: list[str]) -> list[str]:
     if raw is None or not raw.strip():
         return list(default)
     return [part.strip() for part in raw.replace(";", ",").split(",") if part.strip()]
+
+
+def _env_opt_str(name: str) -> str | None:
+    """An *undeclared* option stays ``None``; it never becomes a default."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    return raw.strip()
+
+
+def _env_opt_float(name: str) -> float | None:
+    """Parse an optional numeric declaration; absent means undeclared."""
+    raw = _env_opt_str(name)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(
+            f"{name} must be a number, got {raw!r}") from None
 
 
 def validate_ict_settings(s: "Settings") -> None:
@@ -199,7 +231,30 @@ class Settings:
     max_open_positions: int = 5
     #: Declared daily budget (fills per calendar date); one value everywhere.
     max_trades_per_day: int = DEFAULT_MAX_TRADES_PER_DAY
-    max_daily_loss_pct: float = 0.03
+    #: P1-14 daily loss cap (RK-11).  0.03 is the labelled repo value (§13.8),
+    #: read from the veto register rather than typed here.
+    max_daily_loss_pct: float = DEFAULT_MAX_DAILY_LOSS_PCT
+    # ---- P1-14 veto declarations (RK-11/12/13, §9.5) ---------------------
+    #: ``None`` is *undeclared*, never a default.  The portfolio heat cap is a
+    #: §13.9 blocked parameter: the corpus supplies no value, so a run that
+    #: has not declared one refuses with ``NT_DATA_MISSING``.
+    portfolio_heat_cap_pct: float | None = None
+    #: RK-13's correlation threshold is not attested; ``None`` refuses
+    #: ``NT_DATA_MISSING`` while a correlated position is open.
+    correlation_threshold: float | None = None
+    #: RK-12's response fork (V11 gate strength): ``defer`` | ``cap_50``.
+    #: ``None`` is undeclared and refuses with ``NT_VARIANT_UNDECLARED``.
+    event_veto_response: str | None = None
+    #: RK-12's period and post-08:30 wait (the register labels the wait as a
+    #: repo selection inside the corpus's 5-10 min range).
+    event_veto_window_hours: float = EVENT_VETO_WINDOW_HOURS
+    event_veto_post_release_wait_minutes: float = (
+        EVENT_VETO_POST_RELEASE_WAIT_MINUTES)
+    #: V35 (daily budget reset): ``None`` is undeclared and refuses.
+    budget_reset_boundary: str | None = None
+    #: RK-11 requires the trade cap's unit and horizon to be declared.
+    budget_unit: str | None = None
+    budget_horizon: str | None = None
     paper_trade: bool = True             # hard safety: execution is simulated
 
     # ---- dashboard / observability --------------------------------------
@@ -276,6 +331,45 @@ class Settings:
         if self.weighted_rr_win_rate is not None and not (
                 0.0 <= float(self.weighted_rr_win_rate) <= 1.0):
             raise ValueError("weighted_rr_win_rate must be in [0, 1]")
+        # P1-14 veto declarations: an unset value stays unset (and refuses at
+        # the gate); a *set* value must be one of the declared options.
+        if self.portfolio_heat_cap_pct is not None and not (
+                0.0 <= float(self.portfolio_heat_cap_pct) <= 1.0):
+            raise ValueError("portfolio_heat_cap_pct must be in [0, 1]")
+        if self.correlation_threshold is not None and not (
+                0.0 < float(self.correlation_threshold) <= 1.0):
+            raise ValueError("correlation_threshold must be in (0, 1]")
+        if self.event_veto_response is not None and (
+                self.event_veto_response not in EVENT_VETO_RESPONSES):
+            raise ValueError(
+                f"event_veto_response must be one of "
+                f"{EVENT_VETO_RESPONSES}")
+        if (not math.isfinite(float(self.event_veto_window_hours))
+                or float(self.event_veto_window_hours) <= 0):
+            raise ValueError("event_veto_window_hours must be > 0")
+        if not (POST_RELEASE_WAIT_MINUTES_MIN
+                <= float(self.event_veto_post_release_wait_minutes)
+                <= POST_RELEASE_WAIT_MINUTES_MAX):
+            raise ValueError(
+                "event_veto_post_release_wait_minutes must lie inside "
+                f"RK-12's {POST_RELEASE_WAIT_MINUTES_MIN:g}-"
+                f"{POST_RELEASE_WAIT_MINUTES_MAX:g} minute range")
+        if self.budget_reset_boundary is not None and (
+                self.budget_reset_boundary not in BUDGET_RESET_OPTIONS):
+            raise ValueError(
+                f"budget_reset_boundary must be one of "
+                f"{BUDGET_RESET_OPTIONS}")
+        if self.budget_unit is not None and (
+                self.budget_unit not in BUDGET_UNITS):
+            raise ValueError(
+                f"budget_unit must be one of {BUDGET_UNITS}")
+        if self.budget_horizon is not None and (
+                self.budget_horizon not in BUDGET_HORIZONS):
+            raise ValueError(
+                f"budget_horizon must be one of {BUDGET_HORIZONS}")
+        if (not math.isfinite(float(self.max_daily_loss_pct))
+                or float(self.max_daily_loss_pct) < 0):
+            raise ValueError("max_daily_loss_pct must be >= 0")
         self.deepseek_max_tokens = max(256, int(self.deepseek_max_tokens))
         self.deepseek_timeout = max(10.0, float(self.deepseek_timeout))
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -344,6 +438,16 @@ class Settings:
             "lot_step": self.lot_step,
             "min_distance_floor": self.min_distance_floor,
             "weighted_rr_win_rate": self.weighted_rr_win_rate,
+            "portfolio_heat_cap_pct": self.portfolio_heat_cap_pct,
+            "correlation_threshold": self.correlation_threshold,
+            "event_veto_response": self.event_veto_response,
+            "event_veto_window_hours": self.event_veto_window_hours,
+            "event_veto_post_release_wait_minutes": (
+                self.event_veto_post_release_wait_minutes),
+            "budget_reset_boundary": self.budget_reset_boundary,
+            "budget_unit": self.budget_unit,
+            "budget_horizon": self.budget_horizon,
+            "max_daily_loss_pct": self.max_daily_loss_pct,
             "setup_min_confidence": self.setup_min_confidence,
             "analysis_scan_seconds": self.analysis_scan_seconds,
             "ict_setup_enabled": self.ict_setup_enabled,
@@ -383,6 +487,9 @@ class Settings:
             except ValueError:
                 raise ValueError(
                     "WEIGHTED_RR_WIN_RATE must be a number in [0, 1]") from None
+        veto_response = _env_opt_str("EVENT_VETO_RESPONSE")
+        budget_unit = _env_opt_str("BUDGET_UNIT")
+        budget_horizon = _env_opt_str("BUDGET_HORIZON")
         cfg = cls(
             mode=_env_str("REALTIME_MODE", "live").lower(),
             market=market,
@@ -450,7 +557,24 @@ class Settings:
             max_open_positions=_env_int("MAX_OPEN_POSITIONS", 5),
             max_trades_per_day=_env_int("MAX_TRADES_PER_DAY",
                                         DEFAULT_MAX_TRADES_PER_DAY),
-            max_daily_loss_pct=_env_float("MAX_DAILY_LOSS_PCT", 0.03),
+            max_daily_loss_pct=_env_float("MAX_DAILY_LOSS_PCT",
+                                          DEFAULT_MAX_DAILY_LOSS_PCT),
+            portfolio_heat_cap_pct=_env_opt_float(
+                "PORTFOLIO_HEAT_CAP_PCT"),
+            correlation_threshold=_env_opt_float(
+                "CORRELATION_THRESHOLD"),
+            event_veto_response=(None if veto_response is None
+                                 else veto_response.lower()),
+            event_veto_window_hours=_env_float(
+                "EVENT_VETO_WINDOW_HOURS", EVENT_VETO_WINDOW_HOURS),
+            event_veto_post_release_wait_minutes=_env_float(
+                "EVENT_VETO_POST_RELEASE_WAIT_MINUTES",
+                EVENT_VETO_POST_RELEASE_WAIT_MINUTES),
+            budget_reset_boundary=_env_opt_str("BUDGET_RESET_BOUNDARY"),
+            budget_unit=(None if budget_unit is None
+                         else budget_unit.lower()),
+            budget_horizon=(None if budget_horizon is None
+                            else budget_horizon.lower()),
             paper_trade=_env_bool("PAPER_TRADE", True),
             dashboard_host=_env_str("DASHBOARD_HOST", "127.0.0.1"),
             dashboard_port=_env_int("DASHBOARD_PORT", 8080),

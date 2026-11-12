@@ -25,6 +25,28 @@ Weighted RR and expectancy are the corpus arithmetic from SYSTEM_SPEC §9.4.
 A weighted-RR gate must carry an explicit hit-rate assumption; without one it
 refuses with ``NT_DATA_MISSING`` instead of assuming the break-even rate.
 
+P1-14 adds the four vetoes of SYSTEM_SPEC §9.5.  Every one of them is
+fail-closed and has no default:
+
+* portfolio heat cap -- §13.9 lists "portfolio heat cap" as *missing*, so the
+  cap must be declared; an undeclared cap refuses with ``NT_DATA_MISSING`` and
+  an over-heated book refuses with ``NT_BUDGET_SPENT``.
+* correlation veto (RK-13) -- the threshold and the pair correlations are not
+  attested, so both must be supplied; an unknown pair correlation is
+  ``NT_DATA_MISSING``, a simultaneous correlated position is ``NT_CORRELATION``.
+* event veto (RK-12) with the economic-calendar input I7 -- no I7 is
+  ``NT_DATA_MISSING`` (§1.5), a release inside the declared window is
+  ``NT_EVENT_VETO`` (or a declared 50% size cap), and the NFP/FOMC/CPI names
+  and the post-``08:30`` wait are separate rules.
+* consecutive-loss kill switch and daily budget (RK-11) -- the second
+  killzone loss closes the session (``NT_SESSION_CLOSED``) and the daily loss
+  or trade-count cap latches the day (``NT_BUDGET_SPENT``), reset only at the
+  declared V35 budget boundary.
+
+A veto returns one :class:`VetoDecision` with exactly one §12 code (A3) and the
+failing guard's inputs.  A refusal never re-authors a price (§15.5): it only
+withholds size or caps an already-sized plan via :func:`apply_veto`.
+
 P0-04 remains in force: a refused plan carries no size and no target ladder.
 P0-18 remains in force: the (gross, net) pair comes from the one shared
 :class:`~ict_trader.strategy.CostModel`; this module has no private fee basis.
@@ -32,8 +54,10 @@ P0-18 remains in force: the (gross, net) pair comes from the one shared
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, time as dtime, timedelta, timezone
 from typing import Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from ict_trader.cisd import (  # re-exported: the one declared stop policy
     STOP_POLICY,
@@ -41,6 +65,7 @@ from ict_trader.cisd import (  # re-exported: the one declared stop policy
     stop_from_anchor,
 )
 from ict_trader.strategy import (
+    CONSECUTIVE_LOSS_LIMIT,
     DEFAULT_COST_MODEL,
     DEFAULT_LOT_STEP,
     DEFAULT_LOT_STEP_POLICY,
@@ -50,7 +75,11 @@ from ict_trader.strategy import (
     DEFAULT_RISK_PCT,
     DEFAULT_RR_MODE,
     DEFAULT_VALUE_PER_UNIT,
+    EVENT_VETO_CAP,
+    EVENT_VETO_POST_RELEASE_WAIT_MINUTES,
+    EVENT_VETO_WINDOW_HOURS,
     LOT_STEP_POLICIES,
+    MISSING_VETO_INPUTS,
     NET_RR_FLOOR,
     RR_MODE,
     RR_MODE_FLOORS,
@@ -61,6 +90,7 @@ from ict_trader.strategy import (
     rr_floor,
     validate_risk_pct,
 )
+from ict_trader.variants import read_variant_spec
 
 # --------------------------------------------------------------------------- #
 # Declarations and §12 refusal codes
@@ -80,6 +110,19 @@ NT_RR_BELOW_FLOOR = "NT_RR_BELOW_FLOOR"
 NT_TARGET_TOO_NEAR = "NT_TARGET_TOO_NEAR"
 NT_SIZE_UNSOLVABLE = "NT_SIZE_UNSOLVABLE"
 NT_VARIANT_UNDECLARED = "NT_VARIANT_UNDECLARED"
+#: §12 budget code: the daily loss cap, the trade-count cap **and** the
+#: portfolio risk budget.  §12 has no dedicated heat code, so the portfolio
+#: heat cap is declared here as the budget code (RK-11 / RK-13).
+NT_BUDGET_SPENT = "NT_BUDGET_SPENT"
+NT_EVENT_VETO = "NT_EVENT_VETO"
+NT_CORRELATION = "NT_CORRELATION"
+#: The kill-switch code.  §12 lists the "≥2 consecutive losses in the
+#: killzone" condition under ``NT_BUDGET_SPENT`` as well, but its latch scope
+#: is the *session*, and ``CODE_MAPPING`` P1-14 names ``NT_SESSION_CLOSED`` for
+#: the consecutive-loss kill switch.  The repo declares the session-scoped
+#: code for that latch: the loss cap latches the day, the kill switch closes
+#: the session (the two codes stay distinguishable end-to-end, §5.3-5).
+NT_SESSION_CLOSED = "NT_SESSION_CLOSED"
 
 #: The register rows this module reads (declared once in ``variants``).
 RR_MODE_ID = "V28"
@@ -614,3 +657,1059 @@ def build_risk_plan(direction: str, entry: float, atr: float,
         blockers=(),
         target_levels=tuple(valid),
         **declarations)
+
+
+# --------------------------------------------------------------------------- #
+# P1-14 vetoes (SYSTEM_SPEC §9.5: RK-11, RK-12, RK-13 and the heat cap)
+# --------------------------------------------------------------------------- #
+#: The V row a veto reads.  V35 is the *daily budget reset* fork: the budget
+#: account and the session latch may reset only at that declared boundary
+#: (RE:C-26, T47), never at UTC midnight by accident (P0-03).
+BUDGET_RESET_ID = "V35"
+
+#: V11 is the *gate strength* fork.  RK-12's "defer or cap at 50%" is a
+#: strength choice -- defer is the hard veto, the 50% cap is the quality
+#: multiplier -- so the event-veto response is a V11 declaration.
+GATE_STRENGTH_ID = "V11"
+
+#: The three V35 options, read from the one register (A7).
+BUDGET_RESET_OPTIONS: tuple[str, ...] = tuple(
+    read_variant_spec(BUDGET_RESET_ID).options)
+
+#: RK-12's two attested responses to a release inside the window.  Neither is
+#: a default: a run declares one (V11) and an undeclared response refuses.
+EVENT_VETO_RESPONSES: tuple[str, ...] = ("defer", "cap_50")
+
+#: RK-12's attested post-release wait range, in minutes.  The repo selection
+#: inside the range is labelled in ``strategy.VETO_REGISTER``; a declaration
+#: outside the range is rejected instead of being clamped.
+POST_RELEASE_WAIT_MINUTES_MIN = 5.0
+POST_RELEASE_WAIT_MINUTES_MAX = 10.0
+
+#: RK-12 names three event families to avoid outright, independent of the
+#: calendar's impact taxonomy.
+EVENT_VETO_BLOCKED_EVENTS: tuple[str, ...] = ("NFP", "FOMC", "CPI")
+
+#: RK-11 requires the trade cap to declare its unit and its horizon; these are
+#: mode fields, so both positions ship and exactly one is selected.
+BUDGET_UNITS: tuple[str, ...] = ("fills", "attempts")
+BUDGET_HORIZONS: tuple[str, ...] = ("day", "session")
+
+#: The declared precedence of the veto guards.  A refusal carries exactly one
+#: code (A3), so the first failing guard in this order is the one reported.
+VETO_ORDER: tuple[str, ...] = ("budget", "event", "correlation", "heat")
+
+_NY = ZoneInfo("America/New_York")
+_US_EASTERN_0830 = dtime(8, 30)
+
+
+@dataclass(frozen=True, slots=True)
+class VetoDecision:
+    """One veto result: admitted (optionally capped) or one §12 refusal.
+
+    ``blocker`` is ``None`` for an admitted entry and exactly one §12 code for
+    a refusal; a refusal carries ``size_multiplier`` 0.0 and the failing
+    guard's inputs in ``inputs`` (A3).  The 50% event cap is expressed as a
+    multiplier on an already-sized plan, never as a re-derived price (§15.5).
+    """
+
+    blocker: str | None = None
+    detail: str = ""
+    size_multiplier: float = 1.0
+    inputs: tuple[tuple[str, object], ...] = ()
+
+    @property
+    def admitted(self) -> bool:
+        return self.blocker is None
+
+    @property
+    def capped(self) -> bool:
+        return self.admitted and self.size_multiplier < 1.0
+
+    def input_dict(self) -> dict[str, object]:
+        return dict(self.inputs)
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "admitted": self.admitted,
+            "blocker": self.blocker,
+            "detail": self.detail,
+            "size_multiplier": self.size_multiplier,
+            "inputs": self.input_dict(),
+        }
+
+
+def _veto_admitted(detail: str = "", *, size_multiplier: float = 1.0,
+                   **inputs: object) -> VetoDecision:
+    return VetoDecision(
+        detail=detail,
+        size_multiplier=float(size_multiplier),
+        inputs=tuple(sorted(inputs.items())),
+    )
+
+
+def _veto_refusal(code: str, detail: str, **inputs: object) -> VetoDecision:
+    return VetoDecision(
+        blocker=code,
+        detail=detail,
+        size_multiplier=0.0,
+        inputs=tuple(sorted(inputs.items())),
+    )
+
+
+def _as_aware(at: object) -> datetime | None:
+    """Coerce a tz-aware datetime; a naive stamp is never assumed to be UTC."""
+    if not isinstance(at, datetime):
+        return None
+    if at.tzinfo is None or at.tzinfo.utcoffset(at) is None:
+        return None
+    return at
+
+
+def _finite_non_negative(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+# --------------------------------------------------------------------------- #
+# RK-11: the declared budget-reset boundary (V35)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class BudgetBoundary:
+    """The declared daily-budget reset boundary (V35).
+
+    ``NY true day`` and ``UTC date`` are calendar dates in their zone;
+    ``broker day`` has no corpus clock and therefore requires the broker's roll
+    time and zone to be declared (:class:`ValueError` when absent).  The object
+    only buckets instants: it never supplies a default boundary, so an
+    undeclared V35 stays a refusal (:func:`session_budget_check`).
+    """
+
+    kind: str
+    broker_roll: dtime | None = None
+    broker_zone: str | None = None
+    variant_id: str = BUDGET_RESET_ID
+
+    def __post_init__(self) -> None:
+        kind = str(self.kind).strip()
+        if kind not in BUDGET_RESET_OPTIONS:
+            raise ValueError(
+                f"unknown budget-reset boundary {self.kind!r}; "
+                f"{BUDGET_RESET_ID} declares one of {BUDGET_RESET_OPTIONS}")
+        object.__setattr__(self, "kind", kind)
+        if kind == "broker day":
+            if self.broker_roll is None or not self.broker_zone:
+                raise ValueError(
+                    "V35='broker day' has no corpus clock: declare the "
+                    "broker's roll time and IANA zone")
+            object.__setattr__(
+                self, "broker_roll", _parse_clock(self.broker_roll))
+            try:
+                ZoneInfo(str(self.broker_zone))
+            except Exception:
+                raise ValueError(
+                    f"unknown broker zone {self.broker_zone!r}") from None
+        elif self.broker_roll is not None or self.broker_zone is not None:
+            raise ValueError(
+                "broker_roll/broker_zone are only meaningful for "
+                "V35='broker day'")
+
+    def day_key(self, at: datetime) -> str:
+        """The identity of the declared budget day containing ``at``."""
+        stamp = _as_aware(at)
+        if stamp is None:
+            raise ValueError(
+                "the budget boundary needs a tz-aware timestamp; a naive "
+                "stamp is never assumed to be UTC")
+        if self.kind == "NY true day":
+            return stamp.astimezone(_NY).date().isoformat()
+        if self.kind == "UTC date":
+            return stamp.astimezone(timezone.utc).date().isoformat()
+        local = stamp.astimezone(ZoneInfo(str(self.broker_zone)))
+        day = local.date()
+        if local.time() < self.broker_roll:  # type: ignore[operator]
+            day = day - timedelta(days=1)
+        return day.isoformat()
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "broker_roll": (None if self.broker_roll is None
+                            else self.broker_roll.strftime("%H:%M")),
+            "broker_zone": self.broker_zone,
+            "variant_id": self.variant_id,
+        }
+
+
+def _parse_clock(value: object) -> dtime:
+    if isinstance(value, dtime):
+        return value
+    text = str(value).strip()
+    try:
+        hour, minute = text.split(":", 1)
+        return dtime(int(hour), int(minute))
+    except (ValueError, TypeError):
+        raise ValueError(
+            f"a broker roll must be HH:MM, got {value!r}") from None
+
+
+# --------------------------------------------------------------------------- #
+# Portfolio heat cap (§13.9 blocked parameter, applied to RK-11's budget)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class PortfolioHeatCap:
+    """One declared portfolio heat cap, with its source.
+
+    §13.9 lists "portfolio heat cap" as a parameter the corpus leaves
+    *missing*, so no numeric default exists anywhere in this module: the cap is
+    ``equity * cap_pct`` and both the percentage and its source must be
+    declared.  ``cap_pct`` is a fraction of equity (``0.02`` is 2%).
+    """
+
+    cap_pct: float
+    source_id: str
+    label: str = "repo"
+    variant_id: str = ""  # §13.9 blocked parameter: no V row exists
+
+    def __post_init__(self) -> None:
+        pct = float(self.cap_pct)
+        if not math.isfinite(pct) or not 0.0 <= pct <= 1.0:
+            raise ValueError("portfolio heat cap_pct must be in [0, 1]")
+        if not str(self.source_id).strip():
+            raise ValueError(
+                "a portfolio heat cap needs its source (author/attestation); "
+                "the corpus value is missing, so it cannot be anonymous")
+        if not str(self.label).strip():
+            raise ValueError("a portfolio heat cap needs a provenance label")
+
+    def limit(self, equity: float) -> float:
+        return float(equity) * self.cap_pct
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "cap_pct": self.cap_pct,
+            "source_id": self.source_id,
+            "label": self.label,
+        }
+
+
+def risk_money(quantity: float, entry: float, stop: float,
+               value_per_unit: float = DEFAULT_VALUE_PER_UNIT) -> float:
+    """The account-currency risk of one position (RK-10 sizing identity)."""
+    return (abs(float(entry) - float(stop)) * float(quantity)
+            * float(value_per_unit))
+
+
+def plan_risk_money(plan: RiskPlan, entry: float) -> float:
+    """The risk the P1-13 plan carries, for the portfolio heat gate."""
+    if plan.stop is None or plan.quantity <= 0:
+        return 0.0
+    return risk_money(plan.quantity, entry, plan.stop, plan.value_per_unit)
+
+
+def portfolio_heat_check(declaration: PortfolioHeatCap | None, *,
+                         equity: float | None,
+                         open_risk_money: float | None,
+                         new_risk_money: float | None) -> VetoDecision:
+    """Refuse an entry that would push portfolio heat above the declared cap.
+
+    Heat is ``(open risk + new risk) / equity``.  A missing cap, equity, open
+    risk or candidate risk refuses with ``NT_DATA_MISSING``; nothing is
+    assumed to be zero.  The reversal of RK-13's "skip when already exposed":
+    the gate is on total risk, not on a direction.
+    """
+    inputs = {
+        "equity": equity,
+        "open_risk_money": open_risk_money,
+        "new_risk_money": new_risk_money,
+        "cap_pct": None if declaration is None else declaration.cap_pct,
+    }
+    if declaration is None:
+        return _veto_refusal(
+            NT_DATA_MISSING,
+            "no portfolio heat cap is declared; §13.9 lists it as missing, so "
+            "the gate cannot run on a default", **inputs)
+    balance = _finite_non_negative(equity)
+    if balance is None or balance <= 0:
+        return _veto_refusal(
+            NT_DATA_MISSING, "the heat cap needs a positive equity", **inputs)
+    open_risk = _finite_non_negative(open_risk_money)
+    if open_risk is None:
+        return _veto_refusal(
+            NT_DATA_MISSING, "the open portfolio risk is unknown", **inputs)
+    new_risk = _finite_non_negative(new_risk_money)
+    if new_risk is None:
+        return _veto_refusal(
+            NT_DATA_MISSING, "the candidate trade risk is unknown", **inputs)
+    limit = declaration.limit(balance)
+    heat = open_risk + new_risk
+    if heat > limit + 1e-9:
+        return _veto_refusal(
+            NT_BUDGET_SPENT,
+            f"portfolio heat {heat:g} would exceed the declared cap {limit:g} "
+            f"({declaration.cap_pct:g} of {balance:g})",
+            **inputs)
+    return _veto_admitted(
+        f"portfolio heat {heat:g} inside the declared cap {limit:g}",
+        heat=heat, heat_limit=limit, **inputs)
+
+
+# --------------------------------------------------------------------------- #
+# RK-13: correlation veto
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class CorrelationVeto:
+    """One declared correlation veto threshold, with its source.
+
+    RK-13 says "skip simultaneous correlated positions" and supplies no
+    threshold, so the threshold and its source must be declared.  A pair whose
+    correlation is not supplied is unknown, not zero (``NT_DATA_MISSING``).
+    """
+
+    threshold: float
+    source_id: str
+    label: str = "missing"
+    variant_id: str = ""  # RK-13 has no V row
+
+    def __post_init__(self) -> None:
+        threshold = float(self.threshold)
+        if not math.isfinite(threshold) or not 0.0 < threshold <= 1.0:
+            raise ValueError(
+                "correlation threshold must be in (0, 1]; RK-13 supplies no "
+                "value, so a declared one must be a real correlation bound")
+        if not str(self.source_id).strip():
+            raise ValueError(
+                "a correlation threshold needs its source; the corpus value "
+                "is missing")
+        if not str(self.label).strip():
+            raise ValueError("a correlation veto needs a provenance label")
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "threshold": self.threshold,
+            "source_id": self.source_id,
+            "label": self.label,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class OpenPositionRisk:
+    """One open position as the portfolio gates see it."""
+
+    symbol: str
+    risk_money: float
+
+    def __post_init__(self) -> None:
+        if not str(self.symbol).strip():
+            raise ValueError("an open position needs its symbol")
+        object.__setattr__(self, "symbol", str(self.symbol).strip().upper())
+        risk = _finite_non_negative(self.risk_money)
+        if risk is None:
+            raise ValueError("an open position needs its finite risk >= 0")
+        object.__setattr__(self, "risk_money", risk)
+
+
+def _pair_key(symbol: str, other: str) -> tuple[str, str]:
+    pair = (str(symbol).strip().upper(), str(other).strip().upper())
+    return (pair[0], pair[1]) if pair[0] <= pair[1] else (pair[1], pair[0])
+
+
+def _correlation_map(correlations: Mapping[object, object]
+                     ) -> dict[tuple[str, str], float]:
+    normal: dict[tuple[str, str], float] = {}
+    for key, value in correlations.items():
+        if not isinstance(key, (tuple, list)) or len(key) != 2:
+            raise ValueError(
+                f"a correlation key must be a symbol pair, got {key!r}")
+        normal[_pair_key(str(key[0]), str(key[1]))] = float(value)
+    return normal
+
+
+def correlation_veto(declaration: CorrelationVeto | None, *,
+                     symbol: str,
+                     open_positions: Sequence[OpenPositionRisk] = (),
+                     correlations: Mapping[object, object] | None = None
+                     ) -> VetoDecision:
+    """Refuse a new entry while a simultaneous correlated position is open.
+
+    RK-13's condition is correlation, not direction: RK-13 names no direction
+    conjunct, so adding one would author a rule the corpus does not state.
+    With no open position the gate evaluates false from the book alone and
+    needs no correlation data; with an open position, a missing threshold, a
+    missing correlation map or an unknown pair refuses ``NT_DATA_MISSING``.
+    """
+    positions = tuple(open_positions)
+    if not positions:
+        return _veto_admitted("no simultaneous open position")
+    candidate = str(symbol).strip().upper()
+    inputs = {
+        "symbol": candidate,
+        "open_symbols": tuple(p.symbol for p in positions),
+        "threshold": None if declaration is None else declaration.threshold,
+    }
+    if declaration is None:
+        return _veto_refusal(
+            NT_DATA_MISSING,
+            "no correlation threshold is declared; RK-13 supplies no value, "
+            "so the gate cannot run on a default", **inputs)
+    if not candidate:
+        return _veto_refusal(
+            NT_DATA_MISSING, "the candidate symbol is unknown", **inputs)
+    if correlations is None:
+        return _veto_refusal(
+            NT_DATA_MISSING,
+            "no pair correlations are supplied; an unknown correlation is "
+            "not zero", **inputs)
+    try:
+        table = _correlation_map(correlations)
+    except (TypeError, ValueError) as exc:
+        return _veto_refusal(
+            NT_DATA_MISSING, f"the correlation input is unusable: {exc}",
+            **inputs)
+    for position in sorted(positions, key=lambda p: (p.symbol, p.risk_money)):
+        pair = _pair_key(candidate, position.symbol)
+        corr = table.get(pair)
+        if corr is None:
+            return _veto_refusal(
+                NT_DATA_MISSING,
+                f"the correlation of {candidate} vs {position.symbol} is "
+                "unknown; it cannot be assumed uncorrelated",
+                pair=pair, **inputs)
+        if not math.isfinite(corr) or not -1.0 <= corr <= 1.0:
+            return _veto_refusal(
+                NT_DATA_MISSING,
+                f"the correlation of {candidate} vs {position.symbol} is not "
+                f"a correlation coefficient: {corr!r}",
+                pair=pair, **inputs)
+        if corr >= declaration.threshold:
+            return _veto_refusal(
+                NT_CORRELATION,
+                f"{candidate} is correlated with the open {position.symbol} "
+                f"(rho={corr:g} >= {declaration.threshold:g}); RK-13 skips "
+                "simultaneous correlated positions",
+                pair=pair, correlation=corr, **inputs)
+    return _veto_admitted(
+        "no open position is correlated above the declared threshold",
+        **inputs)
+
+
+# --------------------------------------------------------------------------- #
+# RK-12: event veto with the economic-calendar input I7
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class CalendarRelease:
+    """One economic release from the I7 calendar.
+
+    ``high_impact`` is the calendar's own taxonomy bit.  §13.9 lists the
+    "economic-calendar taxonomy" as *missing*, so this module never derives it
+    from the event name: ``None`` means unclassified and refuses
+    ``NT_DATA_MISSING`` when the release is inside the veto window.
+    """
+
+    at: datetime
+    name: str
+    high_impact: bool | None = None
+
+    def __post_init__(self) -> None:
+        stamp = _as_aware(self.at)
+        if stamp is None:
+            raise ValueError(
+                "a calendar release needs a tz-aware timestamp (I7)")
+        object.__setattr__(self, "at", stamp)
+        name = str(self.name).strip()
+        if not name:
+            raise ValueError("a calendar release needs its event name")
+        object.__setattr__(self, "name", name)
+        if self.high_impact is not None and not isinstance(
+                self.high_impact, bool):
+            raise ValueError(
+                "high_impact is the calendar's boolean classification "
+                "or None (unclassified)")
+
+    def local_time(self) -> dtime:
+        return self.at.astimezone(_NY).time()
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "at": self.at.isoformat(),
+            "name": self.name,
+            "high_impact": self.high_impact,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EconomicCalendar:
+    """The I7 economic calendar: release timestamps plus their taxonomy bit.
+
+    The calendar is a required input, not context (§1.4/§1.5): a run with no
+    calendar cannot evaluate the event veto and refuses ``NT_DATA_MISSING``
+    instead of treating the gate as passing.
+    """
+
+    releases: tuple[CalendarRelease, ...]
+    source: str = "I7"
+
+    def __post_init__(self) -> None:
+        releases = tuple(self.releases)
+        for release in releases:
+            if not isinstance(release, CalendarRelease):
+                raise ValueError(
+                    f"a calendar entry must be a CalendarRelease, got "
+                    f"{type(release).__name__}")
+        object.__setattr__(
+            self,
+            "releases",
+            tuple(sorted(releases, key=lambda r: r.at)),
+        )
+        if not str(self.source).strip():
+            raise ValueError("the economic calendar must name its source (I7)")
+
+    @classmethod
+    def from_rows(cls, rows: Sequence[object], *,
+                  source: str = "I7") -> "EconomicCalendar":
+        """Build a calendar from mappings or ``(at, name, high_impact)`` rows."""
+        releases: list[CalendarRelease] = []
+        for row in rows:
+            if isinstance(row, CalendarRelease):
+                releases.append(row)
+            elif isinstance(row, Mapping):
+                releases.append(CalendarRelease(
+                    row["at"], row["name"], row.get("high_impact")))
+            else:
+                values = tuple(row)  # type: ignore[arg-type]
+                if len(values) == 2:
+                    values = (values[0], values[1], None)
+                if len(values) != 3:
+                    raise ValueError(
+                        "a calendar row must be (at, name, high_impact)")
+                releases.append(CalendarRelease(*values))
+        return cls(tuple(releases), source=source)
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "releases": [release.to_public() for release in self.releases],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EventVetoPolicy:
+    """The declared RK-12 event veto: window, response and post-release wait.
+
+    ``response`` is the V11 gate-strength selection: ``defer`` refuses every
+    entry inside the window (hard veto), ``cap_50`` admits the entry at 50% of
+    the sized quantity (quality multiplier).  RK-12 gives the range ``5-10``
+    minutes for the post-``08:30`` wait and no preference inside it; the value
+    comes from the labelled register (``strategy.VETO_REGISTER``) and a value
+    outside the range is rejected rather than clamped.
+    """
+
+    response: str
+    window_hours: float = EVENT_VETO_WINDOW_HOURS
+    post_release_wait_minutes: float = (
+        EVENT_VETO_POST_RELEASE_WAIT_MINUTES)
+    blocked_events: tuple[str, ...] = EVENT_VETO_BLOCKED_EVENTS
+    source: str = "RK-12 / [RE:RM-21]"
+    variant_id: str = GATE_STRENGTH_ID
+
+    def __post_init__(self) -> None:
+        response = str(self.response).strip()
+        if response not in EVENT_VETO_RESPONSES:
+            raise ValueError(
+                f"unknown event-veto response {self.response!r}; "
+                f"{GATE_STRENGTH_ID} declares one of {EVENT_VETO_RESPONSES} "
+                "(defer = hard veto, cap_50 = quality multiplier)")
+        object.__setattr__(self, "response", response)
+        window = float(self.window_hours)
+        if not math.isfinite(window) or window <= 0:
+            raise ValueError("the event-veto window must be a finite "
+                             "positive number of hours")
+        wait = float(self.post_release_wait_minutes)
+        if not (POST_RELEASE_WAIT_MINUTES_MIN <= wait
+                <= POST_RELEASE_WAIT_MINUTES_MAX):
+            raise ValueError(
+                f"the post-release wait must lie inside RK-12's attested "
+                f"{POST_RELEASE_WAIT_MINUTES_MIN:g}-"
+                f"{POST_RELEASE_WAIT_MINUTES_MAX:g} minutes, got {wait:g}")
+        blocked = tuple(
+            str(name).strip().upper() for name in self.blocked_events if
+            str(name).strip())
+        if not blocked:
+            raise ValueError("the event veto needs its blocked event names")
+        object.__setattr__(self, "blocked_events", blocked)
+        if not str(self.source).strip():
+            raise ValueError("the event veto must carry its source")
+
+    @property
+    def size_multiplier(self) -> float:
+        """The declared cap for an admitted inside-window entry (RK-12)."""
+        return 1.0 if self.response == "defer" else EVENT_VETO_CAP
+
+    def _blocked_by_name(self, name: str) -> bool:
+        return str(name).strip().upper() in self.blocked_events
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "response": self.response,
+            "window_hours": self.window_hours,
+            "post_release_wait_minutes": self.post_release_wait_minutes,
+            "blocked_events": self.blocked_events,
+            "size_multiplier": self.size_multiplier,
+            "variant_id": self.variant_id,
+        }
+
+
+def event_veto(policy: EventVetoPolicy | None, *,
+               calendar: EconomicCalendar | None,
+               at: datetime) -> VetoDecision:
+    """Apply RK-12 to one prospective entry at ``at``.
+
+    The declared rules are applied in this order, so a knowable refusal is
+    never masked by missing data:
+
+    1. A calendar is mandatory (I7): no calendar is ``NT_DATA_MISSING``.
+    2. A blocked name (NFP/FOMC/CPI) on the same NY day, or inside the forward
+       window, is ``NT_EVENT_VETO`` regardless of the impact taxonomy.
+    3. A release inside the declared forward window with an unclassified
+       impact is ``NT_DATA_MISSING`` (§13.9's missing taxonomy).
+    4. A high-impact release inside the window is ``NT_EVENT_VETO`` under the
+       ``defer`` response, or an admitted entry with the declared 50% cap
+       under ``cap_50``.
+    5. Within the declared 5-10 minute wait after an ``08:30`` NY release, a
+       new entry is ``NT_EVENT_VETO``.
+
+    The 48-hour window is read forward-looking: it guards entries *into* an
+    upcoming release, while rule 5 covers the immediate aftermath of the
+    ``08:30`` slot.  A release that is already in the past and outside rule 5
+    does not veto.  "Within 48 h" does not state a direction, so this reading
+    is declared here (and is the only reading under which rule 5 adds a rule
+    rather than duplicating rule 4).
+    """
+    inputs: dict[str, object] = {
+        "at": None if not isinstance(at, datetime) else at.isoformat(),
+        "policy": None if policy is None else policy.response,
+    }
+    stamp = _as_aware(at)
+    if stamp is None:
+        return _veto_refusal(
+            NT_DATA_MISSING,
+            "the event veto needs a tz-aware entry timestamp", **inputs)
+    if calendar is None:
+        return _veto_refusal(
+            NT_DATA_MISSING,
+            "input I7 (economic calendar) is missing; the event veto "
+            "evaluates N/A and may not pass a gate (§1.5)", **inputs)
+    if policy is None:
+        return _veto_refusal(
+            NT_VARIANT_UNDECLARED,
+            "the RK-12 response fork is undeclared; declare 'defer' or "
+            "'cap_50' (V11 gate strength)", **inputs)
+
+    local_day = stamp.astimezone(_NY).date()
+    window = timedelta(hours=policy.window_hours)
+    horizon = stamp + window
+    releases = calendar.releases
+
+    # 1. Named events: avoid them on their NY day and inside the window even
+    #    when the calendar's taxonomy is missing.
+    for release in releases:
+        same_day = release.at.astimezone(_NY).date() == local_day
+        in_window = stamp <= release.at <= horizon
+        if policy._blocked_by_name(release.name) and (same_day or in_window):
+            return _veto_refusal(
+                NT_EVENT_VETO,
+                f"RK-12 avoids {release.name} "
+                f"({release.at.isoformat()})",
+                release=release.to_public(), **inputs)
+
+    # 2. An unclassified release inside the window is N/A, not "not high".
+    for release in releases:
+        if not (stamp <= release.at <= horizon):
+            continue
+        if release.high_impact is None:
+            return _veto_refusal(
+                NT_DATA_MISSING,
+                f"the calendar classifies {release.name} "
+                f"({release.at.isoformat()}) as neither high nor low impact; "
+                "the missing taxonomy may not pass a gate", **inputs)
+
+    # 3. High-impact release inside the forward window.
+    multiplier = 1.0
+    capped: list[CalendarRelease] = []
+    for release in releases:
+        if not (stamp <= release.at <= horizon) or not release.high_impact:
+            continue
+        if policy.response == "defer":
+            return _veto_refusal(
+                NT_EVENT_VETO,
+                f"high-impact release {release.name} at "
+                f"{release.at.isoformat()} is inside the declared "
+                f"{policy.window_hours:g} h window",
+                release=release.to_public(), **inputs)
+        capped.append(release)
+    if capped:
+        multiplier = policy.size_multiplier
+
+    # 4. The post-08:30 wait: separate from the forward window (the release is
+    #    already in the past, so rule 3 cannot see it).
+    wait = timedelta(minutes=policy.post_release_wait_minutes)
+    for release in releases:
+        if release.local_time() != _US_EASTERN_0830:
+            continue
+        if not (release.at <= stamp < release.at + wait):
+            continue
+        if release.high_impact is None:
+            return _veto_refusal(
+                NT_DATA_MISSING,
+                f"the 08:30 release {release.name} is unclassified; the "
+                "post-release wait cannot be evaluated", **inputs)
+        if release.high_impact:
+            return _veto_refusal(
+                NT_EVENT_VETO,
+                f"still inside the {policy.post_release_wait_minutes:g} min "
+                f"wait after the 08:30 release {release.name}",
+                release=release.to_public(), **inputs)
+
+    if capped:
+        return _veto_admitted(
+            "inside the event window; the entry is capped at "
+            f"{multiplier:.0%} (RK-12)",
+            size_multiplier=multiplier,
+            releases=tuple(r.to_public() for r in capped),
+            **inputs)
+    return _veto_admitted("no release inside the declared event window",
+                          **inputs)
+
+
+# --------------------------------------------------------------------------- #
+# RK-11: daily budget, trade-count cap and the consecutive-loss kill switch
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class TradeBudget:
+    """The declared RK-11 budget: daily cap, trade cap and kill switch.
+
+    ``unit`` and ``horizon`` are mandatory mode fields (RK-11: "max trades/day
+    declared with **unit** (trades vs attempts) and horizon").  A ``None`` cap
+    is the declared `off` position the conflict table permits (RE:C-07/C-08),
+    not a missing value: the declaration itself is always present.
+    """
+
+    unit: str
+    horizon: str
+    max_daily_loss_pct: float | None = None
+    max_trades: int | None = None
+    kill_switch_losses: int = CONSECUTIVE_LOSS_LIMIT
+    source: str = "RK-11 / [RE:RM-17..RM-19]"
+
+    def __post_init__(self) -> None:
+        unit = str(self.unit).strip()
+        if unit not in BUDGET_UNITS:
+            raise ValueError(
+                f"unknown trade-cap unit {self.unit!r}; RK-11 declares one "
+                f"of {BUDGET_UNITS}")
+        horizon = str(self.horizon).strip()
+        if horizon not in BUDGET_HORIZONS:
+            raise ValueError(
+                f"unknown budget horizon {self.horizon!r}; RK-11 declares "
+                f"one of {BUDGET_HORIZONS}")
+        object.__setattr__(self, "unit", unit)
+        object.__setattr__(self, "horizon", horizon)
+        if self.max_daily_loss_pct is not None:
+            pct = float(self.max_daily_loss_pct)
+            if not math.isfinite(pct) or not 0.0 <= pct <= 1.0:
+                raise ValueError("max_daily_loss_pct must be in [0, 1]")
+            object.__setattr__(self, "max_daily_loss_pct", pct)
+        if self.max_trades is not None and int(self.max_trades) < 0:
+            raise ValueError("max_trades must be >= 0 or None (off)")
+        # RK-11 fixes the trigger at ">= 2 consecutive losses in the killzone".
+        # A stricter switch (fire after 1) is allowed because it stops no
+        # later than the rule; a laxer one would skip the required stop.
+        if not 1 <= int(self.kill_switch_losses) <= CONSECUTIVE_LOSS_LIMIT:
+            raise ValueError(
+                f"the kill switch may not fire later than RK-11's "
+                f"{CONSECUTIVE_LOSS_LIMIT} consecutive killzone losses, got "
+                f"{self.kill_switch_losses!r}")
+        if not str(self.source).strip():
+            raise ValueError("the trade budget must carry its source")
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "unit": self.unit,
+            "horizon": self.horizon,
+            "max_daily_loss_pct": self.max_daily_loss_pct,
+            "max_trades": self.max_trades,
+            "kill_switch_losses": self.kill_switch_losses,
+        }
+
+
+@dataclass(slots=True)
+class BudgetState:
+    """The intraday budget account and the latches RK-11 resets at V35.
+
+    ``day`` is the declared budget-day key.  When a later instant falls in a
+    new declared day every counter and every latch resets together (T47 / V35),
+    so the daily cap and the session kill switch cannot leak into the next
+    declared day.  A latch is never dismissed mid-day (§11 F11).
+    """
+
+    day: str | None = None
+    realized_pnl: float = 0.0
+    killzone_losses: int = 0
+    fills: int = 0
+    attempts: int = 0
+    latch_code: str | None = None
+    latch_detail: str = ""
+
+    def _roll(self, boundary: BudgetBoundary, at: datetime) -> bool:
+        key = boundary.day_key(at)
+        if key == self.day:
+            return False
+        self.day = key
+        self.realized_pnl = 0.0
+        self.killzone_losses = 0
+        self.fills = 0
+        self.attempts = 0
+        self.latch_code = None
+        self.latch_detail = ""
+        return True
+
+    def record_outcome(self, boundary: BudgetBoundary, at: datetime, pnl: float,
+                       *, in_killzone: bool = False) -> None:
+        """Book one closed trade; a killzone loss is what RK-11 counts."""
+        if boundary is None:
+            raise ValueError(
+                "the budget account needs the declared V35 boundary")
+        self._roll(boundary, at)
+        value = float(pnl)
+        if not math.isfinite(value):
+            raise ValueError("a trade outcome must be a finite PnL")
+        self.realized_pnl += value
+        self.fills += 1
+        if in_killzone:
+            self.killzone_losses = (
+                self.killzone_losses + 1 if value < 0.0 else 0)
+
+    def record_attempt(self, boundary: BudgetBoundary, at: datetime) -> None:
+        """Count one entry attempt for ``unit='attempts'`` budgets."""
+        if boundary is None:
+            raise ValueError(
+                "the budget account needs the declared V35 boundary")
+        self._roll(boundary, at)
+        self.attempts += 1
+
+    @property
+    def trade_count(self) -> int:
+        return self.fills
+
+    def count_for(self, budget: TradeBudget) -> int:
+        return self.attempts if budget.unit == "attempts" else self.fills
+
+    def check(self, budget: TradeBudget | None, *,
+              boundary: BudgetBoundary | None,
+              at: datetime,
+              equity: float | None) -> VetoDecision:
+        """Evaluate the RK-11 gates for a prospective new entry."""
+        inputs: dict[str, object] = {
+            "day": self.day,
+            "realized_pnl": self.realized_pnl,
+            "killzone_losses": self.killzone_losses,
+            "fills": self.fills,
+            "attempts": self.attempts,
+        }
+        stamp = _as_aware(at)
+        if stamp is None:
+            return _veto_refusal(
+                NT_DATA_MISSING,
+                "the budget gate needs a tz-aware entry timestamp", **inputs)
+        if budget is None:
+            return _veto_refusal(
+                NT_DATA_MISSING,
+                "no RK-11 trade budget is declared; the daily cap, the trade "
+                "cap and the kill switch cannot be evaluated", **inputs)
+        if boundary is None:
+            return _veto_refusal(
+                NT_VARIANT_UNDECLARED,
+                f"{BUDGET_RESET_ID} (daily budget reset) is undeclared; the "
+                "budget account may not reset at an assumed boundary",
+                **inputs)
+        self._roll(boundary, stamp)
+        inputs["day"] = self.day
+        if self.latch_code is not None:
+            return _veto_refusal(
+                self.latch_code,
+                f"the day/session is latched: {self.latch_detail}",
+                **inputs)
+
+        if budget.max_daily_loss_pct is not None:
+            balance = _finite_non_negative(equity)
+            if balance is None or balance <= 0:
+                return _veto_refusal(
+                    NT_DATA_MISSING,
+                    "the daily loss cap needs the budget equity basis",
+                    **inputs)
+            limit = balance * budget.max_daily_loss_pct
+            if self.realized_pnl <= -limit:
+                self.latch_code = NT_BUDGET_SPENT
+                self.latch_detail = (
+                    f"daily loss {self.realized_pnl:g} reached the cap "
+                    f"-{limit:g}")
+                return _veto_refusal(
+                    NT_BUDGET_SPENT,
+                    f"daily loss {self.realized_pnl:g} reached the declared "
+                    f"cap -{limit:g} ({budget.max_daily_loss_pct:g} of "
+                    f"{balance:g}); new entries are halted for the day",
+                    **inputs)
+
+        if self.killzone_losses >= budget.kill_switch_losses:
+            self.latch_code = NT_SESSION_CLOSED
+            self.latch_detail = (
+                f"{self.killzone_losses} consecutive killzone losses")
+            return _veto_refusal(
+                NT_SESSION_CLOSED,
+                f"{self.killzone_losses} consecutive losses in the killzone "
+                f"(RK-11 threshold {budget.kill_switch_losses}); the session "
+                "is closed for the day", **inputs)
+
+        if budget.max_trades is not None:
+            count = self.count_for(budget)
+            if count >= int(budget.max_trades):
+                self.latch_code = NT_BUDGET_SPENT
+                self.latch_detail = (
+                    f"{count} {budget.unit} reached the declared cap "
+                    f"{budget.max_trades}")
+                return _veto_refusal(
+                    NT_BUDGET_SPENT,
+                    f"{count} {budget.unit} reached the declared "
+                    f"{budget.horizon} cap {budget.max_trades}",
+                    **inputs)
+        return _veto_admitted(
+            f"{self.count_for(budget)} {budget.unit} counted for the "
+            f"declared {budget.horizon}",
+            **inputs)
+
+
+def session_budget_check(budget: TradeBudget | None, state: BudgetState | None,
+                         *, boundary: BudgetBoundary | None,
+                         at: datetime,
+                         equity: float | None) -> VetoDecision:
+    """Module-level RK-11 entry point; a missing account is a refusal."""
+    if state is None:
+        return _veto_refusal(
+            NT_DATA_MISSING,
+            "no budget account is supplied; the kill switch has no history "
+            "and a missing history may not be read as zero losses")
+    return state.check(budget, boundary=boundary, at=at, equity=equity)
+
+
+# --------------------------------------------------------------------------- #
+# The veto board: one declared precedence, one §12 code per refusal
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class VetoRequest:
+    """Everything one prospective entry has to show the veto guards."""
+
+    at: datetime
+    equity: float | None = None
+    symbol: str = ""
+    new_risk_money: float | None = None
+    open_risk_money: float | None = None
+    open_positions: tuple[OpenPositionRisk, ...] = ()
+    correlations: Mapping[object, object] | None = None
+    calendar: EconomicCalendar | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RiskVetoBoard:
+    """The four §9.5 vetoes, applied in the declared :data:`VETO_ORDER`.
+
+    Every declaration is optional in the type system so an unconfigured run
+    can be constructed and then refuse at the gate instead of raising at
+    import/start-up; ``None`` means *undeclared* and never *off*.  The board
+    returns the first refusal only, so a caller sees exactly one §12 code and
+    that guard's inputs (A3).  A ``cap_50`` admission keeps its multiplier on
+    the decision for :func:`apply_veto`.
+    """
+
+    budget: TradeBudget | None = None
+    boundary: BudgetBoundary | None = None
+    heat: PortfolioHeatCap | None = None
+    correlation: CorrelationVeto | None = None
+    events: EventVetoPolicy | None = None
+
+    def check(self, request: VetoRequest, state: BudgetState | None) -> VetoDecision:
+        multiplier = 1.0
+        open_risk = request.open_risk_money
+        if open_risk is None:
+            open_risk = sum(p.risk_money for p in request.open_positions)
+        for guard in VETO_ORDER:
+            if guard == "budget":
+                decision = session_budget_check(
+                    self.budget, state, boundary=self.boundary,
+                    at=request.at, equity=request.equity)
+            elif guard == "event":
+                decision = event_veto(
+                    self.events, calendar=request.calendar, at=request.at)
+            elif guard == "correlation":
+                decision = correlation_veto(
+                    self.correlation, symbol=request.symbol,
+                    open_positions=request.open_positions,
+                    correlations=request.correlations)
+            elif guard == "heat":
+                decision = portfolio_heat_check(
+                    self.heat, equity=request.equity,
+                    open_risk_money=open_risk,
+                    new_risk_money=request.new_risk_money)
+            else:  # pragma: no cover - VETO_ORDER is a closed tuple
+                raise AssertionError(f"unknown veto guard {guard!r}")
+            if not decision.admitted:
+                return decision
+            multiplier *= decision.size_multiplier
+        return _veto_admitted(
+            "all declared vetoes admit the entry",
+            size_multiplier=multiplier,
+            guards=VETO_ORDER)
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "order": VETO_ORDER,
+            "budget": None if self.budget is None else self.budget.to_public(),
+            "boundary": (None if self.boundary is None
+                         else self.boundary.to_public()),
+            "heat": None if self.heat is None else self.heat.to_public(),
+            "correlation": (None if self.correlation is None
+                            else self.correlation.to_public()),
+            "events": None if self.events is None else self.events.to_public(),
+            "missing_inputs": MISSING_VETO_INPUTS,
+        }
+
+
+def apply_veto(plan: RiskPlan, decision: VetoDecision) -> RiskPlan:
+    """Carry a veto decision onto a P1-13 plan, authoring no new price.
+
+    A refusal returns the fail-closed plan of P0-04: no size, no ladder, and
+    the §12 code as the single blocker.  A ``cap_50`` admission lowers the
+    already-solved quantity (floored by the declared lot step, RK-14) and
+    leaves every price untouched (§15.5).
+    """
+    if not decision.admitted:
+        return replace(
+            plan,
+            targets=(),
+            target_levels=(),
+            quantity=0.0,
+            blockers=(decision.blocker,) if decision.blocker else (),
+        )
+    if decision.size_multiplier >= 1.0:
+        return plan
+    return replace(
+        plan,
+        quantity=round_to_lot_step(plan.quantity * decision.size_multiplier,
+                                   plan.lot_step),
+    )

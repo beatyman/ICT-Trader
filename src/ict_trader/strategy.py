@@ -104,6 +104,45 @@ RISK_ALGEBRA_REGISTER: dict[str, RegisterEntry] = {
         "RE:TS-19 / RE:C-20 (rr_3_1 form)"),
 }
 
+#: P1-14 veto declarations (RK-11/RK-12).  The two P1-14 inputs the corpus
+#: leaves *missing* -- the portfolio heat cap (§13.9 lists the string
+#: "portfolio heat cap") and RK-13's correlation threshold (no attested value)
+#: -- are deliberately absent: a run must declare them, and an undeclared
+#: value is a refusal, never a default.  :data:`MISSING_VETO_INPUTS` names them
+#: so the absence is a readable declaration rather than an oversight.
+VETO_REGISTER: dict[str, RegisterEntry] = {
+    "max_daily_loss_pct": RegisterEntry(
+        "max_daily_loss_pct", 0.03, "repo",
+        "§13.8 / RE:I-08 (live daily cap)"),
+    "consecutive_loss_limit": RegisterEntry(
+        "consecutive_loss_limit", 2, "corpus",
+        "RK-11 / RE:RM-18 (consecutive losses in the killzone)"),
+    "event_veto_window_hours": RegisterEntry(
+        "event_veto_window_hours", 48.0, "corpus (single)",
+        "RK-12 / [RE:RM-21]"),
+    "event_veto_post_release_wait_minutes": RegisterEntry(
+        "event_veto_post_release_wait_minutes", 10.0, "repo",
+        "RK-12 / [RE:RM-21] (corpus range 5-10 min; upper end selected)"),
+    "event_veto_cap_fraction": RegisterEntry(
+        "event_veto_cap_fraction", 0.5, "corpus (single)",
+        "RK-12 / [RE:RM-21] (cap at 50%)"),
+}
+
+#: §13.9 / RK-13 inputs the corpus does not supply.  They stay unfilled: the
+#: veto surface refuses with ``NT_DATA_MISSING`` until a run declares them.
+MISSING_VETO_INPUTS: tuple[str, ...] = (
+    "portfolio_heat_cap", "correlation_threshold")
+
+DEFAULT_MAX_DAILY_LOSS_PCT = float(
+    VETO_REGISTER["max_daily_loss_pct"].value)
+CONSECUTIVE_LOSS_LIMIT = int(
+    VETO_REGISTER["consecutive_loss_limit"].value)
+EVENT_VETO_WINDOW_HOURS = float(
+    VETO_REGISTER["event_veto_window_hours"].value)
+EVENT_VETO_POST_RELEASE_WAIT_MINUTES = float(
+    VETO_REGISTER["event_veto_post_release_wait_minutes"].value)
+EVENT_VETO_CAP = float(VETO_REGISTER["event_veto_cap_fraction"].value)
+
 
 def declared(name: str) -> RegisterEntry:
     """Return the one register entry for ``name`` (KeyError if undeclared)."""
