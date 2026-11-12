@@ -170,6 +170,119 @@ STRUCTURE_LEVEL_SELECTION_SOURCES: dict[str, dict[str, str]] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# P1-07: structure labels, the V07 MSS family and the ST-09 level mains
+# ---------------------------------------------------------------------------
+#: ST-08/MS-R08: ``CHoCH`` is a label of its own, never a synonym for MSS or
+#: BOS.  A counter-trend break labelled CHoCH is *unconfirmed* until the first
+#: BOS in the new direction (MS-R25); only then may a consumer admit it.
+STRUCTURE_LABELS = ("MSS", "BOS", "CHoCH")
+CHoCH_LABEL = "CHoCH"
+
+#: V07 (SN:C12): six non-equivalent MSS families.  The roles of MSS and CHoCH
+#: are **inverted** between two authorities, so the family is a BLOCK fork: no
+#: family is selected by default and a label is never produced without one
+#: where the partition matters (ST-06 alone still yields MSS/BOS -- see
+#: :func:`structure_label`).
+MSS_FAMILIES = ("F1", "F2", "F3", "F4", "F5", "F6")
+
+#: ST-09 (SN:C15): the four attested MSS level mains, kept separate from the
+#: two *implemented* readings above.  A family names the level it requires; the
+#: corpus supplies no delimitation procedure for three of the four, so a run
+#: must declare which implemented reading it uses and the event records both
+#: (P1-07).
+MSS_LEVEL_SELECTIONS = (
+    "launching_swing", "protected_swing",
+    "most_recent_secondary_swing", "significant_swing",
+)
+
+#: The implemented ``STRUCTURE_LEVEL_SELECTIONS`` reading, if any, that realises
+#: each ST-09 main.  ``None`` is the corpus gap (MS-M03/MS-M05): the main has no
+#: operational procedure, so no code may claim to test that level.
+MSS_LEVEL_IMPLEMENTATION: dict[str, str | None] = {
+    "launching_swing": None,
+    "protected_swing": None,
+    "most_recent_secondary_swing": "most_recent_confirmed",
+    "significant_swing": None,
+}
+
+#: Every V07 family: the level it breaks, that level's corpus status, the
+#: MSS/CHoCH ordering, and how that ordering maps onto the labels this module
+#: can actually compute.  ``level_status="missing"`` is the corpus's own answer
+#: for the level, never a default.
+#:
+#: Only the **first-break partition** is computable from OHLC: F5 emits CHoCH
+#: and leaves it unconfirmed until the first BOS in the new direction (ST-08),
+#: while F1-F4/F6 label that first break MSS.  The later steps -- F5's
+#: protected-swing MSS and F6's long-term CHoCH -- need ST-09 main 2 (the
+#: protected swing), which the corpus never operationalises (MS-M03/MS-M05);
+#: they are recorded as a gap in ``level_status`` and are deliberately not
+#: emitted rather than fabricated.
+MSS_FAMILY_SPECS: dict[str, dict[str, object]] = {
+    "F1": {
+        "name": "one level + two conditions",
+        "level": "launching_swing", "level_status": "missing",
+        "choch_first": False, "confirmation": "mss",
+        "source": "[SN:C12] doc_0070"},
+    "F2": {
+        "name": "counter-trend break qualified by context",
+        "level": "launching_swing", "level_status": "missing",
+        "choch_first": False, "confirmation": "mss",
+        "source": "[SN:C12] doc_0090/doc_0069"},
+    "F3": {
+        "name": "meaningful swing + displacement + context",
+        "level": "significant_swing", "level_status": "missing",
+        "choch_first": False, "confirmation": "mss",
+        "source": "[SN:C12] doc_0354"},
+    "F4": {
+        "name": "MSS as a higher-confluence CHoCH",
+        "level": "significant_swing", "level_status": "missing",
+        "choch_first": False, "confirmation": "mss",
+        "source": "[SN:C12] doc_0054"},
+    "F5": {
+        "name": "MSS as reversal confirmation after CHoCH",
+        "level": "protected_swing", "level_status": "missing",
+        "choch_first": True, "confirmation": "choch_then_bos",
+        "source": "[SN:C12] doc_0098 lineage"},
+    "F6": {
+        "name": "MSS as the initial signal",
+        "level": "most_recent_secondary_swing", "level_status": "corpus",
+        "choch_first": False, "confirmation": "mss_then_choch",
+        "source": "[SN:C12] doc_0549"},
+}
+
+
+def structure_family_spec(family: str) -> dict[str, object]:
+    """The declared V07 family record, or a refusal for an unknown family."""
+    try:
+        return MSS_FAMILY_SPECS[str(family)]
+    except KeyError:
+        raise ValueError(
+            f"unknown MSS family {family!r}; declare one of {MSS_FAMILIES} "
+            f"(V07/SN:C12)") from None
+
+
+def structure_label(trend_before: int, direction: Direction, *,
+                    family: str | None = None) -> str:
+    """ST-06/ST-08 label for one closed-bar break.
+
+    A break that continues the prevailing trend is ``BOS``.  A counter-trend
+    break is ``MSS`` under the corpus's only deterministic rule
+    (``bull_break => MSS if trend_state <= 0``, mirrored), unless the declared
+    V07 family assigns the first shift to ``CHoCH``: only ``F5`` does, because
+    the corpus inverts the MSS/CHoCH roles between authorities and the two may
+    never be merged (MS-R08, §6.2).  With no family declared the ST-06 label
+    only is produced -- no CHoCH is inferred, because V07 is a BLOCK fork.
+    """
+    trend = int(trend_before)
+    if (direction == "bull" and trend > 0) or (direction == "bear" and trend < 0):
+        return "BOS"
+    # ST-06: a break with no established trend (trend_state == 0) is MSS, not a
+    # reversal.  CHoCH is reserved for a break *against* an established trend.
+    if family is None or trend == 0:
+        return "MSS"
+    return "CHoCH" if bool(structure_family_spec(family)["choch_first"]) else "MSS"
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -223,6 +336,11 @@ class ICTConfig:
     #: ST-09: which confirmed swing the break is tested against (declared, not
     #: implied).  ``detect_structure`` validates the value.
     structure_level_selection: str = DEFAULT_STRUCTURE_LEVEL_SELECTION
+    #: V07 (SN:C12) BLOCK: the MSS family is **not** chosen by default.
+    #: ``None`` keeps the corpus's only deterministic label rule (ST-06:
+    #: MSS/BOS).  A declared family additionally records its ST-09 level
+    #: requirement on every event and, for F5, emits the CHoCH-first partition.
+    structure_family: str | None = None
     #: PP:C9/R4: which breaker tier is emitted (``minimal`` flips a failed OB;
     #: ``sequenced`` additionally requires a sweep before the flip).
     breaker_tier: str = DEFAULT_BREAKER_TIER
@@ -240,7 +358,7 @@ class Swing:
 class StructureEvent:
     index: int
     price: float
-    kind: Literal["MSS", "BOS"]
+    kind: Literal["MSS", "BOS", "CHoCH"]
     direction: Direction
     #: Identity of the broken swing (P0-20).  The de-dupe key is
     #: ``(swing_index, price)``: a re-break of the same price by a *newer*
@@ -248,6 +366,32 @@ class StructureEvent:
     swing_index: int | None = None
     #: The declared ST-09 selection that produced this event.
     level_selection: str = ""
+    #: The declared V07 family that produced the label (``""`` when no family is
+    #: declared; ST-06 still yields MSS/BOS).
+    family: str = ""
+    #: ST-08: a CHoCH is emitted **unconfirmed** and is confirmed only by the
+    #: first BOS in the new direction (MS-R25).  Every MSS/BOS is confirmed at
+    #: emission.
+    confirmed: bool = True
+    #: The bar of the confirming BOS for a CHoCH; ``None`` while unconfirmed.
+    confirmed_at: int | None = None
+    #: The ST-09 level main the family requires and that level's corpus status
+    #: (recorded so a declared family is never mistaken for the level it does
+    #: not compute).
+    level_requirement: str = ""
+    level_status: str = ""
+
+    @property
+    def is_choch(self) -> bool:
+        return str(self.kind) == CHoCH_LABEL
+
+    def is_confirmed(self, at: int | None = None) -> bool:
+        """ST-08 state at bar ``at`` (the whole history when ``at is None``)."""
+        if not self.is_choch:
+            return True
+        if not self.confirmed:
+            return False
+        return at is None or int(at) >= int(self.confirmed_at or self.index)
 
 
 @dataclass
@@ -827,20 +971,38 @@ def _candidate_low(level_selection: str, close_t: float, t: int,
     return sw_index, level
 
 
+def _family_fields(family: str | None) -> dict[str, object]:
+    """The V07/ST-09 provenance a declared family stamps on each event."""
+    if family is None:
+        return {}
+    spec = structure_family_spec(family)
+    return {
+        "family": str(family),
+        "level_requirement": str(spec["level"]),
+        "level_status": str(spec["level_status"]),
+    }
+
+
 def detect_structure(
     df: pd.DataFrame,
     swings: list[Swing],
     *,
     level_selection: str = DEFAULT_STRUCTURE_LEVEL_SELECTION,
+    mss_family: str | None = None,
 ) -> tuple[list[StructureEvent], pd.Series]:
-    """Close-through-swing MSS/BOS with a simple trend state (ST-04/ST-06).
+    """Close-through-swing MSS/BOS/CHoCH with a simple trend state (ST-04/ST-06).
 
-    Two formerly implicit choices are now declarations (P0-20):
+    Three formerly implicit choices are now declarations (P0-20/P1-07):
 
     * **level selection** (ST-09).  ``most_recent_confirmed`` tests only the
       latest confirmed swing on each side -- the repo reading.  ``all_confirmed``
       applies ST-04 literally over every confirmed swing and reports the nearest
       level that was actually broken.
+    * **MSS family** (V07/SN:C12).  ``mss_family`` is validated against
+      :data:`MSS_FAMILIES`; ``None`` leaves the ST-06 label only.  A declared
+      family stamps its level requirement on the event.  ``F5`` emits the
+      CHoCH-first partition: the first counter-trend break is CHoCH, left
+      **unconfirmed** until the first BOS in the new direction (ST-08/MS-R25).
     * **de-dupe identity** (C12).  The key is ``(swing.index, swing.price)``,
       never the price alone: a re-break of the same price by a newer swing is a
       new event, while breaking the same swing twice is not.
@@ -849,6 +1011,8 @@ def detect_structure(
         raise ValueError(
             f"unknown structure level selection {level_selection!r}; declare "
             f"one of {STRUCTURE_LEVEL_SELECTIONS} (ST-09)")
+    if mss_family is not None:
+        structure_family_spec(mss_family)  # refuse an unknown family up front
     n = len(df)
     close = df["close"].to_numpy()
     events: list[StructureEvent] = []
@@ -856,6 +1020,8 @@ def detect_structure(
     trend_series = np.zeros(n, dtype=int)
     broken_highs: set[tuple[int, float]] = set()
     broken_lows: set[tuple[int, float]] = set()
+    #: ST-08: the CHoCH awaiting its first same-direction BOS.
+    pending: StructureEvent | None = None
 
     # Point-in-time swing pointers.  The old implementation rebuilt
     # `[s for s in swings ...]` on every bar, which is O(N * swings) and
@@ -877,6 +1043,27 @@ def detect_structure(
     confirmed_low_prices: list[float] = []
     high_index_at: dict[float, int] = {}
     low_index_at: dict[float, int] = {}
+
+    def emit(t: int, swing_index: int, price: float, direction: Direction,
+             label: str) -> StructureEvent:
+        nonlocal pending
+        event = StructureEvent(
+            t, price, label, direction, swing_index=swing_index,
+            level_selection=level_selection, **_family_fields(mss_family))
+        if label == CHoCH_LABEL:
+            # ST-08: emitted unconfirmed; only a later BOS may confirm it.
+            event.confirmed = False
+            event.confirmed_at = None
+            pending = event
+        elif pending is not None:
+            # The first BOS in the new direction confirms the preceding CHoCH.
+            # An opposite break can never confirm it (MS-R50), so it is dropped.
+            if label == "BOS":
+                pending.confirmed = True
+                pending.confirmed_at = t
+            pending = None
+        events.append(event)
+        return event
 
     for t in range(n):
         while hi < len(highs_sorted) and int(highs_sorted[hi].confirmed_at) <= t:
@@ -904,17 +1091,13 @@ def detect_structure(
                                 confirmed_low_prices, low_index_at)
 
         if cand_h is not None and cand_h not in broken_highs:
-            kind: Literal["MSS", "BOS"] = "MSS" if trend <= 0 else "BOS"
-            events.append(StructureEvent(
-                t, cand_h[1], kind, "bull",
-                swing_index=cand_h[0], level_selection=level_selection))
+            emit(t, cand_h[0], cand_h[1], "bull",
+                 structure_label(trend, "bull", family=mss_family))
             broken_highs.add(cand_h)
             trend = 1
         elif cand_l is not None and cand_l not in broken_lows:
-            kind = "MSS" if trend >= 0 else "BOS"
-            events.append(StructureEvent(
-                t, cand_l[1], kind, "bear",
-                swing_index=cand_l[0], level_selection=level_selection))
+            emit(t, cand_l[0], cand_l[1], "bear",
+                 structure_label(trend, "bear", family=mss_family))
             broken_lows.add(cand_l)
             trend = -1
         trend_series[t] = trend
@@ -1437,8 +1620,13 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
         raise ValueError("not enough bars")
     pivots = find_pivots(df, cfg.swing_len, PIVOT_RIGHT)
     swings = build_zigzag(pivots)
-    events, trend = detect_structure(
-        df, swings, level_selection=cfg.structure_level_selection)
+    # P1-07: the V07 family is a BLOCK fork, so it is forwarded only when the
+    # run declared one; with no declaration the ST-06 label rule is unchanged.
+    structure_kwargs: dict[str, object] = {
+        "level_selection": cfg.structure_level_selection}
+    if cfg.structure_family is not None:
+        structure_kwargs["mss_family"] = cfg.structure_family
+    events, trend = detect_structure(df, swings, **structure_kwargs)
     # Levels/sweeps are built first: a breaker is a failed OB **after a sweep**
     # (PP:C9/R4), so the declared tier needs the sweep inventory at detection
     # time instead of inheriting a bare "mitigated" flag (P0-20).

@@ -21,9 +21,12 @@ from ...models import dt_to_ms
 from ..contracts import AnalysisContext, EngineSignal, PriceZone
 from ..dealing_range import DealingRange as AnalysisDealingRange
 from ..evidence import (
-    breaker_evidence, displacement_evidence, extract_sweep, htf_bias_evidence,
-    hidden_ob_evidence, ifvg_evidence, pd_array_evidence,
-    rvol_evidence, structure_evidence,
+    NT_DATA_MISSING, NT_NO_DISPLACEMENT, NT_NO_SHIFT, NT_SHIFT_UNCONFIRMED,
+    DisplacementSpec, breaker_evidence, default_displacement_spec,
+    displacement_evidence, evaluate_displacement, extract_sweep,
+    htf_bias_evidence, hidden_ob_evidence, ifvg_evidence, last_bar_closed,
+    pd_array_evidence, rvol_evidence, structure_evidence,
+    unconfirmed_shift_evidence,
 )
 
 ENGINE_VERSION = "ict_trader-0.1.0"
@@ -60,14 +63,9 @@ def engine_rr_floor(mode: str = DEFAULT_ENGINE_RR_MODE) -> float:
         ) from exc
 
 
-#: §12 refusal codes for the §8.1 structure chain.  The V25 detector is a
-#: P1-07 object, so a setup whose displacement conjunct is absent must fail
-#: closed instead of treating the unmeasured conjunct as true (DP-07).  A
-#: structure print that is not the required MSS-after-sweep is likewise a
-#: refusal, never a satisfied conjunct (P0-17).
-NT_NO_DISPLACEMENT = "NT_NO_DISPLACEMENT"
-NT_NO_SHIFT = "NT_NO_SHIFT"
-#: Backwards-compatible short aliases used by the engine internals.
+#: §12 refusal codes for the §8.1 structure chain.  The one typed vocabulary
+#: lives in :mod:`ict_trader.variants`; this module re-exports the two names the
+#: previous engine declared and keeps the short internal aliases (P1-07).
 NO_DISPLACEMENT = NT_NO_DISPLACEMENT
 NO_SHIFT = NT_NO_SHIFT
 
@@ -104,6 +102,15 @@ class ICTEngine:
     #: now named and validated; ``none`` removes the engine floor (the setup /
     #: strategy gates still apply their own declared floors).
     rr_mode: str = DEFAULT_ENGINE_RR_MODE
+    #: Declared V25 displacement detector (P1-07).  The default is the
+    #: **labelled repo** form: the P0-17 measured-body conjunct, which grades
+    #: magnitude and bounds none (DP-04).  A run that declares a bounded V25
+    #: form and omits a magnitude is refused with ``NT_NO_DISPLACEMENT``.
+    displacement_spec: DisplacementSpec = field(
+        default_factory=default_displacement_spec)
+    #: CB-01/CB-10: the last scan evaluated a closed bar (``True``) or refused
+    #: because the frame's last bar was still forming at ``context.as_of_ms``.
+    last_bar_closed: bool = True
     #: Refusals from the last scan, one dict per rejected setup
     #: (``{"code", "direction", "end", "data_gaps"}``).  An empty signal list
     #: alone is not a passing refusal (A3); this is where the §12 code lives.
@@ -130,6 +137,7 @@ class ICTEngine:
               context: AnalysisContext | None) -> list[EngineSignal]:
         self.refusals = []
         self.range_diagnostic = None
+        self.last_bar_closed = True
         if not isinstance(window, pd.DataFrame):
             raise TypeError("ICTEngine expects a pandas DataFrame")
         if len(window) < 100:
@@ -139,8 +147,26 @@ class ICTEngine:
             if column not in frame:
                 raise ValueError(f"missing OHLCV column: {column}")
             frame[column] = frame[column].astype(float)
-        result = analyze(frame, self.ict_config)
         n = len(frame)
+        # CB-01/CB-10 / RE:EX-01 ``window_closed_bar``: the admission guard is
+        # explicit here rather than delegated to the caller.  A bar whose close
+        # has not printed at the evaluation instant is never evaluated (F09).
+        if not last_bar_closed(
+                frame,
+                as_of_ms=(int(context.as_of_ms) if context is not None else None),
+                interval=(context.interval if context is not None
+                          else frame.attrs.get("interval"))):
+            self.last_bar_closed = False
+            self.refusals.append({
+                "code": NT_DATA_MISSING,
+                "direction": "",
+                "end": n - 1,
+                "data_gaps": ["closed_bar"],
+                "detail": ("CB-01/CB-10: the last bar has not closed at "
+                           "as_of_ms; no predicate may read a forming bar"),
+            })
+            return []
+        result = analyze(frame, self.ict_config)
         if actionable_only:
             recent = [c for c in result.cisds if int(c.end) >= n - 3]
             result = replace(result, cisds=recent)
@@ -198,7 +224,20 @@ class ICTEngine:
                 result.events, idx, times,
                 direction=direction, after_index=sweep_bar,
             )
+            # ST-08: a CHoCH that has not yet been confirmed by the first BOS in
+            # the new direction is a warning, not a shift.  It is refused with
+            # its own §12 code instead of being reported as a missing MSS.
+            unconfirmed = unconfirmed_shift_evidence(
+                result.events, idx, times,
+                direction=direction, after_index=sweep_bar,
+            )
+            # P1-07: the DP1 conjunct is now the **declared V25 detector**, not
+            # "any body measurement".  ``displacement`` stays the raw measured
+            # payload that older readers consume; ``displacement_gate`` carries
+            # the declaration, form and verdict.
             displacement = displacement_evidence(c.quality_parts)
+            displacement_gate = evaluate_displacement(
+                c.quality_parts, self.displacement_spec)
             breakers = breaker_evidence(result.pd_arrays, idx)
             pd_arrays = pd_array_evidence(result, idx)
             htf = htf_bias_evidence(frame, idx)
@@ -208,21 +247,32 @@ class ICTEngine:
                 data_gaps.append("sweep")
             if structure is None:
                 data_gaps.append("mss")
-            if displacement is None:
+            if displacement is None or not displacement_gate["ok"]:
                 data_gaps.append("displacement")
             if htf is None or any(v is None for v in htf.values()):
                 data_gaps.append("htf_bias")
             if rvol is None:
                 data_gaps.append("rvol")
-            if displacement is None:
-                # P1-07 owns the V25 displacement detector.  Until it exists an
-                # unmeasured conjunct is unknown, not satisfied, so the setup
-                # must be refused instead of silently admitted (DP-07).
+            if not displacement_gate["ok"]:
+                # DP-07: no displacement means take nothing.  The gate's own
+                # §12 code is used, so an undeclared V25 is not misreported as a
+                # missing measurement.
                 self.refusals.append({
-                    "code": NO_DISPLACEMENT,
+                    "code": displacement_gate.get("code") or NO_DISPLACEMENT,
                     "direction": direction,
                     "end": idx,
                     "data_gaps": sorted(set(data_gaps)),
+                    "detail": str(displacement_gate.get("reason", "")),
+                })
+                continue
+            if structure is None and unconfirmed is not None:
+                self.refusals.append({
+                    "code": NT_SHIFT_UNCONFIRMED,
+                    "direction": direction,
+                    "end": idx,
+                    "data_gaps": sorted(set(data_gaps)),
+                    "detail": ("ST-08: the CHoCH is unconfirmed until the first "
+                               "BOS in the new direction"),
                 })
                 continue
             if structure is None and result.events:
@@ -249,9 +299,16 @@ class ICTEngine:
                 "thesis": self._thesis(c),
                 "ict_overlays": overlay_evidence,
                 "sweep": sweep,
+                # §8.1 conjunction: the emitted evidence carries the MSS and the
+                # declared displacement verdict as separate, inspectable keys
+                # (P0-17/P1-07).  ``mss`` and ``displacement`` are the payloads;
+                # ``mss_confirmed``/``displacement_gate`` are their states.
                 "structure": structure,
                 "mss": structure,
+                "mss_confirmed": structure is not None,
+                "unconfirmed_shift": unconfirmed,
                 "displacement": displacement,
+                "displacement_gate": displacement_gate,
                 "breaker": breakers,
                 "fvg": pd_arrays["fvg"],
                 "ifvg": pd_arrays["ifvg"],

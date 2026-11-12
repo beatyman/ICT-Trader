@@ -2,13 +2,34 @@
 
 No strategy thresholds live here.  These functions only map already-computed
 events into JSON-safe evidence and record explicit data gaps.
+
+P1-07 adds two objects to this boundary:
+
+* the **V25 displacement detector** (:class:`DisplacementSpec`,
+  :func:`evaluate_displacement`).  The corpus supplies no magnitude gate
+  (DP-04), so a detector form that needs one refuses with
+  ``NT_NO_DISPLACEMENT`` until the run declares the value; no default is
+  invented (F10);
+* the **closed-bar guard** (:func:`last_bar_closed`) used by the engine before
+  it evaluates anything (CB-01/CB-10).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from ...context import (BiasState, DEFAULT_NEUTRAL_HANDLING, parse_bias,
                         validate_neutral_handling)
+from ...variants import RefusalCode, VariantConfig, VariantUndeclared
+
+#: §12 refusal codes used by this boundary.  They are read from the one typed
+#: vocabulary (:class:`~ict_trader.variants.RefusalCode`), never re-typed, and
+#: the engine re-exports them for backwards compatibility.
+NT_NO_DISPLACEMENT = RefusalCode.NT_NO_DISPLACEMENT.value
+NT_NO_SHIFT = RefusalCode.NT_NO_SHIFT.value
+NT_SHIFT_UNCONFIRMED = RefusalCode.NT_SHIFT_UNCONFIRMED.value
+NT_DATA_MISSING = RefusalCode.NT_DATA_MISSING.value
+NT_VARIANT_UNDECLARED = RefusalCode.NT_VARIANT_UNDECLARED.value
 
 
 #: V15 ``sweep direction vs bias``: the corpus attests three mutually exclusive
@@ -134,6 +155,8 @@ def structure_evidence(events: list[Any], end_idx: int,
     for e in events:
         if str(getattr(e, "kind", "")) != "MSS":
             continue
+        if not bool(getattr(e, "confirmed", True)):
+            continue  # an unconfirmed label is never admissible (ST-08)
         try:
             idx = int(getattr(e, "index"))
         except (TypeError, ValueError):
@@ -157,10 +180,60 @@ def structure_evidence(events: list[Any], end_idx: int,
     }
 
 
-#: Fields ``setup.build_setup`` records for its measured displacement.  The V25
-#: displacement detector is a P1-07 object and is not implemented yet, so these
-#: measurements are the only displacement evidence the engine can consume.  When
-#: they are absent the conjunct is *unknown*, not true (P0-17, DP-07).
+def unconfirmed_shift_evidence(events: list[Any], end_idx: int,
+                               times: list[int] | None = None, *,
+                               direction: str | None = None,
+                               after_index: int | None = None
+                               ) -> dict[str, Any] | None:
+    """The latest shift when it is a CHoCH **not yet confirmed** (ST-08).
+
+    The corpus's CHoCH is a warning only: it "stays unconfirmed" until the first
+    BOS in the new direction (MS-R25), so a setup built on it must be refused
+    with ``NT_SHIFT_UNCONFIRMED`` rather than treated as a missing MSS.  Only
+    the latest matching structure event is considered -- an older unconfirmed
+    CHoCH superseded by a later break is history, not the current state.
+    """
+    wanted = None
+    if direction is not None:
+        wanted = _MSS_DIRECTIONS.get(str(direction).strip().lower())
+        if wanted is None:
+            raise ValueError(f"unknown direction: {direction!r}")
+    best: tuple[int, Any] | None = None
+    for e in events:
+        try:
+            idx = int(getattr(e, "index"))
+        except (TypeError, ValueError):
+            continue
+        if idx > int(end_idx):
+            continue
+        if after_index is not None and idx < int(after_index):
+            continue
+        if wanted is not None and str(getattr(e, "direction", "")) != wanted:
+            continue
+        if best is None or idx > best[0]:
+            best = (idx, e)
+    if best is None:
+        return None
+    idx, e = best
+    if str(getattr(e, "kind", "")) != "CHoCH":
+        return None
+    if bool(getattr(e, "confirmed", True)):
+        return None
+    return {
+        "event": str(e.kind),
+        "direction": "bullish" if e.direction == "bull" else "bearish",
+        "price": float(e.price),
+        "time": (int(times[min(idx, len(times) - 1)]) if times else 0),
+        "index": idx,
+        "confirmed": False,
+        "family": str(getattr(e, "family", "")),
+        "level_selection": str(getattr(e, "level_selection", "")),
+    }
+
+
+#: Fields ``setup.build_setup`` records for its measured displacement.  These
+#: are the raw measurements; the V25 gate below decides whether they establish
+#: displacement, and it never converts a measurement into a threshold.
 DISPLACEMENT_KEYS = ("disp_body_ratio", "disp_body_atr",
                      "disp_body_multiple", "disp_volume_ratio")
 #: At least one *body* measure is required; a volume ratio alone is not a
@@ -175,8 +248,8 @@ def displacement_evidence(quality_parts: Any) -> dict[str, float] | None:
     ``quality_parts`` comes from ``setup.build_setup``.  At least one body
     measure (body/range, body/ATR or body/average-body) is required: a volume
     ratio alone does not establish expansion.  Absence is a refusal, never an
-    implicit pass -- ``ICTEngine`` records ``NT_NO_DISPLACEMENT`` and emits no
-    signal (P0-17).
+    implicit pass -- the V25 gate below records ``NT_NO_DISPLACEMENT`` and
+    ``ICTEngine`` emits no signal (P0-17, DP-07).
     """
     if quality_parts is None or not hasattr(quality_parts, "get"):
         return None
@@ -190,6 +263,329 @@ def displacement_evidence(quality_parts: Any) -> dict[str, float] | None:
             except (TypeError, ValueError):
                 return None
     return out
+
+
+# ---------------------------------------------------------------------------
+# V25 displacement detector (P1-07, DP-01..DP-07, PP:C17)
+# ---------------------------------------------------------------------------
+#: PP:C17 attests **four** incompatible detector forms, none of them ICT, and
+#: says outright that any single one is "choosing one of four".  ``V25``
+#: therefore blocks the DP1 gate unless the run picks one form -- or the
+#: explicitly *labelled repo* detector (P1-01 option).
+DISPLACEMENT_FORM_RANGE_ATR = "range_atr_and_body_ratio"
+DISPLACEMENT_FORM_BODY_RATIO_ATR = "body_ratio_atr_close"
+DISPLACEMENT_FORM_BODY_RATIO = "body_ratio"
+DISPLACEMENT_FORM_BODY_MULTIPLE = "body_multiple_wick_volume"
+DISPLACEMENT_FORMS = (
+    DISPLACEMENT_FORM_RANGE_ATR,
+    DISPLACEMENT_FORM_BODY_RATIO_ATR,
+    DISPLACEMENT_FORM_BODY_RATIO,
+    DISPLACEMENT_FORM_BODY_MULTIPLE,
+)
+#: The labelled repo detector: it **grades** the body measures (DP-04: magnitude
+#: is `missing` and is graded, never bounded) and adds no magnitude gate of its
+#: own.
+REPO_DISPLACEMENT_FORM = "repo_measured_body"
+
+#: The V25 option -> the forms it permits.  ``one of the four declared forms``
+#: still needs the form named; the repo option has exactly one form.
+V25_OPTIONS = (
+    "one of the four declared forms",
+    "labelled repo detector",
+)
+V25_FORMS: dict[str, tuple[str, ...]] = {
+    "one of the four declared forms": DISPLACEMENT_FORMS,
+    "labelled repo detector": (REPO_DISPLACEMENT_FORM,),
+}
+
+#: Threshold field -> the measure it gates.  ``min_*`` is a lower bound,
+#: ``max_*`` an upper bound.
+DISPLACEMENT_THRESHOLD_MEASURES: dict[str, str] = {
+    "min_body_ratio": "body_ratio",
+    "min_body_atr": "body_atr",
+    "min_body_multiple": "body_multiple",
+    "min_range_atr": "range_atr",
+    "min_close_atr": "close_atr",
+    "min_volume_ratio": "volume_ratio",
+    "max_wick_ratio": "wick_ratio",
+}
+
+#: The magnitudes each form requires the run to declare.  DP-04: the corpus
+#: supplies **none** of them, so every entry below is a run declaration, never
+#: a corpus rule.  The repo form requires none because it grades only.
+DISPLACEMENT_FORM_THRESHOLDS: dict[str, tuple[str, ...]] = {
+    DISPLACEMENT_FORM_RANGE_ATR: ("min_range_atr", "min_body_ratio"),
+    DISPLACEMENT_FORM_BODY_RATIO_ATR: (
+        "min_body_ratio", "min_range_atr", "min_close_atr"),
+    DISPLACEMENT_FORM_BODY_RATIO: ("min_body_ratio",),
+    DISPLACEMENT_FORM_BODY_MULTIPLE: (
+        "min_body_multiple", "max_wick_ratio", "min_volume_ratio"),
+    REPO_DISPLACEMENT_FORM: (),
+}
+
+DISPLACEMENT_FORM_LABELS: dict[str, str] = {
+    DISPLACEMENT_FORM_RANGE_ATR: "corpus (PP:C17 form a)",
+    DISPLACEMENT_FORM_BODY_RATIO_ATR: "corpus (PP:C17 form b)",
+    DISPLACEMENT_FORM_BODY_RATIO: "corpus (PP:C17 form c)",
+    DISPLACEMENT_FORM_BODY_MULTIPLE: "corpus (PP:C17 form d, vendor)",
+    REPO_DISPLACEMENT_FORM: "repo",
+}
+
+#: The measure a detector reads.  ``range_atr = body_atr / body_ratio`` exactly,
+#: and ``wick_ratio = 1 - body_ratio``; the remaining fields (notably
+#: ``close_atr``) are not recorded by the setup layer, so a form that requires
+#: one refuses instead of approximating it.
+def _derived_range_atr(raw: dict[str, float]) -> float | None:
+    ratio = raw.get("disp_body_ratio")
+    body_atr = raw.get("disp_body_atr")
+    if ratio is None or body_atr is None or float(ratio) <= 0:
+        return None
+    return float(body_atr) / float(ratio)
+
+
+def _derived_wick_ratio(raw: dict[str, float]) -> float | None:
+    ratio = raw.get("disp_body_ratio")
+    return None if ratio is None else 1.0 - float(ratio)
+
+
+_DISPLACEMENT_DERIVED = {
+    "body_ratio": lambda raw: raw.get("disp_body_ratio"),
+    "body_atr": lambda raw: raw.get("disp_body_atr"),
+    "body_multiple": lambda raw: raw.get("disp_body_multiple"),
+    "volume_ratio": lambda raw: raw.get("disp_volume_ratio"),
+    "wick_ratio": _derived_wick_ratio,
+    "range_atr": _derived_range_atr,
+}
+
+
+@dataclass(frozen=True)
+class DisplacementSpec:
+    """One declared V25 displacement detector and its run-declared magnitudes.
+
+    The form is validated against :data:`V25_FORMS` and every threshold is
+    optional; :meth:`missing_thresholds` names the ones the form still needs.
+    A form with a non-empty ``missing_thresholds`` **cannot** evaluate: DP-04
+    supplies no magnitude, so the caller must declare it (F10).  The repo form
+    has no threshold on purpose -- DP-04 says magnitude is graded, never
+    bounded.
+    """
+
+    form: str
+    variant_option: str = ""
+    label: str = ""
+    min_body_ratio: float | None = None
+    min_body_atr: float | None = None
+    min_body_multiple: float | None = None
+    min_range_atr: float | None = None
+    min_close_atr: float | None = None
+    min_volume_ratio: float | None = None
+    max_wick_ratio: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.form not in DISPLACEMENT_FORM_THRESHOLDS:
+            raise ValueError(
+                f"unknown V25 displacement form {self.form!r}; declare one of "
+                f"{DISPLACEMENT_FORMS + (REPO_DISPLACEMENT_FORM,)} (PP:C17)")
+        if self.variant_option and self.form not in V25_FORMS.get(
+                self.variant_option, ()):
+            raise ValueError(
+                f"V25 option {self.variant_option!r} does not permit form "
+                f"{self.form!r}")
+        for name in DISPLACEMENT_THRESHOLD_MEASURES:
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, float(value))
+
+    @property
+    def thresholds(self) -> dict[str, float]:
+        return {name: float(getattr(self, name))
+                for name in DISPLACEMENT_THRESHOLD_MEASURES
+                if getattr(self, name) is not None}
+
+    def missing_thresholds(self) -> tuple[str, ...]:
+        """The magnitudes this form needs and the run has not declared."""
+        return tuple(name for name in DISPLACEMENT_FORM_THRESHOLDS[self.form]
+                     if getattr(self, name) is None)
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "form": self.form,
+            "label": self.label or DISPLACEMENT_FORM_LABELS[self.form],
+            "variant_option": self.variant_option,
+            "thresholds": self.thresholds,
+            "missing_thresholds": list(self.missing_thresholds()),
+        }
+
+
+def default_displacement_spec() -> DisplacementSpec:
+    """The labelled repo detector used when a run declares no V25 form.
+
+    It is the P0-17 measured-body conjunct without a magnitude gate: DP-04
+    grades magnitude and the corpus bounds none, so this default never turns a
+    measured body ratio into a pass/fail number.
+    """
+    return DisplacementSpec(
+        form=REPO_DISPLACEMENT_FORM,
+        variant_option="labelled repo detector",
+        label="repo")
+
+
+def displacement_spec_from_variants(
+    variants: VariantConfig,
+    *,
+    form: str | None = None,
+    **thresholds: float,
+) -> DisplacementSpec:
+    """Build a :class:`DisplacementSpec` from the declared V25 option.
+
+    ``VariantConfig.read`` is the one selection path (A7): an undeclared V25
+    raises :class:`~ict_trader.variants.VariantUndeclared`, and the four-form
+    option must also name its form because the register records only "one of
+    the four", not which one.
+    """
+    option = variants.read("V25")
+    allowed = V25_FORMS[option]
+    if form is None:
+        if len(allowed) == 1:
+            form = allowed[0]
+        else:
+            raise VariantUndeclared(
+                "V25", "the four-form option must also name its form")
+    if form not in allowed:
+        raise ValueError(
+            f"V25 option {option!r} does not permit form {form!r}")
+    return DisplacementSpec(
+        form=form, variant_option=option,
+        label=DISPLACEMENT_FORM_LABELS[form], **thresholds)
+
+
+def _displacement_measures(quality_parts: Any) -> dict[str, float] | None:
+    raw = displacement_evidence(quality_parts)
+    if raw is None:
+        return None
+    out: dict[str, float] = {}
+    for name, read in _DISPLACEMENT_DERIVED.items():
+        try:
+            value = read(raw)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None:
+            out[name] = float(value)
+    return out
+
+
+def evaluate_displacement(quality_parts: Any,
+                          spec: DisplacementSpec | None = None) -> dict[str, Any]:
+    """Evaluate the declared V25 detector over ``quality_parts``.
+
+    Returns a JSON-safe verdict: ``ok``, the §12 ``code`` when it fails, the
+    form/label, the declared thresholds, the measured values and the checks.
+    The reasons are ordered so a missing *declaration* is never reported as a
+    missing measurement:
+
+    * no spec (V25 undeclared) -> ``NT_VARIANT_UNDECLARED``;
+    * a form whose magnitudes are still missing -> ``NT_NO_DISPLACEMENT``
+      (DP-04: the corpus supplies none, so no value is invented -- F10);
+    * no body measurement -> ``NT_NO_DISPLACEMENT``;
+    * a required measurement this layer does not record -> ``NT_NO_DISPLACEMENT``;
+    * a measured body that misses a **declared** bound -> ``NT_NO_DISPLACEMENT``
+      (DP-07: no displacement means take nothing).
+    """
+    if spec is None:
+        return {
+            "ok": False, "code": NT_VARIANT_UNDECLARED,
+            "reason": ("V25 is undeclared, so the DP1 displacement gate cannot "
+                       "be evaluated (F10/F12)"),
+            "form": "", "label": "", "thresholds": {},
+            "missing_thresholds": [], "measures": {}, "checks": {},
+            "variant_option": "",
+        }
+    base: dict[str, Any] = {
+        "ok": False, "code": None, "reason": "",
+        "form": spec.form, "label": spec.label or DISPLACEMENT_FORM_LABELS[spec.form],
+        "variant_option": spec.variant_option,
+        "thresholds": spec.thresholds,
+        "missing_thresholds": list(spec.missing_thresholds()),
+        "measures": {}, "checks": {},
+    }
+    missing = spec.missing_thresholds()
+    if missing:
+        base.update(
+            code=NT_NO_DISPLACEMENT,
+            reason=(f"V25 form {spec.form!r} needs the declared magnitude(s) "
+                    f"{list(missing)}; the corpus supplies none (DP-04), so no "
+                    f"value is invented and DP1 refuses (F10)"))
+        return base
+    measures = _displacement_measures(quality_parts)
+    if measures is None:
+        base.update(code=NT_NO_DISPLACEMENT,
+                    reason="no body displacement measure on the setup")
+        return base
+    base["measures"] = measures
+    checks: dict[str, bool] = {}
+    absent: list[str] = []
+    for name, measure in DISPLACEMENT_THRESHOLD_MEASURES.items():
+        threshold = getattr(spec, name)
+        if threshold is None:
+            continue
+        value = measures.get(measure)
+        if value is None:
+            absent.append(measure)
+            continue
+        if name.startswith("max_"):
+            checks[name] = bool(float(value) <= float(threshold))
+        else:
+            checks[name] = bool(float(value) >= float(threshold))
+    base["checks"] = checks
+    if absent:
+        base.update(
+            code=NT_NO_DISPLACEMENT,
+            reason=(f"V25 form {spec.form!r} requires the measurement(s) "
+                    f"{sorted(set(absent))}, which the setup layer does not "
+                    f"record; the form refuses instead of approximating them"))
+        return base
+    failed = [name for name, ok in checks.items() if not ok]
+    if failed:
+        base.update(
+            code=NT_NO_DISPLACEMENT,
+            reason=(f"declared V25 check(s) failed: {failed} "
+                    f"(DP-07: no displacement means take nothing)"))
+        return base
+    base.update(ok=True, reason="declared V25 detector satisfied")
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Closed-bar guard (CB-01/CB-10, RE:EX-01 ``window_closed_bar``)
+# ---------------------------------------------------------------------------
+def last_bar_closed(frame: Any, *, as_of_ms: int | None = None,
+                    interval: str | None = None) -> bool:
+    """Is the last bar of ``frame`` closed at the evaluation instant?
+
+    A bar is *forming* exactly while ``as_of_ms`` lies inside its own
+    ``[open_time, open_time + step)`` span.  An ``as_of`` outside the frame's
+    last bar (a historical/replay window, or an instant after its close) means
+    the bar is closed for the purpose of the guard.  When the step cannot be
+    determined the caller's frame is taken as closed -- the guard never invents
+    a bar boundary.
+    """
+    import pandas as pd
+
+    from ..models import INTERVAL_MS
+
+    if frame is None or len(frame) == 0:
+        return False
+    if as_of_ms is None:
+        return True
+    last_open = int(pd.Timestamp(frame["date"].iloc[-1]).timestamp() * 1000)
+    step = INTERVAL_MS.get(str(interval or "").strip().lower())
+    if step is None and len(frame) >= 2:
+        prev = int(pd.Timestamp(frame["date"].iloc[-2]).timestamp() * 1000)
+        step = last_open - prev
+    if not step or step <= 0:
+        return True
+    now = int(as_of_ms)
+    return not (last_open <= now < last_open + int(step))
 
 
 def breaker_evidence(pd_arrays: list[Any], end_idx: int,

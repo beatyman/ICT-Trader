@@ -28,7 +28,8 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from types import MappingProxyType
+from typing import Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -79,6 +80,28 @@ ACCOUNTING_REGISTER: dict[str, RegisterEntry] = {
                              "RE:RM-15 / V28"),
     "net_rr_floor": RegisterEntry("net_rr_floor", 2.0, "repo",
                                   "RE:RM-16 / GS-08"),
+    # P1-13 risk algebra inputs.  ``value_per_unit`` is the I3 instrument
+    # quantity sizing needs; 1.0 is the declared repo value for a USDT-quoted
+    # spot pair (one quote unit per base unit per price unit).  ``lot_step`` is
+    # RK-14's *missing* input: the repo declares the no-rounding step ``0`` so
+    # an instrument-specific step must be supplied instead of guessed.
+    "value_per_unit": RegisterEntry(
+        "value_per_unit", 1.0, "repo",
+        "I3 / RE:RM-13 (USDT-quoted spot)"),
+    "lot_step": RegisterEntry(
+        "lot_step", 0.0, "repo",
+        "RK-14 input (corpus: missing); 0 = no rounding"),
+}
+
+#: P1-13 risk-algebra declarations that are not accounting floats.  They live
+#: in a second labelled register so the P0-18 accounting register keeps its
+#: invariant that every member is a repo accounting value.
+RISK_ALGEBRA_REGISTER: dict[str, RegisterEntry] = {
+    "weighted_rr_floor": RegisterEntry(
+        "weighted_rr_floor", 1.5, "corpus (single)", "RE:TS-16"),
+    "min_distance_floor": RegisterEntry(
+        "min_distance_floor", 3.0, "corpus (single)",
+        "RE:TS-19 / RE:C-20 (rr_3_1 form)"),
 }
 
 
@@ -116,6 +139,174 @@ def rr_floor(mode: str = DEFAULT_RR_MODE) -> float:
 
 
 MIN_RR = rr_floor(DEFAULT_RR_MODE)
+
+#: The declared gross-RR mode (V28).  ``DEFAULT_RR_MODE`` is the repo's
+#: selection from the four attested modes; ``RR_MODE`` is the alias the risk
+#: algebra surfaces read.
+RR_MODE = DEFAULT_RR_MODE
+RR_MODE_VARIANT = "V28"
+RR_MODE_DEFAULT_LABEL = "repo"
+
+#: Provenance of each V28 option.  The options are corpus attestations; the
+#: *selection* of ``filter_2_1`` as the repo default is labelled ``repo``.
+RR_MODE_SOURCES: dict[str, dict[str, str]] = {
+    "floor_3_1": {"label": "corpus", "source": "[RE:RM-15] >=3:1"},
+    "floor_session_1_5": {
+        "label": "corpus", "source": "[RE:RM-15] 1.5:1 session"},
+    "filter_2_1": {"label": "corpus", "source": "[RE:RM-15] >=2:1 filter"},
+    "none": {"label": "corpus", "source": "[RE:RM-15] ratio is an output"},
+}
+
+
+def declared_rr_mode(mode: str = DEFAULT_RR_MODE) -> str:
+    """Validate and return one declared V28 mode (never a private floor)."""
+    if mode not in RR_MODE_FLOORS:
+        raise ValueError(
+            f"unknown rr_mode {mode!r}; declare one of {tuple(RR_MODE_FLOORS)}")
+    return str(mode)
+
+
+#: Sizing inputs (P1-13).  ``value_per_unit`` is the I3 instrument quantity;
+#: ``lot_step`` is RK-14's missing lot step, declared as the repo no-rounding
+#: step ``0``.  Both are read from the accounting register, never re-typed.
+DEFAULT_VALUE_PER_UNIT = float(declared("value_per_unit").value)
+DEFAULT_LOT_STEP = float(declared("lot_step").value)
+LOT_STEP_POLICIES = ("down",)
+DEFAULT_LOT_STEP_POLICY = "down"
+
+#: Weighted-RR floor and the one attested form of the minimum-distance floor
+#: (TG-11 lists four incompatible forms; exactly one is declared).
+WEIGHTED_RR_FLOOR = float(RISK_ALGEBRA_REGISTER["weighted_rr_floor"].value)
+MIN_DISTANCE_FLOOR_R = float(
+    RISK_ALGEBRA_REGISTER["min_distance_floor"].value)
+
+
+@dataclass(frozen=True, slots=True)
+class RiskBand:
+    """One attested risk-per-trade band (V30 / RK-07).
+
+    ``lower_pct``/``upper_pct`` are fractions of equity.  ``source_id`` is the
+    attestation the band comes from and must travel with the selected band, so
+    a sizing surface cannot report a bare percentage without provenance.
+    """
+
+    band_id: str
+    lower_pct: float
+    upper_pct: float
+    attested: str
+    source_id: str
+    label: str = "corpus"
+    variant_id: str = "V30"
+
+    def __post_init__(self) -> None:
+        if not self.band_id.strip():
+            raise ValueError("risk band id must not be empty")
+        if self.lower_pct < 0 or self.upper_pct < self.lower_pct:
+            raise ValueError(
+                f"{self.band_id}: invalid band [{self.lower_pct}, "
+                f"{self.upper_pct}]")
+        if not self.source_id.strip():
+            raise ValueError(f"{self.band_id}: a source_id is required (V30)")
+        if not self.attested.strip():
+            raise ValueError(f"{self.band_id}: the attestation text is empty")
+
+    def contains(self, risk_pct: float) -> bool:
+        return self.lower_pct <= float(risk_pct) <= self.upper_pct
+
+    def require(self, risk_pct: float) -> float:
+        """Return ``risk_pct`` if the declared band contains it, else refuse."""
+        pct = float(risk_pct)
+        if not self.contains(pct):
+            raise ValueError(
+                f"risk_pct {pct:g} is outside the declared risk band "
+                f"{self.band_id} [{self.lower_pct:g}, {self.upper_pct:g}] "
+                f"({self.source_id})")
+        return pct
+
+
+#: The attested RK-07 bands.  They intersect only at 1% (RE:C-02); selecting
+#: one is V30, not an average of them.
+RISK_BANDS: Mapping[str, RiskBand] = MappingProxyType({
+    "band_025_150": RiskBand(
+        "band_025_150", 0.0025, 0.015,
+        "0.25-1.5% per trade", "[RE:RM-12; RE:C-02]"),
+    "band_050_100_cap_150": RiskBand(
+        "band_050_100_cap_150", 0.005, 0.010,
+        "0.5-1.0% with a 1.5% maximum", "[RE:RM-12; RE:C-02]"),
+    "band_cap_100": RiskBand(
+        "band_cap_100", 0.0, 0.010,
+        "<=1% per trade", "[RE:RM-12; RE:C-02]"),
+    "band_100_200": RiskBand(
+        "band_100_200", 0.010, 0.020,
+        "1-2% per trade", "[RE:RM-12; RE:C-02]"),
+})
+
+#: The repo's declared V30 selection.  The default ``risk_pct`` (0.5%) lies on
+#: its lower bound; the value itself is the labelled repo choice RE:RM-12.
+DEFAULT_RISK_BAND_ID = "band_050_100_cap_150"
+DEFAULT_RISK_BAND = RISK_BANDS[DEFAULT_RISK_BAND_ID]
+RISK_BAND = DEFAULT_RISK_BAND
+DECLARED_RISK_BAND = DEFAULT_RISK_BAND
+
+
+def validate_risk_pct(risk_pct: float,
+                      band: RiskBand = DEFAULT_RISK_BAND) -> float:
+    """Fail closed when a sizing surface leaves the declared risk band."""
+    return band.require(risk_pct)
+
+
+@dataclass(frozen=True, slots=True)
+class MinimumDistanceFloor:
+    """The one declared target minimum-distance floor (TG-11).
+
+    TG-11 names four *incompatible* forms (``~1:2`` skip, ``0.7R`` reject,
+    ``<1.5R`` DOL reject, ``>=3:1`` to the nearest array).  A run must declare
+    one; the repo selects the ``>=3:1`` form from ``[RE:TS-19; RE:C-20]``.
+    ``value`` is an R multiple: ``reward / risk``.
+    """
+
+    mode: str
+    value: float
+    label: str
+    source_id: str
+    variant_id: str = "TG-11"
+
+    def __post_init__(self) -> None:
+        if self.mode not in MIN_DISTANCE_FORMS:
+            raise ValueError(
+                f"unknown minimum-distance form {self.mode!r}; declare one of "
+                f"{tuple(MIN_DISTANCE_FORMS)}")
+        expected = MIN_DISTANCE_FORMS[self.mode]
+        if abs(float(self.value) - expected) > 1e-12:
+            raise ValueError(
+                f"{self.mode}: declared value {self.value} contradicts the "
+                f"attested R multiple {expected}")
+        if not self.source_id.strip():
+            raise ValueError(f"{self.mode}: a source_id is required")
+        if not self.label.strip():
+            raise ValueError(f"{self.mode}: a provenance label is required")
+
+    def admits(self, reward: float, risk: float) -> bool:
+        """True when the target is at or beyond the declared R multiple."""
+        if float(risk) <= 0:
+            return False
+        return float(reward) / float(risk) >= self.value
+
+
+#: The four TG-11 forms, keyed by the declared name and valued in R.
+MIN_DISTANCE_FORMS: Mapping[str, float] = MappingProxyType({
+    "skip_below_rr_2_1": 2.0,
+    "reject_below_0_7r": 0.7,
+    "reject_below_1_5r": 1.5,
+    "rr_3_1_to_nearest_array": 3.0,
+})
+
+#: The repo's one declared TG-11 form.  No run may carry a private floor.
+DEFAULT_MIN_DISTANCE_FLOOR = MinimumDistanceFloor(
+    "rr_3_1_to_nearest_array", MIN_DISTANCE_FLOOR_R, "corpus (single)",
+    "[RE:TS-19; RE:C-20]")
+MINIMUM_DISTANCE_FLOOR = DEFAULT_MIN_DISTANCE_FLOOR
+
 
 #: Declared fixed-R target multiple (a target size, not an RR gate).
 DEFAULT_FIXED_R = 2.0
@@ -462,6 +653,8 @@ class StrategyConfig:
             raise ValueError(
                 f"unknown rr_mode {self.rr_mode!r}; "
                 f"declare one of {tuple(RR_MODE_FLOORS)}")
+        # V30: a sizing surface may only run inside its declared risk band.
+        validate_risk_pct(self.risk_pct)
         if self.min_rr is not None and float(self.min_rr) < 0:
             raise ValueError("min_rr must be >= 0")
         if self.entry_mode not in ENTRY_MODES:

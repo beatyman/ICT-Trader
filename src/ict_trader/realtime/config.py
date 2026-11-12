@@ -18,11 +18,19 @@ from typing import Any
 from ..strategy import (
     DEFAULT_COMMISSION_BPS,
     DEFAULT_FIXED_R,
+    DEFAULT_LOT_STEP,
     DEFAULT_MAX_TRADES_PER_DAY,
+    DEFAULT_MIN_DISTANCE_FLOOR,
+    DEFAULT_RISK_BAND,
+    DEFAULT_RISK_BAND_ID,
     DEFAULT_RISK_PCT,
     DEFAULT_RR_MODE,
     DEFAULT_SLIPPAGE_BPS,
+    DEFAULT_VALUE_PER_UNIT,
+    MIN_DISTANCE_FORMS,
     RR_MODE_FLOORS,
+    RISK_BANDS,
+    validate_risk_pct,
 )
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
@@ -176,6 +184,17 @@ class Settings:
     slippage_bps: float = DEFAULT_SLIPPAGE_BPS      # per fill
     initial_equity: float = 100_000.0
     risk_pct: float = DEFAULT_RISK_PCT      # 0.5% equity risked per trade
+    #: P1-13 risk algebra: the I3 instrument value per unit (1.0 for a
+    #: USDT-quoted spot pair), RK-14's missing lot step (0 = no rounding is the
+    #: declared repo step), the V30 band with its source id, and the declared
+    #: TG-11 minimum-distance form.
+    value_per_unit: float = DEFAULT_VALUE_PER_UNIT
+    lot_step: float = DEFAULT_LOT_STEP
+    risk_band: str = DEFAULT_RISK_BAND_ID
+    min_distance_floor: str = DEFAULT_MIN_DISTANCE_FLOOR.mode
+    #: A weighted-RR gate may only run with an explicit hit-rate assumption;
+    #: ``None`` means the assumption is missing and the gate refuses.
+    weighted_rr_win_rate: float | None = None
     max_position_pct: float = 0.30      # spot notional cap per position
     max_open_positions: int = 5
     #: Declared daily budget (fills per calendar date); one value everywhere.
@@ -239,6 +258,24 @@ class Settings:
         if self.rr_mode not in RR_MODE_FLOORS:
             raise ValueError(
                 f"rr_mode must be one of {tuple(RR_MODE_FLOORS)}")
+        # P1-13: the sizing surface declares its band and instrument inputs;
+        # an out-of-band risk percentage or an undeclared lot step refuses.
+        band = RISK_BANDS.get(self.risk_band)
+        if band is None:
+            raise ValueError(
+                f"risk_band must be one of {tuple(RISK_BANDS)}")
+        validate_risk_pct(self.risk_pct, band)
+        if self.value_per_unit <= 0:
+            raise ValueError("value_per_unit must be > 0")
+        if self.lot_step < 0:
+            raise ValueError("lot_step must be >= 0")
+        if self.min_distance_floor not in MIN_DISTANCE_FORMS:
+            raise ValueError(
+                f"min_distance_floor must be one of "
+                f"{tuple(MIN_DISTANCE_FORMS)}")
+        if self.weighted_rr_win_rate is not None and not (
+                0.0 <= float(self.weighted_rr_win_rate) <= 1.0):
+            raise ValueError("weighted_rr_win_rate must be in [0, 1]")
         self.deepseek_max_tokens = max(256, int(self.deepseek_max_tokens))
         self.deepseek_timeout = max(10.0, float(self.deepseek_timeout))
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -302,6 +339,11 @@ class Settings:
             "risk_pct": self.risk_pct,
             "max_trades_per_day": self.max_trades_per_day,
             "rr_mode": self.rr_mode,
+            "risk_band": self.risk_band,
+            "value_per_unit": self.value_per_unit,
+            "lot_step": self.lot_step,
+            "min_distance_floor": self.min_distance_floor,
+            "weighted_rr_win_rate": self.weighted_rr_win_rate,
             "setup_min_confidence": self.setup_min_confidence,
             "analysis_scan_seconds": self.analysis_scan_seconds,
             "ict_setup_enabled": self.ict_setup_enabled,
@@ -333,6 +375,14 @@ class Settings:
         ws_default = FUTURES_WS if market == "futures" else SPOT_WS
         rest_default = FUTURES_REST if market == "futures" else SPOT_REST
         data_dir = Path(_env_str("REALTIME_DATA_DIR", str(DEFAULT_DATA_DIR)))
+        weighted_raw = _env_str("WEIGHTED_RR_WIN_RATE", "")
+        weighted_win_rate = None
+        if weighted_raw:
+            try:
+                weighted_win_rate = float(weighted_raw)
+            except ValueError:
+                raise ValueError(
+                    "WEIGHTED_RR_WIN_RATE must be a number in [0, 1]") from None
         cfg = cls(
             mode=_env_str("REALTIME_MODE", "live").lower(),
             market=market,
@@ -389,6 +439,13 @@ class Settings:
             slippage_bps=_env_float("SLIPPAGE_BPS", DEFAULT_SLIPPAGE_BPS),
             initial_equity=_env_float("INITIAL_EQUITY", 100_000.0),
             risk_pct=_env_float("RISK_PCT", DEFAULT_RISK_PCT),
+            value_per_unit=_env_float("VALUE_PER_UNIT",
+                                      DEFAULT_VALUE_PER_UNIT),
+            lot_step=_env_float("LOT_STEP", DEFAULT_LOT_STEP),
+            risk_band=_env_str("RISK_BAND", DEFAULT_RISK_BAND_ID).lower(),
+            min_distance_floor=_env_str(
+                "MIN_DISTANCE_FLOOR", DEFAULT_MIN_DISTANCE_FLOOR.mode).lower(),
+            weighted_rr_win_rate=weighted_win_rate,
             max_position_pct=_env_float("MAX_POSITION_PCT", 0.30),
             max_open_positions=_env_int("MAX_OPEN_POSITIONS", 5),
             max_trades_per_day=_env_int("MAX_TRADES_PER_DAY",
