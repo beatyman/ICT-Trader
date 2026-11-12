@@ -27,10 +27,10 @@ from typing import Any, Iterable
 
 from ...context import (DAILY_POLARITY_SOURCES, BiasDirection,
                         BiasInvalidation, BiasState, DEFAULT_NEUTRAL_HANDLING,
-                        MidnightOpen, RevisionEvent,
+                        JudasWindow, MidnightOpen, RevisionEvent,
                         daily_open_polarity, daily_polarity_mode,
                         open_vs_daily_ce, parse_bias, serialize_bias,
-                        validate_neutral_handling)
+                        validate_neutral_handling, window_status)
 from ...variants import Refusal, RefusalCode, VariantConfig, VariantUndeclared
 
 #: §12 refusal codes used by this boundary.  They are read from the one typed
@@ -932,4 +932,43 @@ def midnight_open_evidence(opening: MidnightOpen, *, price: object,
             None if comparison is None else comparison.to_public()),
         "open_vs_daily_ce_refusal": _refusal_record(comparison_refusal),
         "missing_fields": missing,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# P1-10 -- one window evidence record over context.WINDOW_TABLE
+# --------------------------------------------------------------------------- #
+def window_evidence(ts, *, instrument: str | None = None,
+                    input_tz: str | None = None,
+                    market: str = "other") -> dict[str, object]:
+    """The one window/dead-zone/non-window evidence record for an instant.
+
+    It delegates every predicate to :func:`context.window_status`, so the
+    realtime boundary cannot keep a second clock.  ``refusal`` carries the §12
+    code (``NT_DEAD_ZONE`` / ``NT_OUT_OF_WINDOW`` / ``NT_DATA_MISSING``); the
+    dead zone is data, not an empty window list (A3).
+    """
+    record = window_status(ts, instrument=instrument, input_tz=input_tz,
+                           market=market).to_public()
+    record["instrument"] = instrument
+    return record
+
+
+def judas_window_evidence(judas: JudasWindow, ts, *,
+                          input_tz: str | None = None,
+                          market: str = "other") -> dict[str, object]:
+    """The declared Judas window's phase/entry verdict at ``ts`` (P1-10).
+
+    ``phase == "blackout"`` is the corpus's observe-only inner interval
+    (J-C5); ``allows_entry`` further applies the 05:00-07:00 dead zone and the
+    named non-windows, so the Judas window cannot re-open a dead-zone bar.
+    """
+    if not isinstance(judas, JudasWindow):
+        raise TypeError("judas_window_evidence needs a JudasWindow")
+    return {
+        "variant": judas.variant.name,
+        "phase": judas.phase(ts, market=market, input_tz=input_tz),
+        "allows_entry": judas.allows_entry(ts, market=market, input_tz=input_tz),
+        "blackout_minutes": int(judas.blackout_minutes),
+        "hard_close": judas.hard_close.strftime("%H:%M"),
     }

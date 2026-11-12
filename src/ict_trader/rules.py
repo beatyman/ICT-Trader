@@ -13,6 +13,7 @@ import pandas as pd
 
 from .concepts import ICTConfig, analyze
 from .context import in_silver_bullet as _canonical_silver_bullet
+from .context import window_status
 from .indicators import add_indicators, resample_htf
 from .strategy import net_rr
 
@@ -870,6 +871,25 @@ def audit(df: pd.DataFrame, daily: pd.DataFrame | None = None,
     rules.append(_status("L5-06", "L5", "premium/discount vs direction", pd_ok, blocking=False,
                          value={"zone": pd_zone, "direction": direction},
                          reason=pd_reason))
+
+    # L5-07 (P1-10): the one window table's verdict at the audit bar.  A dead
+    # zone or a named non-window is a failure of the criterion (never a pass by
+    # absence); outside every declared window the criterion is N/A rather than
+    # FAIL, because a bar outside the corpus's clocks is not a window defect.
+    window = window_status(last["date"], market=market,
+                           input_tz=_MARKET_TZ.get(market, "UTC"))
+    if window.dead_zone or window.non_window is not None:
+        window_ok = False
+        window_reason = "" if window.refusal is None else window.refusal.detail
+    elif window.windows:
+        window_ok = True
+        window_reason = ""
+    else:
+        window_ok = None
+        window_reason = "outside every declared window"
+    rules.append(_status("L5-07", "L5", "window / dead zone", window_ok,
+                         blocking=False, value=window.to_public(),
+                         reason=window_reason))
 
     plan_info = None
     if plan:

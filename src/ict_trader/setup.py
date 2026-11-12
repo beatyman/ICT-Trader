@@ -41,13 +41,15 @@ from .context import (BiasDirection, BiasState, BiasStateStore,
                       DAY_BOUNDARY_OPTIONS, DailyBiasReading, DailyMSSEvent,
                       DayBoundary, LastDailyMSSLock,
                       DEFAULT_NEUTRAL_HANDLING, NEUTRAL_HANDLINGS,
-                      MidnightOpen, SwingIndex, WEEK_OPEN_OPTIONS,
+                      MACRO_GATE_NAMES, MidnightOpen, SwingIndex,
+                      WEEK_OPEN_OPTIONS,
                       WEEKLY_ANCHOR_OPTIONS, WEEKLY_ANCHOR_SOURCES,
                       WEEKLY_PROBABILITY_SOURCE, WEEKLY_PROBABILITY_STATUS,
                       WeekOpen, WeeklyAnchor, WeeklyGateResult, WeeklyIndex,
                       WeeklyState, bias_vocabulary_readings,
                       candle2_closure, candle3_closure, daily_open_polarity,
-                      dealing_range, declare_week_open, in_session,
+                      dealing_range, declare_week_open, in_dead_zone,
+                      in_named_non_window, in_session,
                       midnight_open_from_anchor, neutral_blocks, neutral_weight,
                       open_vs_daily_ce, ote_from_signal, outside_day_bias,
                       parse_bias, parse_daily_bias_family, parse_day_clock,
@@ -266,7 +268,13 @@ class SetupConfig:
     #: Declared first-partial coordinate system (MG-01/V31); ``None`` reads the
     #: one implied by ``t1_at_r``/``t1_at_eq``.
     ladder_mode: str | None = None
-    session_gate: str = "none"  # none | auto | london | ny_am | ny_pm | cn | hk
+    session_gate: str = "none"  # none | auto | london | ny_am | ny_pm | macro_* | cn | hk
+    #: P1-10: enforce LT-K11's 05:00-07:00 NY dead zone and LT-K12's named
+    #: non-windows (06:30, 12:00) independently of any session gate.  The dead
+    #: zone is a no-entry rule regardless of structure, so it gates both the
+    #: signal bar and a ``next_open`` fill.  ``False`` keeps the pre-P1-10
+    #: compatibility path (the window objects are still available to callers).
+    dead_zone_gate: bool = False
     pd_gate: bool = False
     pd_buy_max: float = 0.5
     pd_sell_min: float = 0.5
@@ -1883,6 +1891,47 @@ def build_setup(df: pd.DataFrame, result, cfg: SetupConfig,
                 )
                 continue
 
+        if cfg.dead_zone_gate:
+            # P1-10 / LT-K11/LT-K12: the dead zone and the named non-windows
+            # refuse entry regardless of structure.  The fill bar is checked
+            # too, because ``next_open`` can move the entry into 05:00-07:00
+            # even when the signal bar was outside it (EN-04).
+            signal_dead = in_dead_zone(df, t, cfg.market)
+            signal_non_window = in_named_non_window(df, t, cfg.market)
+            if signal_dead or signal_non_window is not None:
+                _record_refusal(
+                    refusals,
+                    code=(RefusalCode.NT_DEAD_ZONE.value if signal_dead
+                          else RefusalCode.NT_OUT_OF_WINDOW.value),
+                    direction=c.direction, signal_bar=int(t),
+                    gate="dead_zone" if signal_dead else "named_non_window",
+                    non_window=signal_non_window,
+                    detail=("05:00-07:00 NY dead zone: no entry regardless of "
+                            "structure (LT-K11)" if signal_dead else
+                            f"named non-window {signal_non_window!r}: no "
+                            "setup (LT-K12)"),
+                )
+                continue
+            fill_bar = _next_open_fill_bar(cfg, t)
+            if fill_bar is not None and fill_bar < len(df):
+                fill_dead = in_dead_zone(df, fill_bar, cfg.market)
+                fill_non_window = in_named_non_window(df, fill_bar, cfg.market)
+                if fill_dead or fill_non_window is not None:
+                    _record_refusal(
+                        refusals,
+                        code=(RefusalCode.NT_DEAD_ZONE.value if fill_dead
+                              else RefusalCode.NT_OUT_OF_WINDOW.value),
+                        direction=c.direction, signal_bar=int(t),
+                        fill_bar=int(fill_bar),
+                        gate="dead_zone" if fill_dead else "named_non_window",
+                        non_window=fill_non_window,
+                        detail=("the fill bar is inside the 05:00-07:00 NY "
+                                "dead zone (LT-K11)" if fill_dead else
+                                f"the fill bar is the named non-window "
+                                f"{fill_non_window!r} (LT-K12)"),
+                    )
+                    continue
+
         pd_pos = None
         dr = pre.swings.dealing_range(t, cfg.pd_lookback)
         if dr is not None:
@@ -2341,8 +2390,11 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--trail-activate-r", type=float, default=0.0)
     ap.add_argument("--trail-atr-mult", type=float, default=0.0)
     ap.add_argument("--max-daily-loss-r", type=float, default=0.0)
-    ap.add_argument("--session-gate", choices=["none", "auto", "asian", "london", "london_close", "ny_am", "ny_pm", "silver_bullet", "cn", "hk"],
+    ap.add_argument("--session-gate", choices=["none", "auto", "asian", "london", "london_close", "ny_am", "ny_pm", "silver_bullet", *MACRO_GATE_NAMES, "cn", "hk"],
                     default="none")
+    ap.add_argument("--dead-zone-gate", action="store_true",
+                    help="refuse entries in the 05:00-07:00 NY dead zone and "
+                         "at the named non-windows 06:30/12:00 (P1-10)")
     ap.add_argument("--pd-gate", action="store_true")
     ap.add_argument("--ote-gate", action="store_true")
     ap.add_argument("--ote-min", type=float, default=0.62)
@@ -2426,7 +2478,8 @@ def main() -> None:
                       min_target_rr=args.min_target_rr,
                       max_target_rr=args.max_target_rr,
                       daily_bias_filter=args.daily_bias_filter,
-                      htf_structure_gate=args.htf_structure_gate)
+                      htf_structure_gate=args.htf_structure_gate,
+                      dead_zone_gate=args.dead_zone_gate)
     trades, m = run_one(args.csv, cfg, daily_path=args.daily_csv)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([t.__dict__ for t in trades]).to_csv(args.out, index=False, encoding="utf-8-sig")

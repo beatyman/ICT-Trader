@@ -6,7 +6,6 @@ each can be ablated.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, time as dtime, timedelta
 from enum import Enum, StrEnum
@@ -20,7 +19,8 @@ from .variants import Refusal, RefusalCode, read_variant_spec
 
 Market = Literal["cn", "hk", "crypto", "other"]
 SessionGate = Literal["none", "auto", "asian", "asian_dr", "london", "london_close", "ny_am", "ny_pm",
-                      "silver_bullet", "macro_0950", "venom", "cn", "hk"]
+                      "silver_bullet", "macro_0233", "macro_0403", "macro_0850", "macro_0950",
+                      "macro_1050", "macro_1150", "macro_1310", "macro_1515", "venom", "cn", "hk"]
 
 #: Repo choice (§2.3): ATR is not defined by the corpus; the repository uses
 #: ``ATR14``.  One function and one period serve every ATR-relative number
@@ -809,46 +809,480 @@ _MARKET_TZ: dict[str, str] = {
     "other": "UTC",
 }
 
-#: The one Silver Bullet clock (silver_bullet R13/R14, LT-B01, SPEC §10.2):
-#: three one-hour windows on the America/New_York wall clock.  Every Silver
-#: Bullet call site imports this table; no module keeps a second clock (P0-12).
-SILVER_BULLET_TZ = "America/New_York"
-SILVER_BULLET_WINDOWS: tuple[tuple[dtime, dtime], ...] = (
-    (dtime(3, 0), dtime(4, 0)),
-    (dtime(10, 0), dtime(11, 0)),
-    (dtime(14, 0), dtime(15, 0)),
+#: P1-10: the one window table.
+#:
+#: Every intraday clock object in the repository is a row here: the cash
+#: sessions, the killzones, the eight-row macro set, the Silver Bullet hours and
+#: the ``05:00-07:00`` dead zone.  There is exactly one table, so a killzone
+#: span, a macro span and a Silver Bullet span cannot disagree (P0-12, V13,
+#: SYSTEM_SPEC §10.2).  Rows are read through :func:`windows_for_gate` /
+#: :func:`window_spec`; no module may keep a second clock.
+#:
+#: The boundary convention is the declared V13 repo default, half-open
+#: ``[start, end)`` (§10.1/§14.4): a hard-close instant such as ``05:00`` is the
+#: first instant *outside* the window, which is what makes ``05:00`` usable as a
+#: hard close (LT-K13) rather than a member.
+NY = "America/New_York"
+
+#: V13 declares three boundary conventions; the repo default is half-open.
+WINDOW_BOUNDARY = "half-open"
+WINDOW_BOUNDARY_SOURCE = "V13 repo default (SYSTEM_SPEC §10.1/§14.4)"
+
+#: The instrument scopes a window may be qualified by (GT-08).  A window with an
+#: empty ``instruments`` tuple applies to every scope; a populated one is an
+#: override (for example NY AM ``08:30-11:00`` for index futures).  An unknown
+#: scope is refused with ``NT_INSTRUMENT_UNSUPPORTED``-class information rather
+#: than being silently treated as forex.
+INSTRUMENT_SCOPES: tuple[str, ...] = ("forex", "index_futures", "crypto")
+
+
+class WindowKind(StrEnum):
+    """The declared window classes (SYSTEM_SPEC §10.1)."""
+
+    SESSION = "session"
+    KILLZONE = "killzone"
+    MACRO = "macro"
+    SILVER_BULLET = "silver_bullet"
+    RANGE = "range"
+    DEAD_ZONE = "dead_zone"
+
+
+def _minute_clock(value: object, what: str) -> dtime:
+    """A minute-resolution clock; seconds would be silently truncated."""
+    if isinstance(value, dtime):
+        parsed = value
+    elif isinstance(value, pd.Timestamp):
+        parsed = value.time()
+    elif isinstance(value, str):
+        try:
+            parsed = dtime.fromisoformat(value.strip())
+        except ValueError:
+            raise ValueError(
+                f"{what} must be HH:MM or HH:MM:SS, got {value!r}") from None
+    else:
+        raise TypeError(
+            f"{what} must be a time or an 'HH:MM' string, got "
+            f"{type(value).__name__}")
+    if parsed.second or parsed.microsecond:
+        raise ValueError(
+            f"{what} is minute-resolution; {value!r} carries seconds and "
+            "would be silently truncated")
+    return parsed
+
+
+def _validate_window_zone(zone: object) -> str:
+    text = str(zone).strip()
+    try:
+        ZoneInfo(text)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(
+            f"unknown window timezone {zone!r}; declare an IANA zone") from None
+    return text
+
+
+def _validate_instrument_scope(instrument: object) -> str:
+    text = str(instrument).strip().lower()
+    if text not in INSTRUMENT_SCOPES:
+        raise ValueError(
+            f"unknown instrument scope {instrument!r}; declare one of "
+            f"{INSTRUMENT_SCOPES} (GT-08)")
+    return text
+
+
+@dataclass(frozen=True, slots=True)
+class WindowSpec:
+    """One declared clock window (SYSTEM_SPEC §10.1/§10.2).
+
+    A window carries clock quantities only -- start, end, timezone, class and
+    instrument scope.  It has no price arithmetic and no direction (GT-01), and
+    its end is a hard-close instant under the declared half-open convention.
+    ``gate`` names the legacy :data:`SessionGate` key when the row is selectable
+    through ``session_gate``; ``instruments`` is empty for the modal/global row
+    and populated only for an attested instrument-scoped override (GT-08).
+    """
+
+    name: str
+    kind: WindowKind
+    zone: str
+    start: dtime
+    end: dtime
+    source: str
+    gate: str | None = None
+    instruments: tuple[str, ...] = ()
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        name = str(self.name).strip()
+        if not name:
+            raise ValueError("a window must be named")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "kind", WindowKind(str(self.kind).strip().lower()))
+        object.__setattr__(self, "zone", _validate_window_zone(self.zone))
+        start = _minute_clock(self.start, f"window {name!r} start")
+        end = _minute_clock(self.end, f"window {name!r} end")
+        if start == end:
+            raise ValueError(
+                f"window {name!r} is zero-length; a start of 00:00 and an end "
+                "of 00:00 are the same instant (declare a cross-midnight window "
+                "with a later start, e.g. 19:00-00:00)")
+        object.__setattr__(self, "start", start)
+        object.__setattr__(self, "end", end)
+        source = str(self.source).strip()
+        if not source:
+            raise ValueError(
+                f"window {name!r} must carry its corpus/repo provenance")
+        object.__setattr__(self, "source", source)
+        gate = None if self.gate is None else str(self.gate).strip() or None
+        object.__setattr__(self, "gate", gate)
+        raw_instruments = ((self.instruments,) if isinstance(self.instruments, str)
+                           else self.instruments)
+        scopes: list[str] = []
+        for raw in raw_instruments:
+            scope = _validate_instrument_scope(raw)
+            if scope not in scopes:
+                scopes.append(scope)
+        object.__setattr__(self, "instruments", tuple(scopes))
+        object.__setattr__(self, "note", str(self.note).strip())
+
+    @property
+    def hard_close(self) -> dtime:
+        """The first instant outside the window (half-open end)."""
+        return self.end
+
+    def contains(self, t: dtime) -> bool:
+        """Half-open membership: ``start <= t < end`` (§10.1, V13)."""
+        return _in_window(t, self.start, self.end)
+
+    def duration_minutes(self) -> int:
+        start = self.start.hour * 60 + self.start.minute
+        end = self.end.hour * 60 + self.end.minute
+        return (end - start) % (24 * 60)
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "kind": self.kind.value,
+            "zone": self.zone,
+            "start": self.start.strftime("%H:%M"),
+            "end": self.end.strftime("%H:%M"),
+            "gate": self.gate,
+            "instruments": list(self.instruments),
+            "boundary": WINDOW_BOUNDARY,
+            "source": self.source,
+            "note": self.note,
+        }
+
+
+def _w(name: str, kind: WindowKind, start: dtime, end: dtime, source: str, *,
+       zone: str = NY, gate: str | None = None,
+       instruments: tuple[str, ...] = (), note: str = "") -> WindowSpec:
+    return WindowSpec(name=name, kind=kind, zone=zone, start=start, end=end,
+                      source=source, gate=gate, instruments=instruments,
+                      note=note)
+
+
+#: The one table (P1-10).  Every row is copied from SYSTEM_SPEC §10.2 / the
+#: repo's existing declarations; no window is invented here, and conflicting
+#: corpus variants are kept out of this table instead of being merged into it.
+WINDOW_TABLE: tuple[WindowSpec, ...] = (
+    # -- cash sessions (repo declarations, not §10.2 rows) ------------------ #
+    _w("cn_am", WindowKind.SESSION, dtime(9, 30), dtime(11, 30),
+       "repo cash session (context legacy); §10.2 has no CN row",
+       zone="Asia/Shanghai", gate="cn"),
+    _w("cn_pm", WindowKind.SESSION, dtime(13, 0), dtime(15, 0),
+       "repo cash session (context legacy); §10.2 has no CN row",
+       zone="Asia/Shanghai", gate="cn"),
+    _w("hk_am", WindowKind.SESSION, dtime(9, 30), dtime(12, 0),
+       "repo cash session (context legacy); §10.2 has no HK row",
+       zone="Asia/Hong_Kong", gate="hk"),
+    _w("hk_pm", WindowKind.SESSION, dtime(13, 0), dtime(16, 0),
+       "repo cash session (context legacy); §10.2 has no HK row",
+       zone="Asia/Hong_Kong", gate="hk"),
+    # -- killzones ---------------------------------------------------------- #
+    _w("london", WindowKind.KILLZONE, dtime(2, 0), dtime(5, 0),
+       "§10.2 modal London (LT-K01; doc_0505, doc_0168)", gate="london",
+       note="hard close at 05:00 (LT-K13)"),
+    _w("asian", WindowKind.KILLZONE, dtime(19, 0), dtime(0, 0),
+       "§10.2 Asian variant 19:00-00:00 (repo legacy convention)",
+       gate="asian", note="the modal 20:00-00:00 variant is kept separate, not merged"),
+    _w("asian_dr", WindowKind.RANGE, dtime(0, 0), dtime(2, 0),
+       "§10.2 Asian variant 00:00-02:00 (doc_0601, doc_0649)",
+       gate="asian_dr",
+       note="accumulation/dealing range, not an execution window (killzone C3)"),
+    _w("venom", WindowKind.RANGE, dtime(8, 0), dtime(9, 30),
+       "doc_0069 Venom model: 08:00-09:30 NY pre-open range",
+       gate="venom"),
+    _w("london_close", WindowKind.KILLZONE, dtime(10, 0), dtime(12, 0),
+       "§10.2 modal London Close (doc_0431, doc_0408)", gate="london_close"),
+    _w("ny_am", WindowKind.KILLZONE, dtime(7, 0), dtime(10, 0),
+       "§10.2 modal NY AM (doc_0199, doc_0157); forex scope", gate="ny_am"),
+    _w("ny_am_index_futures", WindowKind.KILLZONE, dtime(8, 30), dtime(11, 0),
+       "GT-08 / §10.2 NY AM variant for index futures (doc_0199 caption, doc_0221)",
+       gate="ny_am", instruments=("index_futures",),
+       note="instrument-scoped override; forex keeps the 07:00-10:00 row"),
+    _w("ny_pm", WindowKind.KILLZONE, dtime(13, 30), dtime(16, 0),
+       "§10.2 NY PM (doc_0199, doc_0649)", gate="ny_pm"),
+    # -- the 8-row macro set (§10.2 / LT-M01) ------------------------------- #
+    _w("macro_0233", WindowKind.MACRO, dtime(2, 33), dtime(3, 0),
+       "§10.2 macro 1 (doc_0196, doc_0508); London 1", gate="macro_0233"),
+    _w("macro_0403", WindowKind.MACRO, dtime(4, 3), dtime(4, 30),
+       "§10.2 macro 2 (doc_0196, doc_0508); London 2", gate="macro_0403"),
+    _w("macro_0850", WindowKind.MACRO, dtime(8, 50), dtime(9, 10),
+       "§10.2 macro 3 (doc_0644 pre-NYSE macro)", gate="macro_0850"),
+    _w("macro_0950", WindowKind.MACRO, dtime(9, 50), dtime(10, 10),
+       "§10.2 macro 4 (doc_0090, doc_0196, doc_0508, doc_0620)",
+       gate="macro_0950", note="the corpus's highest-ranked macro"),
+    _w("macro_1050", WindowKind.MACRO, dtime(10, 50), dtime(11, 10),
+       "§10.2 macro 5 (doc_0508, doc_0196, doc_0620)", gate="macro_1050"),
+    _w("macro_1150", WindowKind.MACRO, dtime(11, 50), dtime(12, 10),
+       "§10.2 macro 6 (doc_0508, doc_0196); NY lunch", gate="macro_1150"),
+    _w("macro_1310", WindowKind.MACRO, dtime(13, 10), dtime(13, 40),
+       "§10.2 macro 7 (doc_0196, doc_0554); NY PM 1", gate="macro_1310"),
+    _w("macro_1515", WindowKind.MACRO, dtime(15, 15), dtime(15, 45),
+       "§10.2 macro 8 variant A (doc_0508, doc_0196); last hour",
+       gate="macro_1515",
+       note="the 14:50-15:10 variant B is a different corpus row and is not merged"),
+    # -- Silver Bullet (P0-12) --------------------------------------------- #
+    _w("silver_bullet_1", WindowKind.SILVER_BULLET, dtime(3, 0), dtime(4, 0),
+       "§10.2 Silver Bullet 03:00-04:00 (silver_bullet R13/R14)",
+       gate="silver_bullet"),
+    _w("silver_bullet_2", WindowKind.SILVER_BULLET, dtime(10, 0), dtime(11, 0),
+       "§10.2 Silver Bullet 10:00-11:00 (silver_bullet R13/R14)",
+       gate="silver_bullet"),
+    _w("silver_bullet_3", WindowKind.SILVER_BULLET, dtime(14, 0), dtime(15, 0),
+       "§10.2 Silver Bullet 14:00-15:00 (silver_bullet R13/R14)",
+       gate="silver_bullet"),
+    # -- the dead zone (LT-K11) -------------------------------------------- #
+    _w("dead_zone", WindowKind.DEAD_ZONE, dtime(5, 0), dtime(7, 0),
+       "LT-K11 / doc_0644: 05:00-07:00 EST, no entry regardless of structure",
+       note="named dead zone; refusal code NT_DEAD_ZONE"),
 )
 
-_SESSION_WINDOWS: dict[str, tuple[str, Sequence[tuple[dtime, dtime]]]] = {
-    "cn": ("Asia/Shanghai", [(dtime(9, 30), dtime(11, 30)), (dtime(13, 0), dtime(15, 0))]),
-    "hk": ("Asia/Hong_Kong", [(dtime(9, 30), dtime(12, 0)), (dtime(13, 0), dtime(16, 0))]),
-    "london": ("America/New_York", [(dtime(2, 0), dtime(5, 0))]),
-    # ICT teaching: Asian range accumulates 19:00-00:00 NY; London close 10:00-12:00 NY.
-    # Declared half-open: the 00:00 end is exclusive, not 23:59:59.
-    "asian": ("America/New_York", [(dtime(19, 0), dtime(0, 0))]),
-    # doc 601 (liquiditysweeps.com): "The Asian range (00:00-02:00 EST) functions as
-    # a micro-dealing range for the London open."  Kept as a separate key because
-    # the legacy "asian" window above uses the 19:00-00:00 NY convention.
-    "asian_dr": ("America/New_York", [(dtime(0, 0), dtime(2, 0))]),
-    # doc 546: "the 09:50 NY-AM macro window ... concentrated inside that 20-minute
-    # window"; doc 491 lists 09:50 as a highest-conviction FVG window.
-    "macro_0950": ("America/New_York", [(dtime(9, 50), dtime(10, 10))]),
-    # doc 69 (ICT Venom model): "a raid of the 08:00-09:30 New York range after the
-    # 09:30 open".  The gate selects the pre-open range that gets raided.
-    "venom": ("America/New_York", [(dtime(8, 0), dtime(9, 30))]),
-    "london_close": ("America/New_York", [(dtime(10, 0), dtime(12, 0))]),
-    "ny_am": ("America/New_York", [(dtime(7, 0), dtime(10, 0))]),
-    "ny_pm": ("America/New_York", [(dtime(13, 30), dtime(16, 0))]),
-    "silver_bullet": (SILVER_BULLET_TZ, SILVER_BULLET_WINDOWS),
-}
+#: The 8-row macro set as data, in §10.2 table order.  It is a filtered view of
+#: :data:`WINDOW_TABLE`, not a second table.
+MACRO_WINDOWS: tuple[WindowSpec, ...] = tuple(
+    row for row in WINDOW_TABLE if row.kind is WindowKind.MACRO)
+
+#: The gate names the macro rows add to :data:`SessionGate`.
+MACRO_GATE_NAMES: tuple[str, ...] = tuple(
+    row.gate for row in MACRO_WINDOWS if row.gate is not None)
+
+#: The one dead-zone row (LT-K11).  It is in :data:`WINDOW_TABLE`; this alias is
+#: the read path for the 05:00-07:00 predicate.
+DEAD_ZONE: WindowSpec = next(
+    row for row in WINDOW_TABLE if row.kind is WindowKind.DEAD_ZONE)
+
+
+@dataclass(frozen=True, slots=True)
+class NamedNonWindow:
+    """A named non-window instant (LT-K12): ``06:30`` and ``12:00`` NY.
+
+    These are *instants*, not spans: a Judas + MSS at 06:30 or 12:00 is not a
+    setup even when a macro row happens to contain the minute (12:00 is inside
+    the 11:50-12:10 macro).  The row therefore lives beside the window table,
+    never inside it, and it suppresses a window rather than extending one.
+    """
+
+    instant: dtime
+    zone: str
+    label: str
+    source: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "instant",
+                           _minute_clock(self.instant, "non-window instant"))
+        object.__setattr__(self, "zone", _validate_window_zone(self.zone))
+        label = str(self.label).strip()
+        if not label:
+            raise ValueError("a named non-window needs a label")
+        object.__setattr__(self, "label", label)
+        source = str(self.source).strip()
+        if not source:
+            raise ValueError("a named non-window must carry its provenance")
+        object.__setattr__(self, "source", source)
+
+    def matches(self, t: dtime) -> bool:
+        return (t.hour, t.minute) == (self.instant.hour, self.instant.minute)
+
+    def to_public(self) -> dict[str, object]:
+        return {"instant": self.instant.strftime("%H:%M"), "zone": self.zone,
+                "label": self.label, "source": self.source}
+
+
+#: LT-K12's two named non-windows, both on the New York clock.
+NAMED_NON_WINDOWS: tuple[NamedNonWindow, ...] = (
+    NamedNonWindow(
+        dtime(6, 30), NY, "between London close and NY AM open",
+        "LT-K12 / doc_0589: a Judas + MSS at 06:30 EST is not a setup"),
+    NamedNonWindow(
+        dtime(12, 0), NY, "between NY AM and NY PM",
+        "LT-K12 / doc_0589: a Judas + MSS at 12:00 EST is not a setup"),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class HardClose:
+    """One declared hard-close instant (LT-K13).
+
+    The instant is the *first* bar after the window under the half-open
+    convention: positions are flat and resting limits are cancelled there
+    (LT-K13, GT-06).  It is data, not a derived end, because the corpus's hard
+    close for NY AM is ``11:00`` while §10.2's modal NY AM row ends at ``10:00``;
+    the conflict is recorded here instead of being silently reconciled.
+    """
+
+    instant: dtime
+    window: str
+    zone: str
+    source: str
+    variant: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "instant",
+                           _minute_clock(self.instant, "hard-close instant"))
+        window = str(self.window).strip()
+        if not window:
+            raise ValueError("a hard close must name its window")
+        object.__setattr__(self, "window", window)
+        object.__setattr__(self, "zone", _validate_window_zone(self.zone))
+        source = str(self.source).strip()
+        if not source:
+            raise ValueError("a hard close must carry its provenance")
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "variant", str(self.variant).strip())
+
+    def matches(self, t: dtime) -> bool:
+        return (t.hour, t.minute) == (self.instant.hour, self.instant.minute)
+
+    def to_public(self) -> dict[str, object]:
+        return {"instant": self.instant.strftime("%H:%M"), "zone": self.zone,
+                "window": self.window, "variant": self.variant,
+                "source": self.source}
+
+
+#: LT-K13's two hard-close instants.  ``11:00`` belongs to the 07:00-11:00 /
+#: 08:00-11:00 NY AM variants; the modal 07:00-10:00 row keeps its own 10:00
+#: close.  Both are corpus rows and neither is overwritten.
+HARD_CLOSES: tuple[HardClose, ...] = (
+    HardClose(
+        dtime(5, 0), "london", NY,
+        "LT-K13 / doc_0644, doc_0604, doc_0635",
+        variant="London killzone 02:00-05:00"),
+    HardClose(
+        dtime(11, 0), "ny_am", NY,
+        "LT-K13 / doc_0644, doc_0635",
+        variant="NY AM 07:00-11:00 / 08:00-11:00 variants; the modal "
+                "07:00-10:00 row closes at 10:00"),
+)
+
+
+def _session_window_view(
+        table: tuple[WindowSpec, ...],
+) -> dict[str, tuple[str, tuple[tuple[dtime, dtime], ...]]]:
+    """Group the unscoped table rows into the legacy ``gate -> spans`` view.
+
+    This is a *view* of :data:`WINDOW_TABLE`; it owns no windows.  Instrument
+    scoped overrides are excluded because the legacy gate predicate has no
+    instrument argument (the scoped read path is :func:`windows_for_gate`).
+    """
+    order: list[str] = []
+    zones: dict[str, str] = {}
+    spans: dict[str, list[tuple[dtime, dtime]]] = {}
+    for row in table:
+        if row.gate is None or row.instruments:
+            continue
+        if row.kind is WindowKind.DEAD_ZONE:
+            continue
+        if row.gate not in spans:
+            order.append(row.gate)
+            zones[row.gate] = row.zone
+            spans[row.gate] = []
+        elif zones[row.gate] != row.zone:
+            raise ValueError(
+                f"gate {row.gate!r} mixes timezones "
+                f"{zones[row.gate]!r} and {row.zone!r}")
+        spans[row.gate].append((row.start, row.end))
+    return {gate: (zones[gate], tuple(spans[gate])) for gate in order}
+
+
+_SESSION_WINDOWS: dict[str, tuple[str, tuple[tuple[dtime, dtime], ...]]] = (
+    _session_window_view(WINDOW_TABLE))
+
+#: The one Silver Bullet clock (silver_bullet R13/R14, LT-B01, SPEC §10.2):
+#: three one-hour windows on the America/New_York wall clock.  This constant is
+#: a read-only view of :data:`WINDOW_TABLE` (the rows are the source).
+SILVER_BULLET_TZ = NY
+SILVER_BULLET_WINDOWS: tuple[tuple[dtime, dtime], ...] = tuple(
+    (row.start, row.end) for row in WINDOW_TABLE
+    if row.kind is WindowKind.SILVER_BULLET)
+
+
+def window_spec(name: str) -> WindowSpec:
+    """The one row named ``name``; no fuzzy or case-insensitive matching."""
+    key = str(name).strip()
+    for row in WINDOW_TABLE:
+        if row.name == key:
+            return row
+    raise KeyError(f"no declared window named {name!r}")
+
+
+def windows_for_gate(gate: str, *,
+                     instrument: str | None = None) -> tuple[WindowSpec, ...]:
+    """All rows selectable through ``gate``, resolving an instrument scope.
+
+    A populated ``instruments`` row is an override: for NY AM the forex row is
+    ``07:00-10:00`` and the index-futures row is ``08:30-11:00`` (GT-08).  With
+    ``instrument=None`` the unscoped/modal rows are returned, which keeps the
+    legacy ``in_session`` behaviour.
+    """
+    key = str(gate).strip()
+    scope = None if instrument is None else _validate_instrument_scope(instrument)
+    candidates = [row for row in WINDOW_TABLE
+                  if row.gate == key and row.kind is not WindowKind.DEAD_ZONE]
+    if not candidates:
+        raise KeyError(f"no declared window gate {gate!r}")
+    if scope is not None:
+        scoped = [row for row in candidates if scope in row.instruments]
+        if scoped:
+            return tuple(scoped)
+    unscoped = [row for row in candidates if not row.instruments]
+    return tuple(unscoped) if unscoped else tuple(candidates)
+
+
+def window_for(gate: str, *,
+               instrument: str | None = None) -> WindowSpec:
+    """The first row for ``gate`` (use :func:`windows_for_gate` for multi-span)."""
+    return windows_for_gate(gate, instrument=instrument)[0]
+
+
+def resolved_windows(*, instrument: str | None = None) -> tuple[WindowSpec, ...]:
+    """Every non-dead window after applying the declared instrument scope."""
+    scope = None if instrument is None else _validate_instrument_scope(instrument)
+    scoped_gates = {
+        row.gate for row in WINDOW_TABLE
+        if row.gate is not None and row.instruments
+        and (scope is None or scope in row.instruments)
+    }
+    out: list[WindowSpec] = []
+    for row in WINDOW_TABLE:
+        if row.kind is WindowKind.DEAD_ZONE:
+            continue
+        if row.instruments:
+            if scope is not None and scope in row.instruments:
+                out.append(row)
+            continue
+        if scope is not None and row.gate in scoped_gates:
+            continue
+        out.append(row)
+    return tuple(out)
 
 
 def session_windows(key: str) -> tuple[str, tuple[tuple[dtime, dtime], ...]]:
     """Return the canonical ``(zone, windows)`` pair for one session gate.
 
-    This is the only read path for the table above.  Callers that annotate the
-    clock (``concepts.detect_killzones``) must derive their spans from it rather
-    than defining a second timezone table (P0-12).
+    This is the legacy read path over :data:`WINDOW_TABLE`; callers that
+    annotate the clock (``concepts.detect_killzones``) derive their spans from
+    it rather than defining a second timezone table (P0-12).
     """
     zone, windows = _SESSION_WINDOWS[key]
     return zone, tuple(windows)
@@ -921,23 +1355,30 @@ def _stamp_in_zone(ts, zone: str, market: str = "other",
         return None
 
 
+def _ny_clock(ts, market: str = "other",
+              input_tz: str | None = None) -> dtime | None:
+    local = _stamp_in_zone(ts, NY, market, input_tz)
+    return None if local is None else local.time()
+
+
 def in_session_at(ts, gate: SessionGate, market: str = "other",
-                  input_tz: str | None = None) -> bool:
+                  input_tz: str | None = None, *,
+                  instrument: str | None = None) -> bool:
     """Timestamp-level twin of :func:`in_session` over the same table.
 
     ``in_session`` reads one bar of a frame; this reads a single instant.  Both
     resolve ``gate``/``auto`` through :func:`_gate_key` and test the same
     half-open windows, so a bar verdict and an instant verdict cannot diverge.
+    The optional ``instrument`` selects a declared scoped override (GT-08).
     """
     key = _gate_key(market, gate)
     if key is None:
         return True
-    zone, windows = _SESSION_WINDOWS[key]
-    local = _stamp_in_zone(ts, zone, market, input_tz)
-    if local is None:
-        return False
-    t = local.time()
-    return any(_in_window(t, start, end) for start, end in windows)
+    for row in windows_for_gate(key, instrument=instrument):
+        local = _stamp_in_zone(ts, row.zone, market, input_tz)
+        if local is not None and row.contains(local.time()):
+            return True
+    return False
 
 
 def in_silver_bullet(ts, tz: str = SILVER_BULLET_TZ,
@@ -952,19 +1393,392 @@ def in_silver_bullet(ts, tz: str = SILVER_BULLET_TZ,
     return in_session_at(ts, "silver_bullet", "crypto", input_tz=input_tz)
 
 
-def in_session(df: pd.DataFrame, idx: int, market: str, gate: SessionGate) -> bool:
-    """Return whether a closed bar falls in the requested cash/session window.
+def in_session(df: pd.DataFrame, idx: int, market: str, gate: SessionGate, *,
+               instrument: str | None = None) -> bool:
+    """Return whether a closed bar falls in the requested session window.
 
     Naive timestamps are interpreted in the market's native timezone (UTC for
     crypto) and then converted to the session timezone.  This matters for the
     New York kill zones: Binance 15m timestamps are UTC, not New York local.
+    The optional ``instrument`` selects a declared scoped override (GT-08).
     """
     key = _gate_key(market, gate)
     if key is None:
         return True
-    zone, windows = _SESSION_WINDOWS[key]
-    t = _as_zone(df, idx, zone, market).time()
-    return any(_in_window(t, start, end) for start, end in windows)
+    for row in windows_for_gate(key, instrument=instrument):
+        if row.contains(_as_zone(df, idx, row.zone, market).time()):
+            return True
+    return False
+
+
+def _window_clock(t: dtime, row: WindowSpec) -> bool:
+    return row.contains(t)
+
+
+def active_windows(ts, *, instrument: str | None = None,
+                   input_tz: str | None = None,
+                   market: str = "other") -> tuple[WindowSpec, ...]:
+    """Every tradable window open at ``ts`` (killzone/macro/Silver Bullet).
+
+    Ranges (``asian_dr``/``venom``) and cash sessions are not permission
+    windows, so they are deliberately absent; the dead zone is reported by
+    :func:`dead_zone_at`, never as an open window.
+    """
+    local = _ny_clock(ts, market, input_tz)
+    if local is None:
+        return ()
+    tradable = (WindowKind.KILLZONE, WindowKind.MACRO,
+                WindowKind.SILVER_BULLET)
+    return tuple(row for row in resolved_windows(instrument=instrument)
+                 if row.zone == NY and row.kind in tradable
+                 and _window_clock(local, row))
+
+
+def dead_zone_at(ts, *, market: str = "other",
+                 input_tz: str | None = None) -> bool:
+    """Whether ``ts`` is inside the ``05:00-07:00`` NY dead zone (LT-K11)."""
+    local = _ny_clock(ts, market, input_tz)
+    return local is not None and DEAD_ZONE.contains(local)
+
+
+def named_non_window_at(ts, *, market: str = "other",
+                        input_tz: str | None = None) -> str | None:
+    """The label of the named non-window at ``ts``, or ``None`` (LT-K12)."""
+    local = _ny_clock(ts, market, input_tz)
+    if local is None:
+        return None
+    for row in NAMED_NON_WINDOWS:
+        if row.zone == NY and row.matches(local):
+            return row.label
+    return None
+
+
+def hard_close_at(ts, *, market: str = "other",
+                  input_tz: str | None = None) -> HardClose | None:
+    """The declared hard-close instant at ``ts``, or ``None`` (LT-K13)."""
+    local = _ny_clock(ts, market, input_tz)
+    if local is None:
+        return None
+    for row in HARD_CLOSES:
+        if row.zone == NY and row.matches(local):
+            return row
+    return None
+
+
+def in_dead_zone(df: pd.DataFrame, idx: int, market: str = "other") -> bool:
+    """Frame twin of :func:`dead_zone_at` (one closed bar per call)."""
+    return DEAD_ZONE.contains(_as_zone(df, idx, DEAD_ZONE.zone, market).time())
+
+
+def in_named_non_window(df: pd.DataFrame, idx: int,
+                        market: str = "other") -> str | None:
+    """Frame twin of :func:`named_non_window_at`."""
+    local = _as_zone(df, idx, NY, market).time()
+    for row in NAMED_NON_WINDOWS:
+        if row.zone == NY and row.matches(local):
+            return row.label
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class WindowStatus:
+    """One timestamp's window verdict, with its typed refusal.
+
+    ``windows`` is what is open and permitted; ``suppressed`` is what is open
+    but blocked by the dead zone or a named non-window (the 11:50-12:10 macro
+    at 12:00 is the canonical case).  ``refusal`` is the §12 result:
+    ``NT_DEAD_ZONE`` inside 05:00-07:00, ``NT_OUT_OF_WINDOW`` at a named
+    non-window or outside every declared window.
+    """
+
+    zone: str
+    local_time: dtime | None
+    windows: tuple[str, ...]
+    suppressed: tuple[str, ...]
+    dead_zone: bool
+    non_window: str | None
+    hard_close: HardClose | None
+    refusal: Refusal | None
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "zone": self.zone,
+            "local_time": (None if self.local_time is None
+                           else self.local_time.strftime("%H:%M")),
+            "windows": list(self.windows),
+            "suppressed_windows": list(self.suppressed),
+            "dead_zone": bool(self.dead_zone),
+            "non_window": self.non_window,
+            "hard_close": (None if self.hard_close is None
+                           else self.hard_close.to_public()),
+            "refusal": (None if self.refusal is None else {
+                "code": self.refusal.code.value,
+                "detail": self.refusal.detail,
+            }),
+        }
+
+
+def window_status(ts, *, instrument: str | None = None,
+                  input_tz: str | None = None,
+                  market: str = "other") -> WindowStatus:
+    """The one window gate: open windows, dead zone, non-windows, hard close."""
+    local = _ny_clock(ts, market, input_tz)
+    if local is None:
+        return WindowStatus(
+            zone=NY, local_time=None, windows=(), suppressed=(),
+            dead_zone=False, non_window=None, hard_close=None,
+            refusal=Refusal(RefusalCode.NT_DATA_MISSING,
+                            detail=f"{ts!r} is not a timestamp"))
+    open_rows = active_windows(ts, instrument=instrument, market=market)
+    names = tuple(row.name for row in open_rows)
+    dead = DEAD_ZONE.contains(local)
+    non_window = None
+    for row in NAMED_NON_WINDOWS:
+        if row.zone == NY and row.matches(local):
+            non_window = row.label
+            break
+    hard = hard_close_at(ts, market=market)
+    if dead:
+        refusal = Refusal(
+            RefusalCode.NT_DEAD_ZONE,
+            detail=(f"{local.strftime('%H:%M')} is inside the 05:00-07:00 NY "
+                    "dead zone: no entry regardless of structure (LT-K11)"),
+        )
+        return WindowStatus(NY, local, (), names, True, non_window, hard, refusal)
+    if non_window is not None:
+        refusal = Refusal(
+            RefusalCode.NT_OUT_OF_WINDOW,
+            detail=(f"{local.strftime('%H:%M')} is a named non-window "
+                    f"({non_window}): no setup even inside a macro (LT-K12)"),
+        )
+        return WindowStatus(NY, local, (), names, False, non_window, hard, refusal)
+    if not names:
+        refusal = Refusal(
+            RefusalCode.NT_OUT_OF_WINDOW,
+            detail=(f"{local.strftime('%H:%M')} is outside every declared "
+                    "window (SYSTEM_SPEC §10.2)"),
+        )
+        return WindowStatus(NY, local, (), (), False, None, hard, refusal)
+    return WindowStatus(NY, local, names, (), False, None, hard, None)
+
+
+# --------------------------------------------------------------------------- #
+# P1-10 — the Judas window object (J-C5, LT-J03)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class JudasWindowFamily:
+    """One attested Judas window (``judas.md`` §5.1).
+
+    The corpus attests eleven conflicting clocks and no rule adjudicates
+    between them (X2), so the family is *data*: a run declares exactly one
+    through :meth:`JudasWindow.from_variant`.  Nothing here is merged with the
+    macro/killzone table -- a Judas window is a declared selection over the
+    corpus's variants, not a second canonical window table.
+    """
+
+    name: str
+    zone: str
+    start: dtime
+    end: dtime
+    source: str
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        name = str(self.name).strip()
+        if not name:
+            raise ValueError("a Judas window variant must be named")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "zone", _validate_window_zone(self.zone))
+        start = _minute_clock(self.start, f"Judas variant {name!r} start")
+        end = _minute_clock(self.end, f"Judas variant {name!r} end")
+        if start == end:
+            raise ValueError(f"Judas variant {name!r} is zero-length")
+        object.__setattr__(self, "start", start)
+        object.__setattr__(self, "end", end)
+        source = str(self.source).strip()
+        if not source:
+            raise ValueError(
+                f"Judas variant {name!r} must carry its corpus provenance")
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "note", str(self.note).strip())
+
+    def contains(self, t: dtime) -> bool:
+        return _in_window(t, self.start, self.end)
+
+    @property
+    def hard_close(self) -> dtime:
+        return self.end
+
+    def duration_minutes(self) -> int:
+        start = self.start.hour * 60 + self.start.minute
+        end = self.end.hour * 60 + self.end.minute
+        return (end - start) % (24 * 60)
+
+    def to_public(self) -> dict[str, object]:
+        return {"name": self.name, "zone": self.zone,
+                "start": self.start.strftime("%H:%M"),
+                "end": self.end.strftime("%H:%M"), "source": self.source,
+                "note": self.note}
+
+
+def _judas(name: str, start: dtime, end: dtime, source: str,
+           note: str = "") -> JudasWindowFamily:
+    return JudasWindowFamily(name=name, zone=NY, start=start, end=end,
+                             source=source, note=note)
+
+
+#: The eleven attested Judas windows (judas.md §5.1; SYSTEM_SPEC §13.1 records
+#: "11 attested variants").  They are deliberately not merged: 00:00-05:00 and
+#: 05:00-07:00 do not overlap at all, and selecting one is a run declaration.
+JUDAS_WINDOW_VARIANTS: tuple[JudasWindowFamily, ...] = (
+    _judas("full_0000_0500", dtime(0, 0), dtime(5, 0),
+           "doc_0503 b67:108-113 (full Judas -> MSS -> entry flow)",
+           "the complete-session family; the corpus's only end-to-end clock"),
+    _judas("midnight_0000_0200", dtime(0, 0), dtime(2, 0),
+           "doc_0306 b38:146; doc_0500 b60:192",
+           "midnight/CBDR protraction variant"),
+    _judas("pre_silver_bullet_0100_0200", dtime(1, 0), dtime(2, 0),
+           "b111:144", "late-London window before the 02:00 Silver Bullet"),
+    _judas("london_0100_0230", dtime(1, 0), dtime(2, 30),
+           "doc_0615 b10:217 (three-window set, London)",
+           "the authority's London row"),
+    _judas("london_0200_0233", dtime(2, 0), dtime(2, 33),
+           "doc_0644 b21:47,55; doc_0589 b34:244",
+           "the corpus's most operational London row"),
+    _judas("london_0200_0240", dtime(2, 0), dtime(2, 40),
+           "doc_0604 b87:131,139", "observation window, no entry"),
+    _judas("london_0200_0500", dtime(2, 0), dtime(5, 0),
+           "doc_0649 b26:239", "London killzone family"),
+    _judas("late_london_0500_0700", dtime(5, 0), dtime(7, 0),
+           "doc_0137 b47:249,252",
+           "late-London variant; it overlaps the LT-K11 dead zone, so the "
+           "dead-zone refusal still applies"),
+    _judas("nyse_0915_0950", dtime(9, 15), dtime(9, 50),
+           "b9:159", "NYSE-open Judas, characteristically sharper"),
+    _judas("ny_am_0930_1015", dtime(9, 30), dtime(10, 15),
+           "doc_0615 b10:217 (three-window set, NY AM)",
+           "NY AM window; Silver Bullet entry follows at 10:00-11:00"),
+    _judas("ny_pm_1330_1415", dtime(13, 30), dtime(14, 15),
+           "doc_0615 b10:217 (three-window set, NY PM)",
+           "NY PM window"),
+)
+
+#: The corpus's inner blackout band (J-C5 / LT-J03): "do not enter in the first
+#: 15-30 minutes of a kill zone open".  The exact value is not attested, so the
+#: caller must declare ``blackout_minutes``; the object only checks the band.
+JUDAS_BLACKOUT_MINUTES = (15, 30)
+
+
+def judas_window_variant(name: str) -> JudasWindowFamily:
+    """The one attested Judas family named ``name``."""
+    key = str(name).strip()
+    for row in JUDAS_WINDOW_VARIANTS:
+        if row.name == key:
+            return row
+    raise KeyError(f"no attested Judas window variant named {name!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class JudasWindow:
+    """One declared Judas window with its observe-only inner blackout.
+
+    The object answers three questions without inventing anything:
+
+    * :meth:`phase` -- ``outside`` / ``blackout`` / ``open`` for an instant;
+    * :meth:`allows_entry` -- the corpus's dominant "observe only during the
+      Judas" rule (J-C5), additionally respecting the 05:00-07:00 dead zone and
+      the named non-windows, because those refuse entry regardless of model;
+    * :attr:`hard_close` -- the window's own close instant (LT-K13).
+
+    ``blackout_minutes`` is required (no default): J-C5 attests a 15-30 minute
+    band and nothing resolves the exact value, so selecting one is a run
+    declaration, not a repo guess.
+    """
+
+    variant: JudasWindowFamily
+    blackout_minutes: int
+
+    def __post_init__(self) -> None:
+        if isinstance(self.variant, str):
+            object.__setattr__(self, "variant",
+                               judas_window_variant(self.variant))
+        if not isinstance(self.variant, JudasWindowFamily):
+            raise TypeError("JudasWindow.variant must be a JudasWindowFamily")
+        try:
+            blackout = int(self.blackout_minutes)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "JudasWindow.blackout_minutes must be an integer in "
+                f"{JUDAS_BLACKOUT_MINUTES}") from None
+        low, high = JUDAS_BLACKOUT_MINUTES
+        if not low <= blackout <= high:
+            raise ValueError(
+                f"the Judas inner blackout is the corpus band "
+                f"{low}-{high} minutes (J-C5); got {self.blackout_minutes!r}")
+        if blackout >= self.variant.duration_minutes():
+            raise ValueError(
+                f"blackout_minutes={blackout} consumes the whole "
+                f"{self.variant.name!r} window "
+                f"({self.variant.duration_minutes()} min)")
+        object.__setattr__(self, "blackout_minutes", blackout)
+
+    @classmethod
+    def from_variant(cls, name: str, *, blackout_minutes: int) -> "JudasWindow":
+        """Declare one attested variant; no default variant is chosen."""
+        return cls(variant=judas_window_variant(name),
+                   blackout_minutes=blackout_minutes)
+
+    @property
+    def start(self) -> dtime:
+        return self.variant.start
+
+    @property
+    def end(self) -> dtime:
+        return self.variant.end
+
+    @property
+    def zone(self) -> str:
+        return self.variant.zone
+
+    @property
+    def hard_close(self) -> dtime:
+        return self.variant.hard_close
+
+    @property
+    def blackout_end(self) -> dtime:
+        total = (self.start.hour * 60 + self.start.minute
+                 + self.blackout_minutes) % (24 * 60)
+        return dtime(total // 60, total % 60)
+
+    def phase(self, ts, *, market: str = "other",
+              input_tz: str | None = None) -> str:
+        """``outside`` / ``blackout`` / ``open`` at ``ts``."""
+        local = _ny_clock(ts, market, input_tz)
+        if local is None or not self.variant.contains(local):
+            return "outside"
+        start = self.start.hour * 60 + self.start.minute
+        now = local.hour * 60 + local.minute
+        if (now - start) % (24 * 60) < self.blackout_minutes:
+            return "blackout"
+        return "open"
+
+    def allows_entry(self, ts, *, market: str = "other",
+                     input_tz: str | None = None) -> bool:
+        """Whether ``ts`` may enter: open, past the blackout, not a dead zone."""
+        if self.phase(ts, market=market, input_tz=input_tz) != "open":
+            return False
+        if dead_zone_at(ts, market=market, input_tz=input_tz):
+            return False
+        return named_non_window_at(ts, market=market, input_tz=input_tz) is None
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "variant": self.variant.to_public(),
+            "blackout_minutes": int(self.blackout_minutes),
+            "blackout_start": self.start.strftime("%H:%M"),
+            "blackout_end": self.blackout_end.strftime("%H:%M"),
+            "hard_close": self.hard_close.strftime("%H:%M"),
+        }
 
 
 # --------------------------------------------------------------------------- #
