@@ -6,7 +6,7 @@ each can be ablated.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, time as dtime, timedelta
 from enum import Enum, StrEnum
 from types import MappingProxyType
@@ -718,10 +718,23 @@ class DealingRange:
     eq: float
     high_bar: int
     low_bar: int
+    #: P1-12: the DR-02 validity / DR-06 redraw state of this pair.  ``None``
+    #: on a hand-built geometry; a producer always attaches one.
+    range_state: RangeState | None = None
 
     @property
     def span(self) -> float:
         return self.high - self.low
+
+    @property
+    def valid(self) -> bool | None:
+        """DR-02 verdict, or ``None`` when the object carries no state."""
+        return None if self.range_state is None else self.range_state.valid
+
+    @property
+    def redraw_reason(self) -> str:
+        """DR-06/DR-02 reason the range is not current (``""`` when it is)."""
+        return "" if self.range_state is None else self.range_state.redraw_reason
 
     def position(self, price: float) -> float:
         """0 at the low, 1 at the high, clamped."""
@@ -731,10 +744,11 @@ class DealingRange:
 
 
 #: §12 codes named by the range diagnostic.  ``NT_RANGE_INVALID`` covers a
-#: structural range that cannot be used (stale anchors or a degenerate pair);
-#: ``NT_DATA_MISSING`` covers "no confirmed high/low pair at all".  The
-#: prohibited fixed-count fallback keeps its declared name
-#: ``NT_RANGE_TIME_ANCHORED`` so a caller can tell it apart from a missing feed.
+#: structural range that cannot be used (an anchor that never took prior-side
+#: liquidity, stale anchors or a degenerate pair); ``NT_DATA_MISSING`` covers
+#: "no confirmed high/low pair at all".  The prohibited fixed-count fallback
+#: keeps its declared name ``NT_RANGE_TIME_ANCHORED`` so a caller can tell it
+#: apart from a missing feed.
 NT_RANGE_INVALID = "NT_RANGE_INVALID"
 NT_RANGE_TIME_ANCHORED = "NT_RANGE_TIME_ANCHORED"
 NT_DATA_MISSING = "NT_DATA_MISSING"
@@ -743,17 +757,345 @@ NT_DATA_MISSING = "NT_DATA_MISSING"
 #: DR-06 says a range is redrawn, not expired silently).
 RANGE_STALENESS_BARS = 120
 
+# ---------------------------------------------------------------------------
+# P1-12 -- RangeState: the DR-02 validity gate and the DR-06 redraw policy
+# ---------------------------------------------------------------------------
+#: DR-07: the six anchor families.  The corpus declares no precedence between
+#: them, so the class is **recorded for provenance**, never selected by rank.
+#: ``swing_pair`` is the family the structural detector actually builds; the
+#: other five are here so a caller can tag an overridden pair without
+#: inventing a new vocabulary.
+RANGE_ANCHOR_CLASSES: tuple[str, ...] = (
+    "swing_pair",
+    "swing_pair_took_liquidity",
+    "impulse_leg",
+    "cisd_leg",
+    "htf_reference",
+    "ipda_window",
+)
+DEFAULT_RANGE_ANCHOR_CLASS = "swing_pair"
+
+#: DR-06: a new swing extreme, a BOS and a CHoCH end the old range, and the
+#: corpus also attests a **cadence variant** -- each session open plus each
+#: BOS.  The variant is declared, never assumed: under ``on_trigger`` the
+#: session-open event is not a trigger, and under ``session_open_and_bos`` the
+#: new-extreme/CHoCH events are not.
+RANGE_REDRAW_TRIGGERS: tuple[str, ...] = (
+    "new_swing_extreme", "bos", "choch", "session_open",
+)
+RANGE_REDRAW_CADENCES: tuple[str, ...] = (
+    "on_trigger", "session_open_and_bos",
+)
+DEFAULT_RANGE_REDRAW_CADENCE = "on_trigger"
+
+#: Every value ``RangeState.redraw_reason`` may hold.  The first four are the
+#: DR-06 triggers; the last three are the conditions (T11/R35) that make the
+#: current range unusable before any trigger prints.
+RANGE_REDRAW_REASONS: tuple[str, ...] = RANGE_REDRAW_TRIGGERS + (
+    "anchor_no_prior_liquidity", "stale_anchors", "degenerate_anchors",
+)
+
+#: T11: an anchor that never took prior-side liquidity is either refused
+#: (``NT_RANGE_INVALID``) **or** downgraded with a declared flag.  The repo
+#: default is the visible downgrade (the range remains a location object while
+#: ``RangeState.valid`` stays ``False``); a caller that treats an unvalidated
+#: range as untradable passes ``refuse``.  Neither is silent.
+RANGE_VALIDITY_POLICIES: tuple[str, ...] = ("downgrade", "refuse")
+DEFAULT_RANGE_VALIDITY_POLICY = "downgrade"
+
+#: DR-08: the measurement-basis fork (wick extremes / bodies / both).  Swing
+#: anchors are candle wick extremes here, so the gate compares wick prices.
+#: The other readings are named for callers that declare one; the gate itself
+#: invents no body/wick tolerance.
+RANGE_MEASUREMENT_BASES: tuple[str, ...] = ("wick", "body", "both")
+DEFAULT_RANGE_MEASUREMENT_BASIS = "wick"
+
+
+@dataclass(frozen=True, slots=True)
+class RangeState:
+    """The structural range's state: DR-02 validity **and** DR-06 redraw need.
+
+    ``valid`` answers the corpus validity test (R31/DR-02): both anchors took
+    prior-side liquidity.  It is deliberately independent of
+    ``redraw_reason``, which answers "is this still the current range?" -- a
+    DR-02-valid range stops being current when a DR-06 trigger prints, and an
+    invalid pair is flagged even before a trigger does.
+
+    ``redraw_reason`` is empty only while the state is current.  A redraw is a
+    **replacement**: :func:`redraw_range_state` takes both new anchors, never
+    one, and keeps the replaced state in :attr:`previous` (R32/C3).
+    """
+
+    high: float
+    low: float
+    valid: bool
+    redraw_reason: str = ""
+    anchor_class: str = DEFAULT_RANGE_ANCHOR_CLASS
+    code: str = ""
+    known_at: int | None = None
+    as_of: int | None = None
+    cadence: str = DEFAULT_RANGE_REDRAW_CADENCE
+    #: The DR-06 trigger that produced this state ("" for the initial anchor).
+    redraw_trigger: str = ""
+    #: The replacement chain: the state this one ended.  Excluded from equality
+    #: so two states with the same anchors compare equal regardless of history.
+    previous: RangeState | None = field(default=None, repr=False, compare=False)
+    #: The DR-02 evidence, retained so a diagnostic can name the failed anchor.
+    high_took_prior_liquidity: bool = False
+    low_took_prior_liquidity: bool = False
+
+    def __post_init__(self) -> None:
+        validate_range_anchor_class(self.anchor_class)
+        validate_range_redraw_cadence(self.cadence)
+        if self.redraw_reason and self.redraw_reason not in RANGE_REDRAW_REASONS:
+            raise ValueError(
+                f"unknown range redraw_reason {self.redraw_reason!r}; declare "
+                f"one of {RANGE_REDRAW_REASONS} (DR-06/DR-02)")
+        if self.redraw_trigger:
+            validate_range_redraw_trigger(self.redraw_trigger)
+        if self.valid:
+            if self.code:
+                raise ValueError(
+                    f"a valid RangeState carries no refusal code, got "
+                    f"{self.code!r}")
+            if not (self.high_took_prior_liquidity
+                    and self.low_took_prior_liquidity):
+                raise ValueError(
+                    "a valid RangeState must record both anchors as "
+                    "liquidity-taking (DR-02)")
+            if not float(self.high) > float(self.low):
+                raise ValueError(
+                    "a degenerate range (high <= low) cannot be valid (DR-01)")
+        else:
+            if self.code != NT_RANGE_INVALID:
+                raise ValueError(
+                    f"an invalid RangeState must carry {NT_RANGE_INVALID!r}, "
+                    f"got {self.code!r}")
+            if not self.redraw_reason:
+                raise ValueError(
+                    "an invalid RangeState must say why it must be redrawn "
+                    "(DR-06/T11)")
+
+    @property
+    def span(self) -> float:
+        return float(self.high) - float(self.low)
+
+    @property
+    def eq(self) -> float:
+        """DR-03: ``(high + low)/2``."""
+        return (float(self.high) + float(self.low)) / 2.0
+
+    @property
+    def q25(self) -> float:
+        """DR-04: ``(EQ + low)/2``."""
+        return (self.eq + float(self.low)) / 2.0
+
+    @property
+    def q75(self) -> float:
+        """DR-04: ``(high + EQ)/2``."""
+        return (float(self.high) + self.eq) / 2.0
+
+    @property
+    def needs_redraw(self) -> bool:
+        """True when a DR-06 trigger or a failed validity test retired it."""
+        return bool(self.redraw_reason)
+
+    @property
+    def is_current(self) -> bool:
+        return not self.needs_redraw
+
+    def after_trigger(self, trigger: object, *, cadence: str | None = None
+                      ) -> RangeState:
+        """Mark this state for redraw on a declared DR-06 trigger.
+
+        The trigger does **not** repair the range: it only records that the
+        current pair is no longer current.  The replacement is built by
+        :func:`redraw_range_state`.  A trigger that is inactive under the
+        declared cadence is a declaration error, not a silent no-op.
+        """
+        use = validate_range_redraw_cadence(
+            self.cadence if cadence is None else cadence)
+        reason = range_redraw_reason(trigger, cadence=use)
+        if not reason:
+            raise ValueError(
+                f"{trigger!r} is not a DR-06 redraw trigger under cadence "
+                f"{use!r}; the declared triggers are {RANGE_REDRAW_TRIGGERS}")
+        return replace(self, redraw_reason=reason, cadence=use)
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "high": float(self.high), "low": float(self.low),
+            "eq": self.eq, "q25": self.q25, "q75": self.q75,
+            "anchor_class": self.anchor_class,
+            "valid": self.valid, "redraw_reason": self.redraw_reason,
+            "code": self.code, "known_at": self.known_at,
+            "as_of": self.as_of, "cadence": self.cadence,
+            "redraw_trigger": self.redraw_trigger,
+            "high_took_prior_liquidity": self.high_took_prior_liquidity,
+            "low_took_prior_liquidity": self.low_took_prior_liquidity,
+        }
+
+
+def validate_range_anchor_class(value: object) -> str:
+    """Refuse an anchor class outside the DR-07 six (no precedence is added)."""
+    if value not in RANGE_ANCHOR_CLASSES:
+        raise ValueError(
+            f"unknown range anchor class {value!r}; declare one of "
+            f"{RANGE_ANCHOR_CLASSES} (DR-07)")
+    return str(value)
+
+
+def validate_range_redraw_cadence(value: object) -> str:
+    """Refuse an undeclared DR-06 cadence."""
+    if value not in RANGE_REDRAW_CADENCES:
+        raise ValueError(
+            f"unknown range redraw cadence {value!r}; declare one of "
+            f"{RANGE_REDRAW_CADENCES} (DR-06)")
+    return str(value)
+
+
+def validate_range_measurement_basis(value: object) -> str:
+    """Refuse an undeclared DR-08 measurement basis."""
+    if value not in RANGE_MEASUREMENT_BASES:
+        raise ValueError(
+            f"unknown range measurement basis {value!r}; declare one of "
+            f"{RANGE_MEASUREMENT_BASES} (DR-08)")
+    return str(value)
+
+
+def validate_range_validity_policy(value: object) -> str:
+    """T11: the declared fork between a refusal and a flagged downgrade."""
+    if value not in RANGE_VALIDITY_POLICIES:
+        raise ValueError(
+            f"unknown range validity policy {value!r}; declare one of "
+            f"{RANGE_VALIDITY_POLICIES} (T11)")
+    return str(value)
+
+
+def validate_range_redraw_trigger(value: object) -> str:
+    """Refuse a trigger outside the declared DR-06 set."""
+    if value not in RANGE_REDRAW_TRIGGERS:
+        raise ValueError(
+            f"unknown range redraw trigger {value!r}; declare one of "
+            f"{RANGE_REDRAW_TRIGGERS} (DR-06)")
+    return str(value)
+
+
+def range_redraw_reason(trigger: object, *,
+                        cadence: str = DEFAULT_RANGE_REDRAW_CADENCE) -> str:
+    """The DR-06 redraw reason for ``trigger`` under the declared cadence.
+
+    Returns ``""`` when the event is a declared trigger but not active under
+    this cadence (for example a session open under ``on_trigger``).  An
+    unknown trigger raises: an undeclared event is not a redraw rule.
+    """
+    use = validate_range_redraw_cadence(cadence)
+    event = validate_range_redraw_trigger(trigger)
+    if use == "session_open_and_bos":
+        active = ("session_open", "bos")
+    else:
+        active = ("new_swing_extreme", "bos", "choch")
+    return event if event in active else ""
+
+
+def anchor_took_prior_liquidity(price: object, side: str,
+                                prior_prices: Iterable[object]) -> bool:
+    """DR-02 per-anchor test: did this extreme take an old same-side extreme?
+
+    ``side`` is the swing kind (``H``/``L``): the high must trade **above** at
+    least one old high, the low **below** at least one old low.  Equality is a
+    touch, not a take -- the corpus states no penetration tolerance (IP-07's
+    "taken" test is ``missing``), so no number is invented.  No prior
+    reference means the anchor cannot prove validity, so the gate fails closed.
+
+    ``prior_prices`` accepts floats or objects carrying ``.price`` (a swing).
+    """
+    if side not in ("H", "L"):
+        raise ValueError(
+            f"anchor side must be 'H' or 'L', got {side!r} (DR-02)")
+    values: list[float] = []
+    for item in prior_prices:
+        raw = getattr(item, "price", item)
+        values.append(float(raw))
+    if not values:
+        return False
+    anchor = float(price)
+    return min(values) < anchor if side == "H" else max(values) > anchor
+
+
+def build_range_state(high: object, low: object, *, prior_highs: Iterable[object] = (),
+                      prior_lows: Iterable[object] = (),
+                      anchor_class: str = DEFAULT_RANGE_ANCHOR_CLASS,
+                      known_at: int | None = None,
+                      as_of: int | None = None,
+                      cadence: str = DEFAULT_RANGE_REDRAW_CADENCE) -> RangeState:
+    """Evaluate the DR-02 gate and return the typed range state.
+
+    This is the one validity constructor: every range producer passes its two
+    anchors and the same-side liquidity that existed **before** each anchor.
+    It invents no fallback count and no penetration tolerance.  The returned
+    state is invalid (``NT_RANGE_INVALID``) when either anchor failed to take
+    prior liquidity, when the pair is degenerate, or when no prior reference
+    exists at all.
+    """
+    high_f, low_f = float(high), float(low)
+    high_took = anchor_took_prior_liquidity(high_f, "H", prior_highs)
+    low_took = anchor_took_prior_liquidity(low_f, "L", prior_lows)
+    known = None if known_at is None else int(known_at)
+    when = None if as_of is None else int(as_of)
+    if not high_f > low_f:
+        return RangeState(
+            high_f, low_f, False, "degenerate_anchors", anchor_class,
+            NT_RANGE_INVALID, known, when, cadence,
+            high_took_prior_liquidity=high_took,
+            low_took_prior_liquidity=low_took)
+    if not (high_took and low_took):
+        return RangeState(
+            high_f, low_f, False, "anchor_no_prior_liquidity", anchor_class,
+            NT_RANGE_INVALID, known, when, cadence,
+            high_took_prior_liquidity=high_took,
+            low_took_prior_liquidity=low_took)
+    return RangeState(
+        high_f, low_f, True, "", anchor_class, "", known, when, cadence,
+        high_took_prior_liquidity=True, low_took_prior_liquidity=True)
+
+
+def redraw_range_state(previous: RangeState, trigger: object, high: object,
+                       low: object, *, prior_highs: Iterable[object] = (),
+                       prior_lows: Iterable[object] = (),
+                       anchor_class: str | None = None,
+                       known_at: int | None = None,
+                       as_of: int | None = None,
+                       cadence: str | None = None) -> RangeState:
+    """DR-06 replacement: re-anchor **both** extremes on a declared trigger.
+
+    Both ``high`` and ``low`` are required, so a one-sided "repair" cannot be
+    expressed.  The new pair is validated afresh through :func:`build_range_state`
+    and the replaced state is kept in :attr:`RangeState.previous`; the old
+    state is never mutated.
+    """
+    use = previous.cadence if cadence is None else cadence
+    reason = range_redraw_reason(trigger, cadence=use)
+    if not reason:
+        raise ValueError(
+            f"{trigger!r} is not a DR-06 redraw trigger under cadence {use!r}; "
+            f"the declared triggers are {RANGE_REDRAW_TRIGGERS}")
+    state = build_range_state(
+        high, low, prior_highs=prior_highs, prior_lows=prior_lows,
+        anchor_class=(previous.anchor_class if anchor_class is None
+                      else anchor_class),
+        known_at=known_at, as_of=as_of, cadence=use)
+    return replace(state, redraw_trigger=str(trigger), previous=previous)
+
 
 @dataclass(frozen=True, slots=True)
 class RangeDiagnostic:
     """Why a structural dealing range is absent -- never a silent ``None``.
 
     P0-16: a 120-bar staleness (or a missing structural pair) used to make the
-    range vanish with no explanation.  The diagnostic names the cause and the
-    declared lookback so a caller can record ``NT_RANGE_INVALID`` instead of
-    treating an absent range as "no opinion".  P1-12 will promote this into the
-    full ``RangeState {valid, redraw_reason}``; the P0 subset is the reason
-    itself, not the redraw policy.
+    range vanish with no explanation.  P1-12 adds the ``redraw_reason`` so the
+    absence names the DR-06/DR-02 condition that produced it, and carries the
+    evaluated :class:`RangeState` when the validity gate produced the refusal.
     """
 
     code: str
@@ -761,28 +1103,34 @@ class RangeDiagnostic:
     bar: int | None = None
     age_bars: int | None = None
     lookback_bars: int | None = None
+    redraw_reason: str = ""
+    range_state: RangeState | None = field(default=None, compare=False)
 
     def to_public(self) -> dict[str, object]:
         return {
             "code": self.code, "reason": self.reason, "bar": self.bar,
             "age_bars": self.age_bars, "lookback_bars": self.lookback_bars,
+            "redraw_reason": self.redraw_reason,
+            "range_state": (None if self.range_state is None
+                            else self.range_state.to_public()),
         }
 
 
-def _no_pair_diagnostic(t: int, missing: str, lookback_bars: int) -> RangeDiagnostic:
+def no_pair_diagnostic(t: int, missing: str,
+                       lookback_bars: int) -> RangeDiagnostic:
     return RangeDiagnostic(
         NT_DATA_MISSING,
         f"no confirmed swing {missing} at or before bar {t}: a structural "
         "dealing range needs one confirmed high and one confirmed low.  The "
         "fixed-count high/low fallback is refused (DR-00/SN-R07), so no "
         "DEALING_RANGE is emitted "
-        f"(NT_RANGE_TIME_ANCHORED would name that prohibited object).",
+        "(NT_RANGE_TIME_ANCHORED would name that prohibited object).",
         bar=t, lookback_bars=int(lookback_bars),
     )
 
 
-def _stale_diagnostic(t: int, later_conf: int, age: int,
-                      lookback_bars: int) -> RangeDiagnostic:
+def stale_diagnostic(t: int, later_conf: int, age: int,
+                     lookback_bars: int) -> RangeDiagnostic:
     return RangeDiagnostic(
         NT_RANGE_INVALID,
         f"dealing-range anchors are stale: the later anchor confirmed at bar "
@@ -790,16 +1138,39 @@ def _stale_diagnostic(t: int, later_conf: int, age: int,
         "repo staleness cap (§13.3).  Redraw on the DR-06 triggers; the range "
         "is not usable as-is.",
         bar=t, age_bars=age, lookback_bars=int(lookback_bars),
+        redraw_reason="stale_anchors",
     )
 
 
-def _degenerate_diagnostic(t: int, age: int | None,
-                           lookback_bars: int) -> RangeDiagnostic:
+def degenerate_diagnostic(t: int, age: int | None,
+                          lookback_bars: int) -> RangeDiagnostic:
     return RangeDiagnostic(
         NT_RANGE_INVALID,
         f"dealing-range anchors are degenerate: high <= low at bar {t}, so no "
         "range can be measured (DR-01).",
         bar=t, age_bars=age, lookback_bars=int(lookback_bars),
+        redraw_reason="degenerate_anchors",
+    )
+
+
+def invalid_anchor_diagnostic(t: int, state: RangeState, *,
+                              age_bars: int | None = None,
+                              lookback_bars: int | None = None
+                              ) -> RangeDiagnostic:
+    """T11 refusal: the pair failed DR-02, so no usable range is emitted."""
+    failed = []
+    if not state.high_took_prior_liquidity:
+        failed.append("the high did not take a prior high")
+    if not state.low_took_prior_liquidity:
+        failed.append("the low did not take a prior low")
+    detail = "; ".join(failed) or "an anchor did not take prior-side liquidity"
+    return RangeDiagnostic(
+        NT_RANGE_INVALID,
+        f"DR-02 range validity gate failed at bar {t}: {detail}.  Without both "
+        "sweeps the pair is \"just two random pivots\".  Redraw on the DR-06 "
+        "triggers; the range is not usable as-is.",
+        bar=t, age_bars=age_bars, lookback_bars=lookback_bars,
+        redraw_reason=state.redraw_reason, range_state=state,
     )
 
 
@@ -4364,7 +4735,8 @@ def reconcile_daily_bias(readings: Iterable[DailyBiasReading],
 
 
 def dealing_range_state(swings: Iterable, idx: int,
-                        lookback_bars: int = RANGE_STALENESS_BARS
+                        lookback_bars: int = RANGE_STALENESS_BARS, *,
+                        validity: str = DEFAULT_RANGE_VALIDITY_POLICY
                         ) -> tuple[DealingRange | None, RangeDiagnostic | None]:
     """The last confirmed swing high/low pair **and** why it is absent.
 
@@ -4372,8 +4744,17 @@ def dealing_range_state(swings: Iterable, idx: int,
     diagnostic)``.  P0-16: the 120-bar staleness is a repo expiry (§13.3), so
     an absent range is always accompanied by a reason; a caller that only wants
     the value calls :func:`dealing_range`.
+
+    P1-12 applies the DR-02 validity gate: each anchor must have taken
+    prior-side liquidity that printed **before** it.  T11 permits either a
+    refusal or a downgrade with a declared flag, so ``validity`` selects
+    ``"refuse"`` (``NT_RANGE_INVALID``, no range) or ``"downgrade"`` (the range
+    is returned with ``range_state.valid is False``); the repo default is the
+    visible downgrade.
     """
+    policy = validate_range_validity_policy(validity)
     t = int(idx)
+    swings = list(swings)
     highs = [s for s in swings if getattr(s, "kind", "") == "H"
              and int(getattr(s, "confirmed_at", 0)) <= t]
     lows = [s for s in swings if getattr(s, "kind", "") == "L"
@@ -4381,20 +4762,36 @@ def dealing_range_state(swings: Iterable, idx: int,
     if not highs or not lows:
         missing = ("high or low" if not highs and not lows
                    else "high" if not highs else "low")
-        return None, _no_pair_diagnostic(t, missing, lookback_bars)
+        return None, no_pair_diagnostic(t, missing, lookback_bars)
     h, l = highs[-1], lows[-1]
     h_conf = int(getattr(h, "confirmed_at", h.index))
     l_conf = int(getattr(l, "confirmed_at", l.index))
     age = max(t - h_conf, t - l_conf)
     if age > int(lookback_bars):
-        return None, _stale_diagnostic(t, max(h_conf, l_conf), age,
-                                       lookback_bars)
+        return None, stale_diagnostic(t, max(h_conf, l_conf), age,
+                                      lookback_bars)
     high = max(float(h.price), float(l.price))
     low = min(float(h.price), float(l.price))
     if high <= low:
-        return None, _degenerate_diagnostic(t, age, lookback_bars)
+        return None, degenerate_diagnostic(t, age, lookback_bars)
+    # DR-02: the prior-side liquidity each anchor must have taken.  Only swings
+    # confirmed at or before the anchor's own bar count: a later print is not
+    # knowable when the anchor formed (CB-07).
+    h_index, l_index = int(h.index), int(l.index)
+    prior_highs = [s for s in highs
+                   if int(s.index) < h_index
+                   and int(getattr(s, "confirmed_at", s.index)) <= h_index]
+    prior_lows = [s for s in lows
+                  if int(s.index) < l_index
+                  and int(getattr(s, "confirmed_at", s.index)) <= l_index]
+    state = build_range_state(
+        high, low, prior_highs=prior_highs, prior_lows=prior_lows,
+        known_at=max(h_conf, l_conf), as_of=t)
+    if not state.valid and policy == "refuse":
+        return None, invalid_anchor_diagnostic(
+            t, state, age_bars=age, lookback_bars=lookback_bars)
     return DealingRange(high, low, (high + low) / 2,
-                        int(h.index), int(l.index)), None
+                        h_index, l_index, range_state=state), None
 
 
 def dealing_range(swings: Iterable, idx: int,
@@ -4455,27 +4852,46 @@ class SwingIndex:
         return serialize_bias(BiasDirection.NEUTRAL)
 
     def dealing_range_state(self, t: int,
-                            lookback_bars: int = RANGE_STALENESS_BARS
+                            lookback_bars: int = RANGE_STALENESS_BARS, *,
+                            validity: str = DEFAULT_RANGE_VALIDITY_POLICY
                             ) -> tuple[DealingRange | None, RangeDiagnostic | None]:
-        """Binary-search twin of :func:`dealing_range_state` (same reasons)."""
+        """Binary-search twin of :func:`dealing_range_state` (same DR-02 gate)."""
+        policy = validate_range_validity_policy(validity)
         t = int(t)
         nh, nl = self._n("h", t), self._n("l", t)
         if nh == 0 or nl == 0:
             missing = ("high or low" if nh == 0 and nl == 0
                        else "high" if nh == 0 else "low")
-            return None, _no_pair_diagnostic(t, missing, lookback_bars)
+            return None, no_pair_diagnostic(t, missing, lookback_bars)
         hi, li = nh - 1, nl - 1
         h_conf, l_conf = int(self.h_conf[hi]), int(self.l_conf[li])
         age = max(t - h_conf, t - l_conf)
         if age > int(lookback_bars):
-            return None, _stale_diagnostic(t, max(h_conf, l_conf), age,
-                                           lookback_bars)
+            return None, stale_diagnostic(t, max(h_conf, l_conf), age,
+                                          lookback_bars)
         high = max(float(self.h_price[hi]), float(self.l_price[li]))
         low = min(float(self.h_price[hi]), float(self.l_price[li]))
         if high <= low:
-            return None, _degenerate_diagnostic(t, age, lookback_bars)
+            return None, degenerate_diagnostic(t, age, lookback_bars)
+        # DR-02 prior-side liquidity: every same-side swing printed before the
+        # anchor, known on the anchor's own bar (CB-07).
+        h_pos = int(np.searchsorted(self.h_index, int(self.h_index[hi]),
+                                    side="left"))
+        l_pos = int(np.searchsorted(self.l_index, int(self.l_index[li]),
+                                    side="left"))
+        h_anchor, l_anchor = int(self.h_index[hi]), int(self.l_index[li])
+        prior_highs = self.h_price[:h_pos][self.h_conf[:h_pos] <= h_anchor]
+        prior_lows = self.l_price[:l_pos][self.l_conf[:l_pos] <= l_anchor]
+        state = build_range_state(
+            high, low, prior_highs=prior_highs.tolist(),
+            prior_lows=prior_lows.tolist(),
+            known_at=max(h_conf, l_conf), as_of=t)
+        if not state.valid and policy == "refuse":
+            return None, invalid_anchor_diagnostic(
+                t, state, age_bars=age, lookback_bars=lookback_bars)
         return DealingRange(high, low, (high + low) / 2,
-                            int(self.h_index[hi]), int(self.l_index[li])), None
+                            int(self.h_index[hi]), int(self.l_index[li]),
+                            range_state=state), None
 
     def dealing_range(self, t: int,
                       lookback_bars: int = RANGE_STALENESS_BARS) -> DealingRange | None:

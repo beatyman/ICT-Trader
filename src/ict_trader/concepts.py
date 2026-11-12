@@ -45,12 +45,19 @@ from matplotlib.patches import Rectangle
 from .cisd import CISD, CISDConfig, detect_cisd
 from .context import (
     ATR_PERIOD,
+    DEFAULT_RANGE_VALIDITY_POLICY,
     NT_DATA_MISSING,
-    NT_RANGE_INVALID,
     RANGE_STALENESS_BARS,
     RangeDiagnostic,
+    RangeState,
     atr,
+    build_range_state,
+    degenerate_diagnostic,
     in_session_at,
+    invalid_anchor_diagnostic,
+    no_pair_diagnostic,
+    stale_diagnostic,
+    validate_range_validity_policy,
 )
 from .enhancements import SMT, SessionLevel, detect_htf_cisds, detect_session_levels, detect_smt
 from .pd_arrays import (BREAKER_RETEST_WINDOW, DEFAULT_BREAKER_FAILURE,
@@ -1035,10 +1042,13 @@ class DealingRange:
     left: int
     right: int
     #: LQ-06 state of the level map object.  A structural range is emitted
-    #: ``intact``; range validity/redraw (``RangeState {valid, redraw_reason}``)
-    #: is a separate object owned by P1-12, so no producer sets ``swept`` or
-    #: ``broken`` here yet.
+    #: ``intact``; range validity/redraw is the separate
+    #: :class:`~ict_trader.context.RangeState` attached below (P1-12).  The two
+    #: are independent: ``intact`` describes the level lifecycle, ``range_state``
+    #: answers DR-02 (valid) and DR-06 (current).
     state: ArrayState = "intact"
+    #: P1-12: the DR-02 validity / DR-06 redraw state of this pair.
+    range_state: RangeState | None = None
 
     def __post_init__(self) -> None:
         validate_array_state(self.state)
@@ -1069,10 +1079,23 @@ class DealingRange:
         """
         return False
 
+    @property
+    def valid(self) -> bool | None:
+        """DR-02 verdict, or ``None`` when the object carries no state."""
+        return None if self.range_state is None else self.range_state.valid
+
+    @property
+    def redraw_reason(self) -> str:
+        """DR-06/DR-02 reason the range is not current (``""`` when it is)."""
+        return "" if self.range_state is None else self.range_state.redraw_reason
+
 
 #: The declared IPDA window classes (IP-01/DR-00).  A fixed count is legal
 #: **only** for this object, never for a structural dealing range.
 IPDA_WINDOWS: tuple[int, ...] = (20, 40, 60)
+
+#: IP-05: each window contributes its two extremes and its midpoint.
+IPDA_LEVEL_KINDS: tuple[str, ...] = ("extreme", "midpoint")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1083,6 +1106,9 @@ class IPDAWindow:
     candles of the window's own timeframe, with ``CE_N = (H_N + L_N)/2`` (IP-01).
     DR-00: merging this object with the structural range makes one of the two
     anchoring prohibitions unenforceable, so the two are separate types.
+
+    The window is the **only** object a fixed count may anchor, and even here
+    the count is restricted to the corpus set :data:`IPDA_WINDOWS`.
     """
 
     window: int
@@ -1092,6 +1118,16 @@ class IPDAWindow:
     right: int
     timeframe: str = "1d"
 
+    def __post_init__(self) -> None:
+        if int(self.window) not in IPDA_WINDOWS:
+            raise ValueError(
+                f"IPDA windows are {IPDA_WINDOWS}; got {self.window!r} "
+                f"(IP-01/DR-00)")
+        if not float(self.high) > float(self.low):
+            raise ValueError(
+                f"an IPDA window needs high > low, got {self.high!r}/"
+                f"{self.low!r} (IP-01)")
+
     @property
     def ce(self) -> float:
         """``EQ_N`` -- one midpoint per window (IP-01), not a structural EQ."""
@@ -1100,6 +1136,153 @@ class IPDAWindow:
     @property
     def span(self) -> float:
         return float(self.high) - float(self.low)
+
+    def position_pct(self, price: object) -> float:
+        """IP-02: ``pos%(N) = (price - L_N)/(H_N - L_N) x 100``.
+
+        The value is not clamped: a price outside the window is a real
+        ``> 100``/``< 0`` reading, not a 0/100 reading.
+        """
+        return ((float(price) - float(self.low)) / self.span) * 100.0
+
+    def half(self, price: object) -> str | None:
+        """IP-02: ``> 50`` premium, ``< 50`` discount, ``== 50`` undefined.
+
+        Every source leaves the exact midpoint undefined, so ``None`` is
+        returned rather than silently folding at-EQ into a half (PD-02's
+        at-EQ predicate is a separate declared fork).
+        """
+        position = self.position_pct(price)
+        if position > 50.0:
+            return "premium"
+        if position < 50.0:
+            return "discount"
+        return None
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "window": int(self.window), "high": float(self.high),
+            "low": float(self.low), "ce": self.ce, "span": self.span,
+            "known_at": int(self.known_at), "right": int(self.right),
+            "timeframe": self.timeframe,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class IPDALevel:
+    """One of the up-to-nine IPDA levels: an extreme or a window midpoint."""
+
+    kind: str
+    window: int
+    price: float
+    label: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in IPDA_LEVEL_KINDS:
+            raise ValueError(
+                f"IPDA level kinds are {IPDA_LEVEL_KINDS}; got {self.kind!r} "
+                f"(IP-05)")
+        if int(self.window) not in IPDA_WINDOWS:
+            raise ValueError(
+                f"IPDA windows are {IPDA_WINDOWS}; got {self.window!r} "
+                f"(IP-01/DR-00)")
+
+    def to_public(self) -> dict[str, object]:
+        return {"kind": self.kind, "window": int(self.window),
+                "price": float(self.price), "label": self.label}
+
+
+@dataclass(frozen=True, slots=True)
+class IPDAWindowSet:
+    """The ``20/40/60`` IPDA windows and their up-to-nine levels (IP-05).
+
+    ``extremes`` returns the six window extremes (``H_N``/``L_N`` per window);
+    ``midpoints`` returns the three ``EQ_N`` values.  Overlap between windows
+    is expected and is **not** de-duplicated (IP-05): two windows may share a
+    high, and collapsing them would hide which window supplied the level.
+    """
+
+    windows: tuple[IPDAWindow, ...]
+
+    def __post_init__(self) -> None:
+        if not self.windows:
+            raise ValueError("an IPDAWindowSet needs at least one window")
+        if any(not isinstance(window, IPDAWindow) for window in self.windows):
+            raise TypeError(
+                "IPDAWindowSet.windows must contain IPDAWindow objects")
+        numbers = [int(window.window) for window in self.windows]
+        if len(set(numbers)) != len(numbers):
+            raise ValueError(
+                f"duplicate IPDA windows in {numbers!r}; each window is "
+                f"declared once (IP-01)")
+        if numbers != sorted(numbers):
+            raise ValueError(
+                f"IPDA windows must be ordered ascending, got {numbers!r} "
+                f"(IP-01)")
+
+    @property
+    def numbers(self) -> tuple[int, ...]:
+        return tuple(int(window.window) for window in self.windows)
+
+    def by_n(self, window: object) -> IPDAWindow:
+        """The declared window ``N``; an absent N is an error, not a guess."""
+        for candidate in self.windows:
+            if int(candidate.window) == int(window):
+                return candidate
+        raise ValueError(
+            f"window {window!r} is not in this set {self.numbers}; build it "
+            f"before reading its levels (IP-01)")
+
+    @property
+    def extremes(self) -> tuple[IPDALevel, ...]:
+        """The six window extremes: ``H_N`` then ``L_N`` per window (IP-05)."""
+        out: list[IPDALevel] = []
+        for window in self.windows:
+            n = int(window.window)
+            out.append(IPDALevel("extreme", n, float(window.high), f"H_{n}"))
+            out.append(IPDALevel("extreme", n, float(window.low), f"L_{n}"))
+        return tuple(out)
+
+    @property
+    def midpoints(self) -> tuple[IPDALevel, ...]:
+        """The three ``EQ_N`` midpoints, one per window (IP-01/IP-05)."""
+        return tuple(
+            IPDALevel("midpoint", int(window.window), float(window.ce),
+                      f"EQ_{int(window.window)}")
+            for window in self.windows)
+
+    def levels(self) -> tuple[IPDALevel, ...]:
+        """Six extremes + three midpoints = up to nine levels (IP-05)."""
+        return self.extremes + self.midpoints
+
+    def position_pct(self, price: object, window: object) -> float:
+        """IP-02 read against the declared window ``N``."""
+        return self.by_n(window).position_pct(price)
+
+    def half(self, price: object, window: object) -> str | None:
+        """IP-02 half read against the declared window ``N``."""
+        return self.by_n(window).half(price)
+
+    def escalate(self, window: object, *, usable_objective_remains: bool) -> int:
+        """IP-03: ``20 -> 40 -> 60`` only when no usable objective remains.
+
+        The caller supplies the objective test (``missing`` in the corpus); the
+        window arithmetic never decides it.  ``60`` is the ceiling.
+        """
+        current = int(window)
+        if current not in IPDA_WINDOWS:
+            raise ValueError(
+                f"IPDA windows are {IPDA_WINDOWS}; got {current!r} (IP-03)")
+        if usable_objective_remains:
+            return current
+        index = IPDA_WINDOWS.index(current)
+        return int(IPDA_WINDOWS[min(index + 1, len(IPDA_WINDOWS) - 1)])
+
+    def to_public(self) -> dict[str, object]:
+        return {
+            "windows": [window.to_public() for window in self.windows],
+            "levels": [level.to_public() for level in self.levels()],
+        }
 
 
 #: §7.1: the "50%" formula is shared but the object is not.  Each producer
@@ -1151,6 +1334,9 @@ class ICTResult:
     cisds: list[CISD] = field(default_factory=list)
     htf_cisds: list[CISD] = field(default_factory=list)
     dealing_range: DealingRange | None = None
+    #: P1-12: the DR-02 validity / DR-06 redraw state of ``dealing_range``.
+    #: ``None`` only when no range was constructed.
+    range_state: RangeState | None = None
     #: Why ``dealing_range`` is absent (``NT_RANGE_INVALID`` / ``NT_DATA_MISSING``).
     #: P0-16: absence carries a reason instead of vanishing silently.
     dealing_range_diagnostic: RangeDiagnostic | None = None
@@ -1519,10 +1705,9 @@ def detect_ipda_window(frame: pd.DataFrame, window: int = 40, *,
 
     ``frame`` must already be the window's own timeframe (daily for the
     ``20/40/60`` set); ``last_closed`` is the index of the last bar whose close
-    is known.  A fixed count is legal here and nowhere else, so this object is
-    an :class:`IPDAWindow`, never a :class:`DealingRange`.  Wiring the window
-    into ``analyze``/section 7.3 is P1-12; the P0 subset is the distinct type
-    and the refusal to anchor a structural range with it.
+    is known, so a caller that holds a live bar passes ``n - 2`` (IP "exclude
+    the live bar").  A fixed count is legal here and nowhere else, so this
+    object is an :class:`IPDAWindow`, never a :class:`DealingRange`.
     """
     if int(window) not in IPDA_WINDOWS:
         raise ValueError(
@@ -1541,9 +1726,42 @@ def detect_ipda_window(frame: pd.DataFrame, window: int = 40, *,
     return IPDAWindow(int(window), high, low, end, end, timeframe)
 
 
+def detect_ipda_windows(frame: pd.DataFrame, windows: Iterable[int] = IPDA_WINDOWS,
+                        *, timeframe: str = "1d",
+                        last_closed: int | None = None
+                        ) -> IPDAWindowSet | None:
+    """Build the declared IPDA window set (``20/40/60`` by default, IP-01).
+
+    Every requested window must be present in the supplied (already daily)
+    frame; a missing window returns ``None`` rather than silently clipping it
+    to the available bars, because the set is then incomplete for IP-03/IP-05.
+    """
+    requested = tuple(int(window) for window in windows)
+    if not requested:
+        raise ValueError("at least one IPDA window must be requested (IP-01)")
+    if len(set(requested)) != len(requested):
+        raise ValueError(
+            f"duplicate IPDA windows in {requested!r}; each window is declared "
+            f"once (IP-01)")
+    for window in requested:
+        if window not in IPDA_WINDOWS:
+            raise ValueError(
+                f"IPDA windows are {IPDA_WINDOWS}; got {window!r} "
+                f"(IP-01/DR-00)")
+    built: list[IPDAWindow] = []
+    for window in sorted(requested):
+        value = detect_ipda_window(frame, window, timeframe=timeframe,
+                                   last_closed=last_closed)
+        if value is None:
+            return None
+        built.append(value)
+    return IPDAWindowSet(tuple(built))
+
+
 def detect_dealing_range_state(df: pd.DataFrame,
                                swings: list[Swing] | None = None, *,
-                               swing_len: int = 5
+                               swing_len: int = 5,
+                               validity: str = DEFAULT_RANGE_VALIDITY_POLICY
                                ) -> tuple[DealingRange | None, RangeDiagnostic | None]:
     """Structural dealing range **and** the reason when there is none.
 
@@ -1555,7 +1773,14 @@ def detect_dealing_range_state(df: pd.DataFrame,
     ``RANGE_STALENESS_BARS`` (120) repo cap as the context read applies, so a
     stale pair is a diagnosed absence, not a silent ``None``.  The value-only
     twin is :func:`detect_dealing_range`.
+
+    P1-12 applies the DR-02 gate: each anchor must have taken prior-side
+    liquidity that printed before it.  Under T11 ``validity="refuse"`` returns
+    ``(None, NT_RANGE_INVALID diagnostic)``; ``"downgrade"`` (the repo default)
+    returns the range with ``range_state.valid is False`` so a caller cannot
+    mistake the unvalidated pair for a valid one.
     """
+    policy = validate_range_validity_policy(validity)
     n = len(df)
     last_t = n - 1
     if n < 20:
@@ -1576,39 +1801,36 @@ def detect_dealing_range_state(df: pd.DataFrame,
     if not highs or not lows:
         missing = ("high or low" if not highs and not lows
                    else "high" if not highs else "low")
-        return None, RangeDiagnostic(
-            NT_DATA_MISSING,
-            f"no confirmed swing {missing} at or before bar {last_t}: a "
-            "structural dealing range needs one confirmed high and one "
-            "confirmed low.  The fixed-count 40-bar high/low fallback is "
-            "refused (DR-00/SN-R07), so no DEALING_RANGE is emitted "
-            "(NT_RANGE_TIME_ANCHORED would name that prohibited object).",
-            bar=last_t,
-        )
+        return None, no_pair_diagnostic(last_t, missing, RANGE_STALENESS_BARS)
     h, l = highs[-1], lows[-1]
+    h_index, l_index = int(h.index), int(l.index)
     known_at = max(int(getattr(h, "confirmed_at", h.index)),
                    int(getattr(l, "confirmed_at", l.index)))
     age = last_t - known_at
     if age > RANGE_STALENESS_BARS:
-        return None, RangeDiagnostic(
-            NT_RANGE_INVALID,
-            f"dealing-range anchors are stale: the later anchor confirmed at "
-            f"bar {known_at}, {age} bars before bar {last_t} > "
-            f"{RANGE_STALENESS_BARS}-bar repo staleness cap (§13.3).  Redraw "
-            "on the DR-06 triggers; the range is not usable as-is.",
-            bar=last_t, age_bars=age, lookback_bars=RANGE_STALENESS_BARS,
-        )
+        return None, stale_diagnostic(last_t, known_at, age,
+                                      RANGE_STALENESS_BARS)
     top = max(float(h.price), float(l.price))
     bottom = min(float(h.price), float(l.price))
     if top <= bottom:
-        return None, RangeDiagnostic(
-            NT_RANGE_INVALID,
-            f"dealing-range anchors are degenerate: top <= bottom at bar "
-            f"{last_t}, so no range can be measured (DR-01).",
-            bar=last_t, age_bars=age,
-        )
+        return None, degenerate_diagnostic(last_t, age, RANGE_STALENESS_BARS)
+    # DR-02: prior-side liquidity must have printed before the anchor and be
+    # knowable on the anchor's own bar (CB-07).
+    prior_highs = [s for s in highs
+                   if int(s.index) < h_index
+                   and int(getattr(s, "confirmed_at", s.index)) <= h_index]
+    prior_lows = [s for s in lows
+                  if int(s.index) < l_index
+                  and int(getattr(s, "confirmed_at", s.index)) <= l_index]
+    state = build_range_state(
+        top, bottom, prior_highs=prior_highs, prior_lows=prior_lows,
+        known_at=known_at, as_of=last_t)
+    if not state.valid and policy == "refuse":
+        return None, invalid_anchor_diagnostic(
+            last_t, state, age_bars=age, lookback_bars=RANGE_STALENESS_BARS)
     return DealingRange(top, bottom, known_at,
-                        min(int(h.index), int(l.index)), last_t), None
+                        min(h_index, l_index), last_t,
+                        range_state=state), None
 
 
 def detect_dealing_range(df: pd.DataFrame, swings: list[Swing] | None = None,
@@ -2539,6 +2761,7 @@ def analyze(df: pd.DataFrame, config: ICTConfig | None = None,
         pd_arrays=pd_arrays,
         liquidity=liq, gaps=gaps, killzones=kz, fib=fib, trend=trend,
         cisds=cisds, htf_cisds=htf_cisds, dealing_range=dealing,
+        range_state=(dealing.range_state if dealing is not None else None),
         dealing_range_diagnostic=dealing_diagnostic,
         sessions=sessions, smts=smts,
         key_levels=key_levels, sweeps=sweeps, config=cfg,

@@ -70,6 +70,7 @@ from ...concepts import (
     scan_arrays,
     validate_array_state,
 )
+from ...context import RangeState
 from ...enhancements import detect_session_levels
 from ...pd_arrays import detect_breakers
 from ...sweeps import detect_key_levels, detect_sweeps
@@ -118,6 +119,10 @@ class ICTArray:
     removal_mode: str = ""
     #: AS-09: reference geometry only; never an entry array.
     reference_only: bool = False
+    #: P1-12: the DR-02 validity / DR-06 redraw state of a ``DEALING_RANGE``
+    #: array.  The lifecycle fields above describe the level; this object
+    #: answers "is the pair valid?" and "is it still current?" separately.
+    range_state: RangeState | None = None
 
     def __post_init__(self) -> None:
         validate_array_state(self.state)
@@ -174,6 +179,8 @@ class ICTArray:
             "failure_bar": self.failure_bar,
             "removal_mode": self.removal_mode,
             "reference_only": self.reference_only,
+            "range_state": (None if self.range_state is None
+                            else self.range_state.to_public()),
         }
 
 
@@ -263,7 +270,8 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str, *,
             retest_at: int | None = None,
             failure_bar: int | None = None,
             removal_mode: str = "",
-            reference_only: bool = False) -> None:
+            reference_only: bool = False,
+            range_state: RangeState | None = None) -> None:
         nonlocal serial
         serial += 1
         upper, lower = float(upper), float(lower)
@@ -306,7 +314,7 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str, *,
             ob_body_mean=ob_body_mean,
             side=side, side_mode=tag_mode, retest_at=retest_at,
             failure_bar=failure_bar, removal_mode=removal_mode,
-            reference_only=reference_only,
+            reference_only=reference_only, range_state=range_state,
         ))
 
     for f in fvgs:
@@ -365,7 +373,8 @@ def build_ict_arrays(frame: pd.DataFrame, symbol: str, interval: str, *,
         add("DEALING_RANGE", "neutral", dealing.top, dealing.bottom,
             ms[dealing.known_at], known_at=ms[dealing.known_at],
             state=dealing.state,
-            range_equilibrium=RangeEquilibrium(dealing.ce))
+            range_equilibrium=RangeEquilibrium(dealing.ce),
+            range_state=dealing.range_state)
 
     return arrays
 
